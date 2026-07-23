@@ -37,8 +37,15 @@ voicemail drops, vendor management, revenue projection, and a full admin panel.
 1. Create a project at [supabase.com](https://supabase.com).
 2. In the SQL Editor, run `supabase/migrations/0001_init.sql`. It creates every
    table, the storage buckets, seed statuses/stages, triggers, and RLS.
-3. Copy Project URL, `anon` key, and `service_role` key into `.env.local`
-   (start from `.env.local.example`).
+3. Copy the Project URL and API keys into `.env.local` (start from
+   `.env.local.example`). Mind the key types: the **publishable** key
+   (`sb_publishable_…`, or legacy `anon`) goes in
+   `NEXT_PUBLIC_SUPABASE_ANON_KEY`; the **secret** key (`sb_secret_…`, or
+   legacy `service_role`) goes in `SUPABASE_SERVICE_ROLE_KEY` only. Putting a
+   secret key in the `NEXT_PUBLIC_` var makes every page fail with
+   *"Forbidden use of secret API key in browser"*. After editing
+   `.env.local`, restart `npm run dev` — `NEXT_PUBLIC_*` values are baked in
+   at build time.
 4. Register through the app's landing page — **the first account to register
    automatically becomes the admin**. Everyone after that is a worker until
    promoted under Admin → Users.
