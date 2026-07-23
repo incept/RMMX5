@@ -13,7 +13,12 @@
 --     server-side with the service-role key.
 -- ============================================================================
 
-create extension if not exists pg_trgm;
+-- NOTE: no pg_trgm here. Contact search uses plain ILIKE + btree indexes so
+-- this schema applies cleanly on Supabase, where the pg_trgm trigram operator
+-- class lives in the `extensions` schema and isn't always on the SQL editor's
+-- search_path (which fails the migration on the contacts indexes). If contact
+-- search gets slow on very large datasets, enable pg_trgm from the Supabase
+-- dashboard (Database → Extensions) and add GIN trigram indexes then.
 
 -- ---------------------------------------------------------------------------
 -- Profiles & roles
@@ -231,8 +236,8 @@ create table public.contacts (
   updated_at timestamptz not null default now()
 );
 
-create index contacts_name_trgm on public.contacts using gin (name gin_trgm_ops);
-create index contacts_email_trgm on public.contacts using gin (coalesce(email, '') gin_trgm_ops);
+create index contacts_name_idx on public.contacts (name);
+create index contacts_email_idx on public.contacts (email);
 create index contacts_status_idx on public.contacts (status_id);
 create index contacts_created_idx on public.contacts (created_at desc);
 
