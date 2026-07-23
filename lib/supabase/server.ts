@@ -2,13 +2,19 @@ import { createServerClient } from '@supabase/ssr';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { cookies } from 'next/headers';
 
-// Prefer the SB_* names (see lib/supabase/client.ts for why), falling back to
-// the standard SUPABASE_* names for local dev.
+// Server-side env reads are live (never inlined into the public bundle), so
+// fallback chains are safe here. Preferred names first — the hosting panel
+// only applies newly CREATED variables to builds, so each poisoned name got
+// retired rather than edited (see lib/supabase/client.ts).
 const url = () => process.env.NEXT_PUBLIC_SB_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const anonKey = () =>
-  process.env.NEXT_PUBLIC_SB_ANON_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  process.env.NEXT_PUBLIC_SB_PUBLISHABLE_KEY ??
+  process.env.NEXT_PUBLIC_SB_ANON_KEY ??
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const serviceKey = () =>
-  process.env.SB_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY!;
+  process.env.SB_SECRET_KEY ??
+  process.env.SB_SERVICE_ROLE_KEY ??
+  process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
 /**
  * Supabase client for Server Components, Server Actions, and Route Handlers.
