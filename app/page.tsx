@@ -57,14 +57,9 @@ export default function LandingPage() {
           <h1 className="max-w-md text-4xl leading-tight font-semibold">
             Crisis Management CRM
           </h1>
-          <p className="mt-4 max-w-md text-gray-400">
-            Reputation scoring, link tracking &amp; removal pipeline, email and SMS marketing,
-            voicemail drops, and revenue projection — one spreadsheet-fast workspace.
-          </p>
         </div>
-        <div className="text-xs text-gray-500">
-          Supabase-backed · BrightData · Emailit · TextLink · Stripe · Fluent Forms
-        </div>
+        <div />
+
       </div>
 
       {/* Auth side */}
