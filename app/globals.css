@@ -1,0 +1,80 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-brand-50: #eef2ff;
+  --color-brand-100: #e0e7ff;
+  --color-brand-500: #6366f1;
+  --color-brand-600: #4f46e5;
+  --color-brand-700: #4338ca;
+}
+
+body {
+  @apply bg-gray-50 text-gray-900 antialiased;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif;
+}
+
+/* ---- Reusable primitives (Airtable/Monday-ish, light and dense) ---- */
+
+.btn {
+  @apply inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 shadow-xs transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+.btn-primary {
+  @apply border-transparent bg-brand-600 text-white hover:bg-brand-700;
+}
+
+.btn-danger {
+  @apply border-transparent bg-red-600 text-white hover:bg-red-700;
+}
+
+.btn-ghost {
+  @apply border-transparent bg-transparent shadow-none hover:bg-gray-100;
+}
+
+.input {
+  @apply w-full rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder-gray-400 outline-none transition-colors focus:border-brand-500 focus:ring-2 focus:ring-brand-100;
+}
+
+.label {
+  @apply mb-1 block text-xs font-semibold tracking-wide text-gray-500 uppercase;
+}
+
+.card {
+  @apply rounded-xl border border-gray-200 bg-white p-4 shadow-xs;
+}
+
+.panel-tab {
+  @apply cursor-pointer border-b-2 border-transparent px-3 py-2 text-sm font-medium text-gray-500 hover:text-gray-800;
+}
+
+.panel-tab-active {
+  @apply border-brand-600 text-brand-700;
+}
+
+/* Spreadsheet grid */
+.grid-th {
+  @apply sticky top-0 z-10 border-b border-gray-200 bg-gray-50 px-3 py-2 text-left text-xs font-semibold tracking-wide whitespace-nowrap text-gray-500 uppercase select-none;
+}
+
+.grid-td {
+  @apply border-b border-gray-100 px-3 py-1.5 text-sm whitespace-nowrap text-gray-800;
+}
+
+.grid-row {
+  @apply cursor-pointer transition-colors hover:bg-brand-50/40;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

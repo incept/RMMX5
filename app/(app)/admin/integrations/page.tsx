@@ -1,0 +1,179 @@
+'use client';
+
+import { useCallback, useEffect, useState } from 'react';
+
+interface SectionField {
+  key: string;
+  label: string;
+  secret?: boolean;
+  placeholder?: string;
+}
+
+const SECTIONS: { key: string; title: string; hint: string; fields: SectionField[] }[] = [
+  {
+    key: 'brightdata',
+    title: 'BrightData',
+    hint: 'SERP zone powers the automatic Google search on lead intake and the manual "Run Google search". The proxy zone is your backconnect rotating proxy for manual web searches outside the app.',
+    fields: [
+      { key: 'api_key', label: 'API key', secret: true },
+      { key: 'serp_zone', label: 'SERP zone name', placeholder: 'serp_api1' },
+      { key: 'proxy_zone', label: 'Proxy zone name (rotating/backconnect)', placeholder: 'residential_proxy1' },
+      { key: 'proxy_username', label: 'Proxy username', placeholder: 'brd-customer-XXXX-zone-YYYY' },
+      { key: 'proxy_password', label: 'Proxy password', secret: true },
+    ],
+  },
+  {
+    key: 'emailit',
+    title: 'Emailit',
+    hint: 'Fallback email sender (used when no SMTP account is configured) and the sender for client notifications.',
+    fields: [
+      { key: 'api_key', label: 'API key', secret: true },
+      { key: 'from_address', label: 'From address', placeholder: 'alerts@yourdomain.com' },
+      { key: 'from_name', label: 'From name', placeholder: 'RMMX5' },
+    ],
+  },
+  {
+    key: 'textlink',
+    title: 'TextLink SMS',
+    hint: 'SMS campaigns and SMS notifications. Requires a paired Android device with an active SIM in your TextLink dashboard.',
+    fields: [
+      { key: 'api_key', label: 'API key', secret: true },
+      { key: 'sim_card_id', label: 'SIM card / device ID (optional)' },
+    ],
+  },
+  {
+    key: 'stripe',
+    title: 'Stripe',
+    hint: 'Read-only revenue reporting on the dashboard. Use a restricted key with read access to Balance Transactions.',
+    fields: [{ key: 'secret_key', label: 'Secret key', secret: true }],
+  },
+  {
+    key: 'fluent_forms',
+    title: 'Fluent Forms',
+    hint: 'Shared secret for all inbound webhooks (lead capture, inbound email, Emailit events).',
+    fields: [{ key: 'webhook_secret', label: 'Webhook secret', secret: true }],
+  },
+  {
+    key: 'voicemail',
+    title: 'Voicemail provider',
+    hint: 'Any ringless-voicemail provider that accepts JSON POST { phone, audio_url, caller_id } with a Bearer key.',
+    fields: [
+      { key: 'provider_url', label: 'Provider endpoint URL', placeholder: 'https://api.dropcowboy.com/...' },
+      { key: 'api_key', label: 'API key', secret: true },
+      { key: 'caller_id', label: 'Caller ID number' },
+    ],
+  },
+  {
+    key: 'search',
+    title: 'Auto-search settings',
+    hint: 'Tuning for the automatic Google search that runs on lead import.',
+    fields: [
+      { key: 'country', label: 'Country code', placeholder: 'us' },
+      { key: 'num_results', label: 'Results to fetch', placeholder: '20' },
+      { key: 'extra_terms', label: 'Extra search terms', placeholder: 'arrest OR complaint OR review' },
+    ],
+  },
+  {
+    key: 'defaults',
+    title: 'Defaults',
+    hint: 'App-wide defaults.',
+    fields: [{ key: 'service_days', label: 'Default client service period (days)', placeholder: '90' }],
+  },
+];
+
+/** Admin: API keys & app configuration (stored in the settings table, admin-only). */
+export default function IntegrationsPage() {
+  const [settings, setSettings] = useState<Record<string, Record<string, any>>>({});
+  const [savedKey, setSavedKey] = useState<string | null>(null);
+  const [origin, setOrigin] = useState('');
+
+  const load = useCallback(async () => {
+    const res = await fetch('/api/admin/settings');
+    if (res.ok) setSettings((await res.json()).settings ?? {});
+  }, []);
+
+  useEffect(() => {
+    load();
+    setOrigin(window.location.origin);
+  }, [load]);
+
+  async function save(key: string) {
+    const res = await fetch('/api/admin/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value: settings[key] ?? {} }),
+    });
+    if (res.ok) {
+      setSavedKey(key);
+      setTimeout(() => setSavedKey(null), 1500);
+    } else alert((await res.json()).error ?? 'Save failed');
+  }
+
+  const secret = settings.fluent_forms?.webhook_secret || '<webhook_secret>';
+  const brightdata = settings.brightdata ?? {};
+
+  return (
+    <div className="mx-auto max-w-3xl space-y-4 p-6">
+      <h1 className="text-lg font-semibold">Integrations & APIs</h1>
+      <p className="text-xs text-gray-400">
+        Keys are stored in the database with admin-only access and are only ever read server-side —
+        they never reach the browser of non-admin users.
+      </p>
+
+      {SECTIONS.map((section) => (
+        <div key={section.key} className="card">
+          <h2 className="text-sm font-semibold">{section.title}</h2>
+          <p className="mt-0.5 mb-3 text-xs text-gray-400">{section.hint}</p>
+          <div className="grid grid-cols-2 gap-2">
+            {section.fields.map((field) => (
+              <div key={field.key} className={section.fields.length === 1 ? 'col-span-2' : ''}>
+                <label className="label">{field.label}</label>
+                <input
+                  className="input"
+                  type={field.secret ? 'password' : 'text'}
+                  placeholder={field.placeholder}
+                  value={settings[section.key]?.[field.key] ?? ''}
+                  onChange={(e) =>
+                    setSettings((s) => ({
+                      ...s,
+                      [section.key]: { ...(s[section.key] ?? {}), [field.key]: e.target.value },
+                    }))
+                  }
+                />
+              </div>
+            ))}
+          </div>
+          <button className="btn btn-primary mt-3 py-1" onClick={() => save(section.key)}>
+            {savedKey === section.key ? '✓ Saved' : 'Save'}
+          </button>
+
+          {section.key === 'fluent_forms' && (
+            <div className="mt-3 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
+              <div className="mb-1 font-semibold">Webhook URLs (use the secret above):</div>
+              <div className="space-y-1 font-mono">
+                <div>Lead capture: {origin}/api/webhooks/fluent-forms?secret={secret}</div>
+                <div>Inbound email: {origin}/api/webhooks/inbound-email?secret={secret}</div>
+                <div>Emailit events: {origin}/api/webhooks/emailit?secret={secret}</div>
+              </div>
+              <div className="mt-2">
+                Cron (every 5–15 min): <span className="font-mono">{origin}/api/cron/tick?secret=&lt;CRON_SECRET env var&gt;</span>
+              </div>
+            </div>
+          )}
+
+          {section.key === 'brightdata' && brightdata.proxy_zone && (
+            <div className="mt-3 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
+              <div className="mb-1 font-semibold">
+                Backconnect rotating proxy — use in your browser/proxy manager for manual searches:
+              </div>
+              <div className="font-mono">
+                host brd.superproxy.io · port 33335 · user {brightdata.proxy_username || '<username>'} · pass ••••
+              </div>
+              <div className="mt-1">Each request rotates to a fresh residential IP automatically.</div>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
