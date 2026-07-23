@@ -32,7 +32,14 @@ export default function InboxPage() {
   }, [supabase, filter]);
 
   const loadAccounts = useCallback(async () => {
-    const { data } = await supabase.from('email_accounts').select('*').order('name');
+    // Explicit column list: smtp_password is not readable from the browser
+    // (column-level grant in migration 0002) — it's write-only from the UI.
+    const { data } = await supabase
+      .from('email_accounts')
+      .select(
+        'id, owner_id, name, from_name, from_email, smtp_host, smtp_port, smtp_username, smtp_secure, signature_html, is_default, created_at'
+      )
+      .order('name');
     setAccounts(data ?? []);
   }, [supabase]);
 
@@ -67,18 +74,22 @@ export default function InboxPage() {
     if (!f.name || !f.from_email || !f.smtp_host || !f.smtp_username) {
       return alert('Name, from email, SMTP host and username are required');
     }
-    const row = {
+    if (!f.id && !f.smtp_password) {
+      return alert('SMTP password is required for a new account');
+    }
+    const row: Record<string, any> = {
       name: f.name,
       from_name: f.from_name ?? '',
       from_email: f.from_email,
       smtp_host: f.smtp_host,
       smtp_port: Number(f.smtp_port ?? 587),
       smtp_username: f.smtp_username,
-      smtp_password: f.smtp_password ?? '',
       smtp_secure: !!f.smtp_secure,
       signature_html: f.signature_html ?? '',
       is_default: !!f.is_default,
     };
+    // Password is write-only: include it only when set (blank on edit = keep).
+    if (f.smtp_password) row.smtp_password = f.smtp_password;
     const { error } = f.id
       ? await supabase.from('email_accounts').update(row).eq('id', f.id)
       : await supabase.from('email_accounts').insert(row);
@@ -154,9 +165,13 @@ export default function InboxPage() {
               {selected.from_email} → {selected.to_email} ·{' '}
               {new Date(selected.created_at).toLocaleString()}
             </div>
-            <div
-              className="card mt-4 max-w-none text-sm"
-              dangerouslySetInnerHTML={{ __html: selected.html }}
+            {/* Sandboxed iframe: inbound email HTML is attacker-controlled, so it
+                must never run scripts or touch this origin's session. */}
+            <iframe
+              sandbox="allow-popups"
+              srcDoc={selected.html}
+              title="Email content"
+              className="card mt-4 h-[60vh] w-full"
             />
             {selected.direction === 'inbound' && (
               <button
@@ -309,6 +324,9 @@ export default function InboxPage() {
                     <input
                       className="input"
                       type={key === 'smtp_password' ? 'password' : 'text'}
+                      placeholder={
+                        key === 'smtp_password' && accountForm.id ? '•••••• (leave blank to keep)' : ''
+                      }
                       value={accountForm[key] ?? ''}
                       onChange={(e) => setAccountForm((f: any) => ({ ...f, [key]: e.target.value }))}
                     />

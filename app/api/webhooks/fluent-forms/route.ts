@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
 import { getSetting } from '@/lib/settings';
 import { processFluentFormsLead } from '@/lib/lead-intake';
+import { safeEqual } from '@/lib/signing';
 
 /**
  * Fluent Forms webhook — point the form's webhook feed at:
@@ -13,7 +14,7 @@ import { processFluentFormsLead } from '@/lib/lead-intake';
 export async function POST(request: Request) {
   const cfg = await getSetting<{ webhook_secret?: string }>('fluent_forms');
   const secret = new URL(request.url).searchParams.get('secret');
-  if (!cfg.webhook_secret || secret !== cfg.webhook_secret) {
+  if (!cfg.webhook_secret || !secret || !safeEqual(secret, cfg.webhook_secret)) {
     return NextResponse.json({ error: 'Invalid secret' }, { status: 401 });
   }
 

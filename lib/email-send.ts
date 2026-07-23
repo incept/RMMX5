@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import { createAdminClient } from '@/lib/supabase/server';
 import { sendViaEmailit } from '@/lib/integrations/emailit';
 import { logActivity } from '@/lib/activity';
+import { signTrackingUrl } from '@/lib/signing';
 
 /**
  * Central outbound email path. Every CRM email (compose, sequence step,
@@ -67,9 +68,12 @@ export async function sendCrmEmail(opts: {
   const appUrl = (process.env.NEXT_PUBLIC_APP_URL ?? '').replace(/\/$/, '');
 
   // Click tracking: route every http(s) link through /api/track/click.
+  // The HMAC (&s=) pins the redirect to URLs this app actually sent, so the
+  // endpoint can't be abused as an open redirect.
   let html = opts.html.replace(
     /href="(https?:\/\/[^"]+)"/gi,
-    (_m, url) => `href="${appUrl}/api/track/click?m=${row.id}&u=${encodeURIComponent(url)}"`
+    (_m, url) =>
+      `href="${appUrl}/api/track/click?m=${row.id}&u=${encodeURIComponent(url)}&s=${signTrackingUrl(row.id, url)}"`
   );
 
   if (opts.appendSignature !== false && account?.signature_html) {
