@@ -2,6 +2,14 @@ import { createServerClient } from '@supabase/ssr';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { cookies } from 'next/headers';
 
+// Prefer the SB_* names (see lib/supabase/client.ts for why), falling back to
+// the standard SUPABASE_* names for local dev.
+const url = () => process.env.NEXT_PUBLIC_SB_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const anonKey = () =>
+  process.env.NEXT_PUBLIC_SB_ANON_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+const serviceKey = () =>
+  process.env.SB_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY!;
+
 /**
  * Supabase client for Server Components, Server Actions, and Route Handlers.
  * Reads/writes the auth session via cookies. Respects RLS as the logged-in user.
@@ -10,8 +18,8 @@ export async function createClient() {
   const cookieStore = await cookies();
 
   return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    url(),
+    anonKey(),
     {
       cookies: {
         getAll() {
@@ -39,9 +47,7 @@ export async function createClient() {
  * signed cron/webhook endpoints.
  */
 export function createAdminClient() {
-  return createSupabaseClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { autoRefreshToken: false, persistSession: false } }
-  );
+  return createSupabaseClient(url(), serviceKey(), {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
 }
