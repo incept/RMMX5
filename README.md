@@ -35,8 +35,10 @@ voicemail drops, vendor management, revenue projection, and a full admin panel.
 ## 1. Set up Supabase
 
 1. Create a project at [supabase.com](https://supabase.com).
-2. In the SQL Editor, run `supabase/migrations/0001_init.sql`. It creates every
-   table, the storage buckets, seed statuses/stages, triggers, and RLS.
+2. In the SQL Editor, run `supabase/migrations/0001_init.sql`, then
+   `supabase/migrations/0002_security.sql`. Together they create every table,
+   the storage buckets, seed statuses/stages, triggers, RLS, and the
+   column-level lockdown that keeps SMTP passwords out of the browser.
 3. Copy the Project URL and API keys into `.env.local` (start from
    `.env.local.example`). Mind the key types: the **publishable** key
    (`sb_publishable_…`, or legacy `anon`) goes in

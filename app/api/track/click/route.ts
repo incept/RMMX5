@@ -1,17 +1,24 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
 import { stopEnrollmentsFor } from '@/lib/sequence-runner';
+import { verifyTrackingUrl } from '@/lib/signing';
 
-/** Click tracking + redirect: GET /api/track/click?m=<message id>&u=<url> */
+/**
+ * Click tracking + redirect: GET /api/track/click?m=<message id>&u=<url>&s=<hmac>
+ * Only redirects to URLs whose HMAC checks out (i.e. links this app actually
+ * embedded in an email) — anything else bounces to the app root, so this
+ * endpoint can't be used as an open redirect. Unsigned hits are not counted.
+ */
 export async function GET(request: Request) {
   const params = new URL(request.url).searchParams;
   const messageId = params.get('m');
   const url = params.get('u');
+  const sig = params.get('s');
 
-  // Only redirect to http(s) URLs — anything else falls back to the app root.
-  const target = url && /^https?:\/\//i.test(url) ? url : '/';
+  const valid =
+    !!messageId && !!url && /^https?:\/\//i.test(url) && verifyTrackingUrl(messageId, url, sig);
 
-  if (messageId) {
+  if (valid) {
     try {
       const admin = createAdminClient();
       const { data: message } = await admin
@@ -29,7 +36,7 @@ export async function GET(request: Request) {
           message_id: message.id,
           contact_id: message.contact_id,
           type: 'click',
-          url: target,
+          url,
         });
         if (message.contact_id) await stopEnrollmentsFor(message.contact_id, 'click');
       }
@@ -38,5 +45,5 @@ export async function GET(request: Request) {
     }
   }
 
-  return NextResponse.redirect(target);
+  return NextResponse.redirect(valid ? url! : new URL('/', request.url));
 }
