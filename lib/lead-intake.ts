@@ -3,6 +3,8 @@ import { runGoogleSearch } from '@/lib/integrations/brightdata';
 import { applyScores, matchUrlRule, type UrlRule } from '@/lib/scoring';
 import { logActivity } from '@/lib/activity';
 import { getSetting } from '@/lib/settings';
+import { lookupIpLocation } from '@/lib/integrations/ipapi';
+import { logDebug, errorMessage } from '@/lib/debug-log';
 
 /**
  * Lead intake pipeline (Fluent Forms webhook → contact → auto search).
@@ -22,7 +24,31 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
   if (!contact?.name) throw new Error('Contact has no name to search for');
 
   const searchCfg = await getSetting<{ extra_terms?: string }>('search');
-  const query = [`"${contact.name}"`, contact.city, contact.state, searchCfg.extra_terms]
+
+  // A name with no location searches far too broadly. When the lead has no
+  // city/state (Fluent Forms often only gives us an IP), geolocate the IP and
+  // use that, persisting it so the contact record and later searches benefit.
+  let city: string | null = contact.city;
+  let state: string | null = contact.state;
+  if ((!city || !state) && contact.ip) {
+    const located = await lookupIpLocation(contact.ip);
+    if (located) {
+      city = city || located.city;
+      state = state || located.region || located.regionName;
+      if (city !== contact.city || state !== contact.state) {
+        await supabase.from('contacts').update({ city, state }).eq('id', contactId);
+        await logActivity({
+          contactId,
+          actorId,
+          type: 'updated',
+          description: `Location resolved from IP ${contact.ip}: ${[city, state].filter(Boolean).join(', ')}`,
+          meta: { source: 'ip-api' },
+        });
+      }
+    }
+  }
+
+  const query = [`"${contact.name}"`, city, state, searchCfg.extra_terms]
     .filter(Boolean)
     .join(' ');
 
@@ -157,7 +183,13 @@ export async function processFluentFormsLead(payload: Record<string, any>) {
     await logActivity({
       contactId: contact.id,
       type: 'search',
-      description: `Auto search skipped: ${e.message}`,
+      description: `Auto search skipped: ${errorMessage(e)}`,
+    });
+    await logDebug({
+      source: 'lead-intake:auto-search',
+      message: errorMessage(e),
+      context: { contact_name: contact.name, ip: contact.ip },
+      contactId: contact.id,
     });
   }
 

@@ -71,6 +71,12 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
     ],
   },
   {
+    key: 'ipapi',
+    title: 'ip-api.com geolocation',
+    hint: 'Resolves a lead’s IP to a city/state so the automatic Google search can narrow by location when the form did not collect one. Works with no key on the free tier (HTTP, ~45 lookups/minute); a paid key switches to the HTTPS pro endpoint with no rate limit.',
+    fields: [{ key: 'api_key', label: 'API key (optional — blank uses the free tier)', secret: true }],
+  },
+  {
     key: 'search',
     title: 'Auto-search settings',
     hint: 'Tuning for the automatic Google search that runs on lead import.',

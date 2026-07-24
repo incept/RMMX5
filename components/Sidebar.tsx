@@ -23,6 +23,7 @@ const ADMIN_NAV = [
   { href: '/admin/url-rules', label: 'URL Rules & Scoring' },
   { href: '/admin/notifications', label: 'Notifications' },
   { href: '/admin/integrations', label: 'Integrations & APIs' },
+  { href: '/admin/debug', label: 'Debug Log' },
 ];
 
 export default function Sidebar({ role, userName }: { role: string; userName: string }) {
@@ -97,9 +98,14 @@ export default function Sidebar({ role, userName }: { role: string; userName: st
       <div className="border-t border-gray-200 px-4 py-3">
         <div className="truncate text-xs font-medium text-gray-700">{userName}</div>
         <div className="mb-2 text-[10px] text-gray-400 uppercase">{role}</div>
-        <button onClick={signOut} className="text-xs text-gray-500 hover:text-red-600">
-          Sign out
-        </button>
+        <div className="flex items-center gap-3">
+          <Link href="/profile" className="text-xs text-gray-500 hover:text-brand-700">
+            My profile
+          </Link>
+          <button onClick={signOut} className="text-xs text-gray-500 hover:text-red-600">
+            Sign out
+          </button>
+        </div>
       </div>
     </aside>
   );
