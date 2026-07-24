@@ -19,6 +19,7 @@ export async function sendSms(
 
   const res = await fetch('https://textlinksms.com/api/send-sms', {
     method: 'POST',
+    signal: AbortSignal.timeout(20_000),
     headers: {
       Authorization: `Bearer ${cfg.api_key}`,
       'Content-Type': 'application/json',
@@ -31,7 +32,7 @@ export async function sendSms(
   });
 
   if (!res.ok) {
-    return { ok: false, error: `TextLink HTTP error: ${res.status} ${await res.text()}` };
+    return { ok: false, error: `TextLink HTTP error: ${res.status} ${(await res.text()).slice(0, 500)}` };
   }
 
   const data = await res.json();

@@ -307,7 +307,7 @@ function parseSubmittedAt(value: string | null): string | null {
 
 /**
  * Maps a Fluent Forms webhook payload to a new contact. Does NOT run the auto
- * search — the webhook route defers that with after() so the response returns
+ * search — the webhook route persists that work so the response returns
  * within WordPress's HTTP timeout. A slow response makes Fluent Forms mark the
  * delivery failed and retry, which is how duplicate contacts happen.
  */

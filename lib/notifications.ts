@@ -1,6 +1,6 @@
 import { createAdminClient } from '@/lib/supabase/server';
-import { sendViaEmailit } from '@/lib/integrations/emailit';
-import { sendSms } from '@/lib/integrations/textlink';
+import { enqueueJob } from '@/lib/job-queue';
+import { getSetting, setSetting } from '@/lib/settings';
 
 /**
  * Admin-configurable client notifications (notification_rules):
@@ -71,39 +71,24 @@ export async function fireNotification(
       if (reservationError?.code === '23505') continue;
       if (reservationError || !reservation) continue;
 
-      let status: 'sent' | 'failed' = 'sent';
-      let error: string | undefined;
-
       try {
-        if (channel === 'email' && contact.email) {
-          const r = await sendViaEmailit({
-            to: contact.email,
-            subject: 'Update on your case',
-            html: `<p>${message}</p>`,
-          });
-          if (!r.ok) {
-            status = 'failed';
-            error = r.error;
-          }
-        } else if (channel === 'sms' && contact.phone) {
-          const r = await sendSms(contact.phone, message);
-          if (!r.ok) {
-            status = 'failed';
-            error = r.error;
-          }
-        } else {
-          status = 'failed';
-          error = `No ${channel === 'email' ? 'email address' : 'phone number'} on file`;
-        }
+        const destination = channel === 'email' ? contact.email : contact.phone;
+        await enqueueJob(
+          'notification_delivery',
+          {
+            notificationId: reservation.id,
+            channel,
+            destination: destination ?? null,
+            message,
+          },
+          `notification:${reservation.id}`
+        );
       } catch (e: any) {
-        status = 'failed';
-        error = e.message;
+        await supabase
+          .from('notifications_log')
+          .update({ status: 'failed', error: e.message })
+          .eq('id', reservation.id);
       }
-
-      await supabase
-        .from('notifications_log')
-        .update({ status, error: error ?? null })
-        .eq('id', reservation.id);
     }
   }
 }
@@ -113,27 +98,28 @@ export async function fireNotification(
  * rule when days-left hits one of the rule's configured thresholds.
  * De-duped per (contact, threshold) via notifications_log.
  */
-export async function processCountdownNotifications() {
+export async function processCountdownNotifications(limit = 250) {
   const supabase = createAdminClient();
 
   const { data: rules } = await supabase
     .from('notification_rules')
-    .select('*')
+    .select('id, config')
     .eq('event', 'client_countdown')
     .eq('enabled', true);
   if (!rules?.length) return { checked: 0 };
 
-  const { data: settingsRow } = await supabase
-    .from('settings')
-    .select('value')
-    .eq('key', 'defaults')
-    .maybeSingle();
-  const defaultDays = Number(settingsRow?.value?.service_days ?? 90);
-
-  const { data: clients } = await supabase
+  const defaults = await getSetting<{ service_days?: number | string }>('defaults');
+  const defaultDays = Number(defaults.service_days ?? 90);
+  const scan = await getSetting<{ last_id?: string | null }>('countdown_scan', { fresh: true });
+  let clientsQuery = supabase
     .from('contacts')
-    .select('*')
-    .not('client_since', 'is', null);
+    .select('id, name, email, phone, status_id, client_since, service_days')
+    .not('client_since', 'is', null)
+    .order('id')
+    .limit(Math.min(Math.max(limit, 1), 500));
+  if (scan.last_id) clientsQuery = clientsQuery.gt('id', scan.last_id);
+  const { data: clients, error: clientsError } = await clientsQuery;
+  if (clientsError) throw new Error(clientsError.message);
 
   let checked = 0;
   for (const contact of clients ?? []) {
@@ -157,5 +143,9 @@ export async function processCountdownNotifications() {
       );
     }
   }
-  return { checked };
+  const lastId = clients?.at(-1)?.id ?? null;
+  await setSetting('countdown_scan', {
+    last_id: clients?.length === Math.min(Math.max(limit, 1), 500) ? lastId : null,
+  });
+  return { checked, has_more: !!lastId && clients?.length === Math.min(Math.max(limit, 1), 500) };
 }

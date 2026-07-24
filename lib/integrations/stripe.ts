@@ -27,8 +27,9 @@ export async function fetchStripeRevenue(): Promise<{ months: RevenueMonth[]; cu
 
     const res = await fetch(`https://api.stripe.com/v1/balance_transactions?${params}`, {
       headers: { Authorization: `Bearer ${cfg.secret_key}` },
+      signal: AbortSignal.timeout(20_000),
     });
-    if (!res.ok) throw new Error(`Stripe request failed: ${res.status} ${await res.text()}`);
+    if (!res.ok) throw new Error(`Stripe request failed: ${res.status} ${(await res.text()).slice(0, 500)}`);
 
     const data = await res.json();
     for (const txn of data.data ?? []) {

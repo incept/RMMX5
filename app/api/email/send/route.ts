@@ -3,13 +3,9 @@ import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { sendCrmEmail } from '@/lib/email-send';
 import { renderTemplate } from '@/lib/sequence-runner';
+import { deliveryKey, MAX_BULK_RECIPIENTS, validIdempotencyKey } from '@/lib/bulk-delivery';
+import { enqueueJob } from '@/lib/job-queue';
 
-/**
- * POST — compose/send from the unified inbox or blast a list.
- * Body: { to?, contactId?, listId?, accountId?, subject, html }
- * Exactly one of `to`/`contactId` (single send) or `listId` (blast).
- * {{placeholders}} are rendered per contact.
- */
 export async function POST(request: Request) {
   const auth = await requireUser();
   if ('error' in auth) return auth.error;
@@ -21,7 +17,6 @@ export async function POST(request: Request) {
 
   const admin = createAdminClient();
   let accountId: string | null = null;
-
   if (body.accountId) {
     const { data: accessibleAccount } = await auth.supabase
       .from('email_accounts')
@@ -33,8 +28,6 @@ export async function POST(request: Request) {
     }
     accountId = accessibleAccount.id;
   } else {
-    // Resolve the default through the caller's RLS-scoped client. The
-    // service-role sender must never select another user's private account.
     const { data: defaultAccount } = await auth.supabase
       .from('email_accounts')
       .select('id')
@@ -44,33 +37,52 @@ export async function POST(request: Request) {
     accountId = defaultAccount?.id ?? null;
   }
 
-  // List blast
   if (body.listId) {
-    const { data: members } = await admin
+    if (auth.profile.role !== 'admin') {
+      return NextResponse.json({ error: 'Admin access required for list sends' }, { status: 403 });
+    }
+    const requestKey = request.headers.get('idempotency-key');
+    if (!validIdempotencyKey(requestKey)) {
+      return NextResponse.json({ error: 'A valid Idempotency-Key header is required' }, { status: 400 });
+    }
+    const { data: members, count, error } = await admin
       .from('email_list_members')
-      .select('contacts ( id, name, email, city, state, custom )')
-      .eq('list_id', body.listId);
+      .select('contacts ( id, name, email, city, state, custom )', { count: 'exact' })
+      .eq('list_id', body.listId)
+      .range(0, MAX_BULK_RECIPIENTS);
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if ((count ?? 0) > MAX_BULK_RECIPIENTS) {
+      return NextResponse.json(
+        { error: `List sends are limited to ${MAX_BULK_RECIPIENTS} recipients per request` },
+        { status: 413 }
+      );
+    }
 
-    let sent = 0;
-    let failed = 0;
+    let queued = 0;
+    let duplicates = 0;
     for (const member of (members ?? []) as any[]) {
       const contact = member.contacts;
       if (!contact?.email) continue;
-      const result = await sendCrmEmail({
-        to: contact.email,
-        subject: renderTemplate(body.subject, contact),
-        html: renderTemplate(body.html, contact, { html: true }),
-        accountId,
-        contactId: contact.id,
-        actorId: auth.profile.id,
-      });
-      if (result.ok) sent += 1;
-      else failed += 1;
+      const key = deliveryKey('email', requestKey, contact.id);
+      const result = await enqueueJob(
+        'email_delivery',
+        {
+          to: contact.email,
+          subject: renderTemplate(body.subject, contact),
+          html: renderTemplate(body.html, contact, { html: true }),
+          accountId,
+          contactId: contact.id,
+          actorId: auth.profile.id,
+          deliveryKey: key,
+        },
+        `job:${key}`
+      );
+      if (result.queued) queued += 1;
+      if (result.duplicate) duplicates += 1;
     }
-    return NextResponse.json({ sent, failed });
+    return NextResponse.json({ queued, duplicates }, { status: 202 });
   }
 
-  // Single send
   let to = body.to as string | undefined;
   let contact: any = null;
   if (body.contactId) {
@@ -88,7 +100,6 @@ export async function POST(request: Request) {
     contactId: contact?.id ?? null,
     actorId: auth.profile.id,
   });
-
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: 500 });
   return NextResponse.json({ ok: true, messageId: result.messageRowId });
 }

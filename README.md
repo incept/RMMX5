@@ -35,11 +35,11 @@ voicemail drops, vendor management, revenue projection, and a full admin panel.
 ## 1. Set up Supabase
 
 1. Create a project at [supabase.com](https://supabase.com).
-2. In the SQL Editor, run `supabase/migrations/0001_init.sql`, then
-   `supabase/migrations/0002_security.sql`, then
-   `supabase/migrations/0003_access_and_delivery_hardening.sql`. Together they
-   create every table, the storage buckets, seed data, RLS, SMTP ownership
-   controls, atomic sequence claiming, and notification/webhook deduplication.
+2. Apply **every** migration in `supabase/migrations` in filename order
+   (`0001_init.sql` through `0009_operational_resilience.sql`). With the
+   Supabase CLI, run `supabase db push`; otherwise run each unapplied file in
+   the SQL Editor. The later migrations contain required security, queue,
+   usage-metering, and concurrency controls and are not optional.
 3. Copy the Project URL and API keys into `.env.local` (start from
    `.env.local.example`). Mind the key types: the **publishable** key
    (`sb_publishable_…`, or legacy `anon`) goes in
@@ -76,7 +76,8 @@ keys (they live in the `settings` table with admin-only RLS — not in env vars)
 
 ## 3. The cron tick
 
-Sequences and countdown notifications are driven by one idempotent endpoint.
+Sequences, countdown notifications, CallScaler backfill, and the bounded
+delivery queue are driven by one idempotent endpoint.
 Schedule it every 5–15 minutes (Vercel Cron, hPanel cron, GitHub Actions…):
 
 ```bash
@@ -86,6 +87,12 @@ curl -H "Authorization: Bearer $CRON_SECRET" \
 
 `CRON_SECRET` comes from `.env.local`.
 
+On Hostinger/hPanel, keep the Next.js app running as the managed Node
+application and configure cron to run only the `curl` command above. Do not
+start `npm run start` from cron: every invocation would create another idle
+Node process. The endpoint uses an atomic database lease, claims at most two
+provider jobs per tick, and safely retries interrupted jobs.
+
 ## 4. Webhooks
 
 Webhook credentials are never placed in URLs:
@@ -93,6 +100,7 @@ Webhook credentials are never placed in URLs:
 | Purpose | URL | Authentication |
 | --- | --- | --- |
 | Fluent Forms lead capture | `POST /api/webhooks/fluent-forms` | `Authorization: Bearer <Fluent Forms secret>` |
+| CallScaler post-call intake | `POST /api/webhooks/callscaler` | `X-RMMX-Webhook-Secret: <CallScaler secret>` |
 | Inbound email → inbox/reply detection | `POST /api/webhooks/inbound-email` | `Authorization: Bearer <inbound-email secret>` |
 | Emailit bounce/complaint events | `POST /api/webhooks/emailit` | Emailit's `X-Emailit-Signature` + `X-Emailit-Timestamp` |
 
@@ -134,9 +142,11 @@ fills link slots 1–14, and computes the Reputation Score.
   your ringless-VM vendor's real API shape.
 - **TextLink** requires a paired Android device with an active SIM (see their
   docs); if the device is offline, sends fail.
-- **Rate limiting** is not implemented on general authenticated API routes;
-  deploy behind a platform/WAF request limit. Upload endpoints do enforce file
-  size and active-content restrictions.
+- General authenticated API routes should still sit behind a platform/WAF
+  request limit. Cost-bearing list email, SMS, and voicemail sends are
+  admin-only, capped at 100 recipients, require idempotency keys, and are
+  drained through the bounded queue. Upload endpoints enforce file size and
+  active-content restrictions.
 - **Password reset** flow isn't wired into a page (Supabase supports it).
 - `xlsx` (SheetJS 0.20.3 via the official CDN tarball) parses admin-uploaded
   files only.

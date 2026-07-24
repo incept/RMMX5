@@ -17,6 +17,7 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
     fields: [
       { key: 'api_key', label: 'API key', secret: true },
       { key: 'serp_zone', label: 'SERP zone name', placeholder: 'serp_api1' },
+      { key: 'monthly_limit', label: 'Monthly SERP request limit', placeholder: '5000' },
       { key: 'proxy_zone', label: 'Proxy zone name (rotating/backconnect)', placeholder: 'residential_proxy1' },
       { key: 'proxy_username', label: 'Proxy username', placeholder: 'brd-customer-XXXX-zone-YYYY' },
       { key: 'proxy_password', label: 'Proxy password', secret: true },

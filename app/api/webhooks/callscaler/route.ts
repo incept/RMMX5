@@ -1,8 +1,9 @@
-import { NextResponse, after } from 'next/server';
+import { NextResponse } from 'next/server';
 import { getSetting } from '@/lib/settings';
 import { verifyBearerSecret } from '@/lib/webhook-auth';
-import { processCallScalerCall, runCallSearch } from '@/lib/integrations/callscaler';
+import { processCallScalerCall } from '@/lib/integrations/callscaler';
 import { logDebug, errorMessage } from '@/lib/debug-log';
+import { enqueueJob } from '@/lib/job-queue';
 
 /**
  * CallScaler post-call webhook. In each call flow: AUTOMATIONS → webhook →
@@ -15,8 +16,7 @@ import { logDebug, errorMessage } from '@/lib/debug-log';
  * spam screen.
  *
  * CallScaler requires a 200 within 10 seconds, so the auto Google search for
- * new contacts is deferred with `after()` — the response returns first, the
- * search runs once it is sent. Idempotency lives in processCallScalerCall
+ * new contacts is persisted to the queue for the cron worker. Idempotency lives in processCallScalerCall
  * (unique call_id), so their 3-attempt retry policy cannot double-create.
  */
 export async function POST(request: Request) {
@@ -44,8 +44,11 @@ export async function POST(request: Request) {
     const result = await processCallScalerCall(payload);
 
     if (result.searchContactId) {
-      const contactId = result.searchContactId;
-      after(() => runCallSearch(contactId));
+      await enqueueJob(
+        'auto_search',
+        { contactId: result.searchContactId },
+        `auto-search:callscaler:${result.callId}`
+      );
     }
 
     return NextResponse.json({
