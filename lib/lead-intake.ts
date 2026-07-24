@@ -53,6 +53,26 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
     }
   }
 
+  // Location is a required search input, not a nice-to-have: a name with no
+  // city/state matches far too broadly to be useful and burns BrightData
+  // credits on noise. If we still have neither after the IP lookup — the form
+  // gave us none AND geolocation failed or was rate-limited — skip the search
+  // rather than run a bad one. It surfaces in the log as a skipped search and
+  // can be re-run manually once a commercial ip-api key removes the rate limit.
+  if (!city && !state) {
+    const reason = contact.ip
+      ? `no location for the search (IP ${contact.ip} did not geolocate — likely ip-api rate limit; a commercial key removes it)`
+      : 'no location for the search (lead has no city/state and no IP to geolocate)';
+    await logDebug({
+      level: 'warn',
+      source: 'lead-intake:auto-search',
+      message: `Search skipped: ${reason}`,
+      context: { contact_name: contact.name, ip: contact.ip ?? null },
+      contactId,
+    });
+    throw new Error(`Search skipped: ${reason}`);
+  }
+
   const query = [`"${contact.name}"`, city, state, searchCfg.extra_terms]
     .filter(Boolean)
     .join(' ');
