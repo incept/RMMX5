@@ -55,6 +55,15 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
     fields: [{ key: 'webhook_secret', label: 'Webhook secret', secret: true }],
   },
   {
+    key: 'callscaler',
+    title: 'CallScaler',
+    hint: 'Call tracking. The post-call webhook turns inbound calls into contacts (or attaches them to existing ones by phone/gclid); the API key lets the cron tick backfill any calls the webhook missed.',
+    fields: [
+      { key: 'api_key', label: 'API key', secret: true, placeholder: 'cs_key_…' },
+      { key: 'webhook_secret', label: 'Webhook secret', secret: true },
+    ],
+  },
+  {
     key: 'inbound_email',
     title: 'Inbound email webhook',
     hint: 'A separate bearer secret for the inbound-mail forwarder or relay.',
@@ -169,6 +178,23 @@ export default function IntegrationsPage() {
               <div className="mt-2">
                 Cron: <span className="font-mono">{origin}/api/cron/tick</span> with
                 <span className="font-mono"> Authorization: Bearer &lt;CRON_SECRET&gt;</span>
+              </div>
+            </div>
+          )}
+
+          {section.key === 'callscaler' && (
+            <div className="mt-3 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
+              <div className="mb-1 font-semibold">
+                Post-call webhook — in each call flow: AUTOMATIONS → Webhook
+              </div>
+              <div className="space-y-1 font-mono">
+                <div>URL: {origin}/api/webhooks/callscaler</div>
+                <div>Custom header — Authorization: Bearer &lt;webhook_secret&gt;</div>
+              </div>
+              <div className="mt-2">
+                Set the webhook mode to <span className="font-semibold">“Wait for AI”</span> so the
+                spam screen and transcript arrive in the same event — immediate mode sends the AI
+                fields as null, and spam calls would then create contacts.
               </div>
             </div>
           )}

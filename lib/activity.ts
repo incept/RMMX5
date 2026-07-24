@@ -14,6 +14,7 @@ export async function logActivity(entry: {
     | 'link_change'
     | 'email'
     | 'sms'
+    | 'call'
     | 'voicemail'
     | 'note'
     | 'import'

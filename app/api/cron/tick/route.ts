@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { processDueEnrollments } from '@/lib/sequence-runner';
 import { processCountdownNotifications } from '@/lib/notifications';
+import { syncMissedCalls } from '@/lib/integrations/callscaler';
 import { verifyBearerSecret } from '@/lib/webhook-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { logDebug, errorMessage } from '@/lib/debug-log';
@@ -20,6 +21,7 @@ export async function GET(request: Request) {
 
   let sequences: any = null;
   let countdown: any = null;
+  let calls: any = null;
   try {
     sequences = await processDueEnrollments();
   } catch (e) {
@@ -31,6 +33,14 @@ export async function GET(request: Request) {
   } catch (e) {
     await logDebug({ source: 'cron:countdown', message: errorMessage(e) });
     countdown = { error: errorMessage(e) };
+  }
+  // Backfills any CallScaler calls whose webhook delivery was missed
+  // (their retries stop after ~2.5 minutes). No-op until an API key is set.
+  try {
+    calls = await syncMissedCalls();
+  } catch (e) {
+    await logDebug({ source: 'cron:callscaler', message: errorMessage(e) });
+    calls = { error: errorMessage(e) };
   }
 
   // Keep debug_log bounded. Best-effort: pruning must not fail the tick.
@@ -46,6 +56,7 @@ export async function GET(request: Request) {
     ok: true,
     sequences,
     countdown,
+    calls,
     pruned,
     at: new Date().toISOString(),
   });
