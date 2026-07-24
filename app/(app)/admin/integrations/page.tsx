@@ -25,11 +25,12 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
   {
     key: 'emailit',
     title: 'Emailit',
-    hint: 'Fallback email sender (used when no SMTP account is configured) and the sender for client notifications.',
+    hint: 'Fallback email sender, client notifications, and signed bounce/complaint events.',
     fields: [
       { key: 'api_key', label: 'API key', secret: true },
       { key: 'from_address', label: 'From address', placeholder: 'alerts@yourdomain.com' },
       { key: 'from_name', label: 'From name', placeholder: 'RMMX5' },
+      { key: 'webhook_signing_secret', label: 'Webhook signing secret', secret: true, placeholder: 'whsec_…' },
     ],
   },
   {
@@ -50,7 +51,13 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
   {
     key: 'fluent_forms',
     title: 'Fluent Forms',
-    hint: 'Shared secret for all inbound webhooks (lead capture, inbound email, Emailit events).',
+    hint: 'Secret sent in the Authorization header by the Fluent Forms webhook feed.',
+    fields: [{ key: 'webhook_secret', label: 'Webhook secret', secret: true }],
+  },
+  {
+    key: 'inbound_email',
+    title: 'Inbound email webhook',
+    hint: 'A separate bearer secret for the inbound-mail forwarder or relay.',
     fields: [{ key: 'webhook_secret', label: 'Webhook secret', secret: true }],
   },
   {
@@ -109,7 +116,6 @@ export default function IntegrationsPage() {
     } else alert((await res.json()).error ?? 'Save failed');
   }
 
-  const secret = settings.fluent_forms?.webhook_secret || '<webhook_secret>';
   const brightdata = settings.brightdata ?? {};
 
   return (
@@ -149,14 +155,32 @@ export default function IntegrationsPage() {
 
           {section.key === 'fluent_forms' && (
             <div className="mt-3 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
-              <div className="mb-1 font-semibold">Webhook URLs (use the secret above):</div>
+              <div className="mb-1 font-semibold">Fluent Forms webhook</div>
               <div className="space-y-1 font-mono">
-                <div>Lead capture: {origin}/api/webhooks/fluent-forms?secret={secret}</div>
-                <div>Inbound email: {origin}/api/webhooks/inbound-email?secret={secret}</div>
-                <div>Emailit events: {origin}/api/webhooks/emailit?secret={secret}</div>
+                <div>URL: {origin}/api/webhooks/fluent-forms</div>
+                <div>Header: Authorization: Bearer &lt;webhook_secret&gt;</div>
               </div>
               <div className="mt-2">
-                Cron (every 5–15 min): <span className="font-mono">{origin}/api/cron/tick?secret=&lt;CRON_SECRET env var&gt;</span>
+                Cron: <span className="font-mono">{origin}/api/cron/tick</span> with
+                <span className="font-mono"> Authorization: Bearer &lt;CRON_SECRET&gt;</span>
+              </div>
+            </div>
+          )}
+
+          {section.key === 'inbound_email' && (
+            <div className="mt-3 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
+              <div className="font-mono">URL: {origin}/api/webhooks/inbound-email</div>
+              <div className="font-mono">
+                Header: Authorization: Bearer &lt;webhook_secret&gt;
+              </div>
+            </div>
+          )}
+
+          {section.key === 'emailit' && (
+            <div className="mt-3 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
+              <div className="font-mono">URL: {origin}/api/webhooks/emailit</div>
+              <div className="mt-1">
+                Emailit supplies X-Emailit-Signature and X-Emailit-Timestamp automatically.
               </div>
             </div>
           )}

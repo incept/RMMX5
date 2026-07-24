@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { logActivity } from '@/lib/activity';
+import { randomUUID } from 'crypto';
+import { CONTACT_FILE_MAX_BYTES, storageSafeName, validateContactFile } from '@/lib/uploads';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -22,7 +24,9 @@ export async function GET(_request: Request, { params }: Params) {
 
   const withUrls = await Promise.all(
     (files ?? []).map(async (f) => {
-      const { data } = await admin.storage.from(BUCKET).createSignedUrl(f.storage_path, 3600);
+      const { data } = await admin.storage
+        .from(BUCKET)
+        .createSignedUrl(f.storage_path, 3600, { download: f.name });
       return { ...f, url: data?.signedUrl ?? null };
     })
   );
@@ -36,13 +40,25 @@ export async function POST(request: Request, { params }: Params) {
   if ('error' in auth) return auth.error;
   const { id } = await params;
 
+  const admin = createAdminClient();
+  const { data: contact } = await admin.from('contacts').select('id').eq('id', id).maybeSingle();
+  if (!contact) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+
+  const contentLength = Number(request.headers.get('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > CONTACT_FILE_MAX_BYTES + 1024 * 1024) {
+    return NextResponse.json({ error: 'Upload is too large' }, { status: 413 });
+  }
+
   const form = await request.formData();
   const file = form.get('file') as File | null;
   if (!file) return NextResponse.json({ error: 'file required' }, { status: 400 });
+  const validationError = validateContactFile(file);
+  if (validationError) {
+    return NextResponse.json({ error: validationError }, { status: 400 });
+  }
 
-  const admin = createAdminClient();
-  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const path = `${id}/${Date.now()}-${safeName}`;
+  const safeName = storageSafeName(file.name);
+  const path = `${id}/${randomUUID()}-${safeName}`;
 
   const { error: uploadErr } = await admin.storage
     .from(BUCKET)
@@ -63,7 +79,10 @@ export async function POST(request: Request, { params }: Params) {
     })
     .select('*')
     .single();
-  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+  if (error) {
+    await admin.storage.from(BUCKET).remove([path]);
+    return NextResponse.json({ error: error.message }, { status: 400 });
+  }
 
   await logActivity({
     contactId: id,

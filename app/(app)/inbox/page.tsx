@@ -14,6 +14,7 @@ export default function InboxPage() {
   const [selected, setSelected] = useState<any>(null);
   const [filter, setFilter] = useState<'all' | 'inbound' | 'outbound'>('all');
   const [accounts, setAccounts] = useState<any[]>([]);
+  const [viewer, setViewer] = useState<{ id: string; role: string } | null>(null);
   const [showAccounts, setShowAccounts] = useState(false);
   const [showCompose, setShowCompose] = useState(false);
   const [compose, setCompose] = useState({ to: '', subject: '', html: '', accountId: '' });
@@ -32,6 +33,18 @@ export default function InboxPage() {
   }, [supabase, filter]);
 
   const loadAccounts = useCallback(async () => {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (user) {
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('role')
+        .eq('id', user.id)
+        .single();
+      setViewer({ id: user.id, role: profile?.role ?? 'worker' });
+    }
+
     // Explicit column list: smtp_password is not readable from the browser
     // (column-level grant in migration 0002) — it's write-only from the UI.
     const { data } = await supabase
@@ -266,42 +279,56 @@ export default function InboxPage() {
           >
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-sm font-semibold">SMTP accounts</h2>
-              <button
-                className="btn btn-primary py-1"
-                onClick={() =>
-                  setAccountForm({ smtp_port: 587, smtp_secure: false, is_default: accounts.length === 0 })
-                }
-              >
-                + Add account
-              </button>
+              {viewer?.role === 'admin' && (
+                <button
+                  className="btn btn-primary py-1"
+                  onClick={() =>
+                    setAccountForm({
+                      smtp_port: 587,
+                      smtp_secure: false,
+                      is_default: accounts.length === 0,
+                    })
+                  }
+                >
+                  + Add account
+                </button>
+              )}
             </div>
 
             {!accountForm &&
-              accounts.map((a) => (
-                <div key={a.id} className="mb-2 flex items-center gap-3 rounded-lg border border-gray-100 px-3 py-2 text-sm">
-                  <div className="flex-1">
-                    <div className="font-medium">
-                      {a.name} {a.is_default && <span className="text-xs text-brand-600">(default)</span>}
+              accounts.map((a) => {
+                const canManage = viewer?.role === 'admin';
+                return (
+                  <div key={a.id} className="mb-2 flex items-center gap-3 rounded-lg border border-gray-100 px-3 py-2 text-sm">
+                    <div className="flex-1">
+                      <div className="font-medium">
+                        {a.name}{' '}
+                        {a.is_default && <span className="text-xs text-brand-600">(default)</span>}
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        {a.from_email} via {a.smtp_host}:{a.smtp_port}
+                      </div>
                     </div>
-                    <div className="text-xs text-gray-400">
-                      {a.from_email} via {a.smtp_host}:{a.smtp_port}
-                    </div>
+                    {canManage && (
+                      <>
+                        <button className="btn py-1" onClick={() => setAccountForm(a)}>
+                          Edit
+                        </button>
+                        <button
+                          className="btn py-1 text-red-600"
+                          onClick={async () => {
+                            if (!confirm(`Delete account ${a.name}?`)) return;
+                            await supabase.from('email_accounts').delete().eq('id', a.id);
+                            loadAccounts();
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </>
+                    )}
                   </div>
-                  <button className="btn py-1" onClick={() => setAccountForm(a)}>
-                    Edit
-                  </button>
-                  <button
-                    className="btn py-1 text-red-600"
-                    onClick={async () => {
-                      if (!confirm(`Delete account ${a.name}?`)) return;
-                      await supabase.from('email_accounts').delete().eq('id', a.id);
-                      loadAccounts();
-                    }}
-                  >
-                    Delete
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             {!accountForm && accounts.length === 0 && (
               <div className="py-6 text-center text-sm text-gray-400">
                 No SMTP accounts yet. Without one, sends fall back to the Emailit API key.

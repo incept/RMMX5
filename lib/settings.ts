@@ -7,10 +7,11 @@ import { createAdminClient } from '@/lib/supabase/server';
  *
  * Known keys and their shapes (all optional until an admin fills them in):
  *   brightdata    { api_key, serp_zone, proxy_zone, proxy_username, proxy_password }
- *   emailit       { api_key, from_address, from_name }
+ *   emailit       { api_key, from_address, from_name, webhook_signing_secret }
  *   textlink      { api_key, sim_card_id }
  *   stripe        { secret_key }
  *   fluent_forms  { webhook_secret }
+ *   inbound_email { webhook_secret }
  *   voicemail     { provider_url, api_key, caller_id }
  *   search        { country, num_results, extra_terms }
  *   defaults      { service_days }

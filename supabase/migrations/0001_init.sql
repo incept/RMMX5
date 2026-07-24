@@ -30,25 +30,27 @@ create table public.profiles (
   full_name text,
   phone text,
   role text not null default 'worker' check (role in ('admin', 'worker')),
-  status text not null default 'active' check (status in ('active', 'disabled')),
+  status text not null default 'disabled' check (status in ('active', 'disabled')),
   signature_html text,
   created_at timestamptz not null default now()
 );
 
--- The very first account to register becomes an admin automatically;
--- everyone after that starts as a worker until an admin promotes them.
+-- New Auth users are disabled workers until an existing administrator
+-- activates them. The initial administrator is bootstrapped explicitly during
+-- setup so a public signup race can never seize the workspace.
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
 security definer set search_path = public
 as $$
 begin
-  insert into public.profiles (id, email, full_name, role)
+  insert into public.profiles (id, email, full_name, role, status)
   values (
     new.id,
     new.email,
     coalesce(new.raw_user_meta_data ->> 'full_name', ''),
-    case when not exists (select 1 from public.profiles) then 'admin' else 'worker' end
+    'worker',
+    'disabled'
   );
   return new;
 end;
@@ -90,7 +92,9 @@ language plpgsql
 security definer set search_path = public
 as $$
 begin
-  if not public.is_admin() then
+  -- A null auth.uid() is a trusted SQL-editor/service-role operation. RLS
+  -- prevents unauthenticated clients from reaching this trigger.
+  if auth.uid() is not null and not public.is_admin() then
     new.role := old.role;
     new.status := old.status;
   end if;
@@ -366,11 +370,48 @@ create table public.sequence_enrollments (
   current_step int not null default 0, -- last step sent (0 = none yet)
   next_send_at timestamptz,
   stop_reason text,
+  attempt_count int not null default 0,
+  last_error text,
   enrolled_at timestamptz not null default now(),
   unique (sequence_id, contact_id)
 );
 
 create index enrollments_due_idx on public.sequence_enrollments (status, next_send_at);
+
+-- Atomically leases due work so overlapping cron requests cannot send the
+-- same sequence step. A crashed worker's lease expires after 30 minutes.
+create or replace function public.claim_due_sequence_enrollments(p_limit int default 100)
+returns table (
+  id uuid,
+  sequence_id uuid,
+  contact_id uuid,
+  current_step int,
+  attempt_count int
+)
+language sql
+security definer set search_path = public
+as $$
+  with due as (
+    select se.id
+    from public.sequence_enrollments se
+    where se.status = 'active'
+      and se.next_send_at <= now()
+    order by se.next_send_at
+    for update skip locked
+    limit greatest(1, least(coalesce(p_limit, 100), 100))
+  ),
+  claimed as (
+    update public.sequence_enrollments se
+    set next_send_at = now() + interval '30 minutes'
+    from due
+    where se.id = due.id
+    returning se.id, se.sequence_id, se.contact_id, se.current_step, se.attempt_count
+  )
+  select * from claimed;
+$$;
+
+revoke all on function public.claim_due_sequence_enrollments(int) from public, anon, authenticated;
+grant execute on function public.claim_due_sequence_enrollments(int) to service_role;
 
 -- Every email in or out — this powers the unified inbox and analytics.
 create table public.email_messages (
@@ -513,10 +554,13 @@ create table public.notifications_log (
   rule_id uuid references public.notification_rules (id) on delete set null,
   channel text not null,
   message text not null,
-  status text not null default 'sent' check (status in ('sent', 'failed')),
+  status text not null default 'sent' check (status in ('pending', 'sent', 'failed')),
   error text,
+  dedupe_key text,
   created_at timestamptz not null default now()
 );
+create unique index notifications_log_dedupe_idx
+  on public.notifications_log (dedupe_key) where dedupe_key is not null;
 
 create table public.imports (
   id uuid primary key default gen_random_uuid(),
@@ -540,6 +584,16 @@ create table public.webhook_leads (
   error text,
   created_at timestamptz not null default now()
 );
+
+-- Provider event IDs prevent signed webhook retries from applying twice.
+create table public.webhook_receipts (
+  provider text not null,
+  event_id text not null,
+  received_at timestamptz not null default now(),
+  primary key (provider, event_id)
+);
+revoke all on table public.webhook_receipts from anon, authenticated;
+grant select, insert, delete on table public.webhook_receipts to service_role;
 
 -- ---------------------------------------------------------------------------
 -- Storage buckets (files + voicemail audio). Kept private; the app reads and
@@ -584,6 +638,7 @@ alter table public.notification_rules enable row level security;
 alter table public.notifications_log enable row level security;
 alter table public.imports enable row level security;
 alter table public.webhook_leads enable row level security;
+alter table public.webhook_receipts enable row level security;
 
 -- Profiles: whole team is visible to active users; edits guarded by trigger.
 create policy "profiles select" on public.profiles for select using (public.is_active());
@@ -602,9 +657,15 @@ create policy "links all" on public.contact_links for all
 create policy "activity select" on public.activity_log for select using (public.is_active());
 create policy "activity insert" on public.activity_log for insert with check (public.is_active());
 
-create policy "email accounts all" on public.email_accounts for all
-  using (public.is_active() and (owner_id is null or owner_id = auth.uid() or public.is_admin()))
-  with check (public.is_active());
+create policy "email accounts select" on public.email_accounts for select
+  using (public.is_active());
+create policy "email accounts insert" on public.email_accounts for insert
+  with check (public.is_admin());
+create policy "email accounts update" on public.email_accounts for update
+  using (public.is_admin())
+  with check (public.is_admin());
+create policy "email accounts delete" on public.email_accounts for delete
+  using (public.is_admin());
 
 create policy "templates all" on public.email_templates for all
   using (public.is_active()) with check (public.is_active());

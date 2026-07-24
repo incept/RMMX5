@@ -4,13 +4,11 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 
-/** Landing page: login / register. The first account to register is auto-admin. */
+/** Landing page: sign-in only. Accounts are provisioned by an administrator. */
 export default function LandingPage() {
   const router = useRouter();
-  const [mode, setMode] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [fullName, setFullName] = useState('');
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -21,26 +19,21 @@ export default function LandingPage() {
     const supabase = createClient();
 
     try {
-      if (mode === 'login') {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-        router.push('/dashboard');
-        router.refresh();
-      } else {
-        const { error } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            data: { full_name: fullName },
-            emailRedirectTo: `${window.location.origin}/auth/callback`,
-          },
-        });
-        if (error) throw error;
-        setMessage(
-          'Account created. If email confirmation is enabled, check your inbox — otherwise just log in.'
-        );
-        setMode('login');
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      const { data: profile, error: profileError } = user
+        ? await supabase.from('profiles').select('status').eq('id', user.id).maybeSingle()
+        : { data: null, error: null };
+      if (profileError) throw profileError;
+      if (profile?.status !== 'active') {
+        await supabase.auth.signOut();
+        throw new Error('This account is awaiting activation by an administrator.');
       }
+      router.push('/dashboard');
+      router.refresh();
     } catch (err: any) {
       setMessage(err.message);
     } finally {
@@ -68,26 +61,11 @@ export default function LandingPage() {
           <div className="mb-6 lg:hidden">
             <span className="text-sm font-bold tracking-widest text-brand-600">RMMX5</span>
           </div>
-          <h2 className="text-xl font-semibold">
-            {mode === 'login' ? 'Sign in' : 'Create your account'}
-          </h2>
+          <h2 className="text-xl font-semibold">Sign in</h2>
           <p className="mt-1 mb-6 text-sm text-gray-500">
-            {mode === 'login'
-              ? 'Welcome back — sign in to your workspace.'
-              : 'The first account registered becomes the admin.'}
+            Welcome back — sign in to your workspace.
           </p>
 
-          {mode === 'register' && (
-            <div className="mb-3">
-              <label className="label">Full name</label>
-              <input
-                className="input"
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-                placeholder="Jane Doe"
-              />
-            </div>
-          )}
           <div className="mb-3">
             <label className="label">Email</label>
             <input
@@ -113,7 +91,7 @@ export default function LandingPage() {
           </div>
 
           <button className="btn btn-primary w-full justify-center" disabled={busy}>
-            {busy ? 'Working…' : mode === 'login' ? 'Sign in' : 'Create account'}
+            {busy ? 'Working…' : 'Sign in'}
           </button>
 
           {message && (
@@ -122,13 +100,9 @@ export default function LandingPage() {
             </div>
           )}
 
-          <button
-            type="button"
-            onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
-            className="mt-4 text-sm text-brand-600 hover:underline"
-          >
-            {mode === 'login' ? 'Need an account? Register' : 'Have an account? Sign in'}
-          </button>
+          <p className="mt-4 text-center text-xs text-gray-400">
+            Need access? Ask a workspace administrator to create your account.
+          </p>
         </form>
       </div>
     </main>
