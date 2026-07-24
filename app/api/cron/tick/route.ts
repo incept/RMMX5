@@ -1,93 +1,88 @@
+import { randomUUID } from 'crypto';
 import { NextResponse } from 'next/server';
 import { processDueEnrollments } from '@/lib/sequence-runner';
 import { processCountdownNotifications } from '@/lib/notifications';
 import { syncMissedCalls } from '@/lib/integrations/callscaler';
 import { verifyBearerSecret } from '@/lib/webhook-auth';
 import { createAdminClient } from '@/lib/supabase/server';
-import { getSetting, setSetting } from '@/lib/settings';
 import { logDebug, errorMessage } from '@/lib/debug-log';
+import { processQueuedJobs } from '@/lib/job-queue';
 
-// A tick that outlives this is doing something wrong (e.g. a hung SMTP
-// conversation × 25 enrollments); kill it rather than pile up processes.
 export const maxDuration = 120;
-
-// A tick younger than this is assumed still running; new ticks bow out. Kept
-// under the scheduler interval so a crashed tick can't lock the cron out for
-// long — the stale lock simply expires by aging past this window.
-const OVERLAP_WINDOW_MS = 4 * 60 * 1000;
+const LEASE_SECONDS = 180;
 
 /**
- * The heartbeat. Call it every 5–15 minutes from any scheduler:
- *   curl -H "Authorization: Bearer $CRON_SECRET" \
- *     "https://yourdomain.com/api/cron/tick"
- *
- * Each tick: sends due sequence emails and fires client-countdown
- * notifications. Both are idempotent, so over-calling is harmless.
+ * Bounded heartbeat. Provider work lives in a durable queue and each tick
+ * claims only a small batch, so scheduler overlap cannot multiply processes.
  */
 export async function GET(request: Request) {
   if (!verifyBearerSecret(request, process.env.CRON_SECRET)) {
     return NextResponse.json({ error: 'Invalid secret' }, { status: 401 });
   }
 
-  // Overlap guard: sequential email sends over slow SMTP can outlast the
-  // scheduler interval, and overlapping ticks were one source of the
-  // worker-process pileup that took the site down. The claim RPC already
-  // prevents double-SENDS — this prevents double-RUNNING. Best-effort
-  // (read-then-write), which is fine at cron cadence.
-  const lock = await getSetting<{ started_at?: string }>('cron_lock');
-  const lockAge = lock.started_at ? Date.now() - new Date(lock.started_at).getTime() : Infinity;
-  if (lockAge < OVERLAP_WINDOW_MS) {
-    return NextResponse.json({ ok: true, skipped: 'previous tick still running', at: new Date().toISOString() });
-  }
-  await setSetting('cron_lock', { started_at: new Date().toISOString() });
-
-  let sequences: any = null;
-  let countdown: any = null;
-  let calls: any = null;
-  try {
-    sequences = await processDueEnrollments();
-  } catch (e) {
-    await logDebug({ source: 'cron:sequences', message: errorMessage(e) });
-    sequences = { error: errorMessage(e) };
-  }
-  try {
-    countdown = await processCountdownNotifications();
-  } catch (e) {
-    await logDebug({ source: 'cron:countdown', message: errorMessage(e) });
-    countdown = { error: errorMessage(e) };
-  }
-  // Backfills any CallScaler calls whose webhook delivery was missed
-  // (their retries stop after ~2.5 minutes). No-op until an API key is set.
-  try {
-    calls = await syncMissedCalls();
-  } catch (e) {
-    await logDebug({ source: 'cron:callscaler', message: errorMessage(e) });
-    calls = { error: errorMessage(e) };
-  }
-
-  // Keep the log + webhook tables bounded. Best-effort: pruning must not
-  // fail the tick.
-  let pruned: number | null = null;
-  let webhookPruned: any = null;
-  try {
-    const admin = createAdminClient();
-    const { data } = await admin.rpc('prune_debug_log', { p_keep_days: 14 });
-    pruned = typeof data === 'number' ? data : null;
-    const { data: wh } = await admin.rpc('prune_webhook_tables').maybeSingle();
-    webhookPruned = wh ?? null;
-  } catch {
-    // ignore
-  }
-
-  await setSetting('cron_lock', {});
-
-  return NextResponse.json({
-    ok: true,
-    sequences,
-    countdown,
-    calls,
-    pruned,
-    webhook_pruned: webhookPruned,
-    at: new Date().toISOString(),
+  const admin = createAdminClient();
+  const holder = randomUUID();
+  const { data: acquired, error: leaseError } = await admin.rpc('try_acquire_app_lease', {
+    p_name: 'cron_tick',
+    p_holder: holder,
+    p_ttl_seconds: LEASE_SECONDS,
   });
+  if (leaseError) {
+    return NextResponse.json({ error: leaseError.message }, { status: 503 });
+  }
+  if (!acquired) {
+    return NextResponse.json({
+      ok: true,
+      skipped: 'previous tick still running',
+      at: new Date().toISOString(),
+    });
+  }
+
+  try {
+    const names = ['sequences', 'countdown', 'calls', 'jobs'] as const;
+    const results = await Promise.allSettled([
+      processDueEnrollments(2),
+      processCountdownNotifications(),
+      syncMissedCalls(),
+      processQueuedJobs(2),
+    ]);
+    const outcome: Record<string, any> = {};
+    await Promise.all(
+      results.map(async (result, index) => {
+        const name = names[index];
+        if (result.status === 'fulfilled') {
+          outcome[name] = result.value;
+        } else {
+          const message = errorMessage(result.reason);
+          outcome[name] = { error: message };
+          await logDebug({ source: `cron:${name}`, message });
+        }
+      })
+    );
+
+    let pruned: number | null = null;
+    let webhookPruned: any = null;
+    let operationalPruned: any = null;
+    try {
+      const { data } = await admin.rpc('prune_debug_log', { p_keep_days: 14 });
+      pruned = typeof data === 'number' ? data : null;
+      const { data: wh } = await admin.rpc('prune_webhook_tables').maybeSingle();
+      webhookPruned = wh ?? null;
+      const { data: operational } = await admin.rpc('prune_operational_tables').maybeSingle();
+      operationalPruned = operational ?? null;
+    } catch {
+      // Retention is best effort and must not fail the worker.
+    }
+
+    return NextResponse.json({
+      ok: true,
+      ...outcome,
+      pruned,
+      webhook_pruned: webhookPruned,
+      operational_pruned: operationalPruned,
+      at: new Date().toISOString(),
+    });
+  } finally {
+    await admin.from('app_leases').delete().eq('name', 'cron_tick').eq('holder', holder);
+  }
 }

@@ -32,7 +32,10 @@ export default function SmsPage() {
     setBusy(true);
     const res = await fetch('/api/sms/campaigns', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sendNow ? { 'Idempotency-Key': form.requestKey } : {}),
+      },
       body: JSON.stringify({ ...form, sendNow }),
     });
     const data = await res.json();
@@ -40,7 +43,7 @@ export default function SmsPage() {
     if (res.ok) {
       setForm(null);
       load();
-      if (sendNow) alert(`Sent ${data.campaign.sent_count ?? 0}, failed ${data.campaign.failed_count ?? 0}.`);
+      if (sendNow) alert(`Queued ${data.campaign.queued_count ?? 0} SMS message(s).`);
     } else alert(data.error ?? 'Failed');
   }
 
@@ -48,7 +51,12 @@ export default function SmsPage() {
     <div className="mx-auto max-w-4xl p-6">
       <div className="mb-5 flex items-center justify-between">
         <h1 className="text-lg font-semibold">SMS Campaigns</h1>
-        <button className="btn btn-primary" onClick={() => setForm({ name: '', body: '', listId: '' })}>
+        <button className="btn btn-primary" onClick={() => setForm({
+          name: '',
+          body: '',
+          listId: '',
+          requestKey: crypto.randomUUID(),
+        })}>
           + New campaign
         </button>
       </div>

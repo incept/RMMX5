@@ -180,7 +180,10 @@ export default function MarketingPage() {
     setBusy(true);
     const res = await fetch('/api/email/send', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': blast.requestKey,
+      },
       body: JSON.stringify({
         listId: blast.listId,
         subject: blast.subject,
@@ -191,7 +194,7 @@ export default function MarketingPage() {
     const data = await res.json();
     setBusy(false);
     if (res.ok) {
-      alert(`Sent ${data.sent}, failed ${data.failed}.`);
+      alert(`Queued ${data.queued} email(s)${data.duplicates ? `; ${data.duplicates} already queued` : ''}.`);
       setBlast(null);
     } else alert(data.error ?? 'Send failed');
   }
@@ -606,7 +609,12 @@ export default function MarketingPage() {
             <button className="btn btn-primary" onClick={() => setListForm({ name: '' })}>
               + New list
             </button>
-            <button className="btn" onClick={() => setBlast({ listId: '', subject: '', html: '' })}>
+            <button className="btn" onClick={() => setBlast({
+              listId: '',
+              subject: '',
+              html: '',
+              requestKey: crypto.randomUUID(),
+            })}>
               ✉ Send one-off blast
             </button>
           </div>

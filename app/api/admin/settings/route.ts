@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { getSetting, setSetting } from '@/lib/settings';
+import { getUsageSummary } from '@/lib/usage';
 
 const KNOWN_KEYS = [
   'brightdata',
@@ -57,7 +58,9 @@ export async function GET() {
   const keys = [...KNOWN_KEYS, ...READONLY_KEYS];
   const entries = await Promise.all(
     keys.map(async (key) => {
-      const value = { ...(await getSetting(key)) } as Record<string, any>;
+      const value = {
+        ...(key === 'usage' ? await getUsageSummary() : await getSetting(key)),
+      } as Record<string, any>;
       for (const field of SECRET_FIELDS[key] ?? []) {
         value[field] = maskSecret(value[field]);
       }
@@ -81,6 +84,16 @@ export async function PUT(request: Request) {
   }
 
   const value = { ...body.value } as Record<string, any>;
+  if (body.key === 'brightdata' && value.monthly_limit !== '' && value.monthly_limit != null) {
+    const limit = Number(value.monthly_limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 2_147_483_647) {
+      return NextResponse.json(
+        { error: 'Monthly SERP request limit must be a positive whole number' },
+        { status: 400 }
+      );
+    }
+    value.monthly_limit = limit;
+  }
   const secretFields = SECRET_FIELDS[body.key] ?? [];
   if (secretFields.some((f) => isMasked(value[f]))) {
     const current = await getSetting<Record<string, any>>(body.key, { fresh: true });

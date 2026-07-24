@@ -1,5 +1,6 @@
-import { getSetting, bumpUsageCounter } from '@/lib/settings';
+import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
+import { finishUsage, reserveUsage } from '@/lib/usage';
 
 /**
  * BrightData integration.
@@ -47,7 +48,11 @@ export async function runSerpSearch(
 ): Promise<SerpResult[]> {
   const engine = opts?.engine ?? 'google';
 
-  const cfg = await getSetting<{ api_key?: string; serp_zone?: string }>('brightdata');
+  const cfg = await getSetting<{
+    api_key?: string;
+    serp_zone?: string;
+    monthly_limit?: number | string;
+  }>('brightdata');
   if (!cfg.api_key || !cfg.serp_zone) {
     throw new Error('BrightData is not configured (Admin → Integrations).');
   }
@@ -60,7 +65,18 @@ export async function runSerpSearch(
 
   // Meter every attempt (an upper bound on billable requests) so BrightData
   // spend is visible in Admin → Integrations instead of a mystery.
-  void bumpUsageCounter('serp');
+  const configuredLimit = Number(cfg.monthly_limit);
+  const usage = await reserveUsage({
+    provider: 'brightdata',
+    operation: 'serp',
+    monthlyLimit:
+      Number.isInteger(configuredLimit) &&
+      configuredLimit > 0 &&
+      configuredLimit <= 2_147_483_647
+        ? configuredLimit
+        : null,
+    metadata: { engine, zone: cfg.serp_zone },
+  });
 
   const res = await fetch('https://api.brightdata.com/request', {
     method: 'POST',
@@ -80,6 +96,7 @@ export async function runSerpSearch(
   const snippet = bodyText.slice(0, 300);
 
   if (!res.ok) {
+    await finishUsage(usage.id, 'failed', `HTTP ${res.status}`);
     await logDebug({
       source: 'brightdata',
       message: `${engine} SERP request failed: HTTP ${res.status}`,
@@ -89,6 +106,7 @@ export async function runSerpSearch(
   }
 
   if (!bodyText.trim()) {
+    await finishUsage(usage.id, 'failed', 'Empty response');
     await logDebug({
       source: 'brightdata',
       message: `${engine} SERP returned HTTP 200 with an empty body`,
@@ -104,6 +122,7 @@ export async function runSerpSearch(
   try {
     data = JSON.parse(bodyText);
   } catch {
+    await finishUsage(usage.id, 'failed', 'Non-JSON response');
     await logDebug({
       source: 'brightdata',
       message: `${engine} SERP returned a non-JSON body`,
@@ -133,13 +152,15 @@ export async function runSerpSearch(
     });
   }
 
-  return organic.map((r: any, i: number) => ({
+  const results = organic.map((r: any, i: number) => ({
     title: r.title ?? '',
     link: r.link ?? r.url ?? '',
     snippet: r.description ?? r.snippet ?? '',
     position: r.rank ?? r.position ?? i + 1,
     engine,
   }));
+  await finishUsage(usage.id, 'succeeded');
+  return results;
 }
 
 /**

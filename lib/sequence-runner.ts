@@ -121,14 +121,14 @@ export async function startSequencesForStatus(contactId: string, newStatusId: st
 }
 
 /** Called by the cron endpoint: sends every step that has come due. */
-export async function processDueEnrollments(): Promise<{ sent: number; errors: number }> {
+export async function processDueEnrollments(limit = 2): Promise<{ sent: number; errors: number }> {
   const supabase = createAdminClient();
   let sent = 0;
   let errors = 0;
 
   const { data: due, error: claimError } = await supabase.rpc(
     'claim_due_sequence_enrollments',
-    { p_limit: 25 }
+    { p_limit: Math.min(Math.max(limit, 1), 5) }
   );
   if (claimError) throw claimError;
 

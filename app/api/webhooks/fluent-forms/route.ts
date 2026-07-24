@@ -1,15 +1,15 @@
-import { NextResponse, after } from 'next/server';
+import { NextResponse } from 'next/server';
 import { createHash } from 'crypto';
 import { createAdminClient } from '@/lib/supabase/server';
 import { getSetting } from '@/lib/settings';
 import {
   processFluentFormsLead,
-  runAutoSearchSafely,
   extractFluentFormsEventId,
 } from '@/lib/lead-intake';
 import { verifyBearerSecret } from '@/lib/webhook-auth';
 import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receipts';
 import { logDebug, errorMessage } from '@/lib/debug-log';
+import { enqueueJob } from '@/lib/job-queue';
 
 /**
  * Fluent Forms webhook — point the form's webhook feed at:
@@ -17,8 +17,8 @@ import { logDebug, errorMessage } from '@/lib/debug-log';
  * with Authorization: Bearer <webhook_secret>.
  * (secret configured under Admin → Integrations → Fluent Forms).
  *
- * Creates the contact and answers immediately; the automatic web search runs
- * after the response via after(). Answering fast matters: WordPress's HTTP
+ * Creates the contact and persists the automatic web search to the job queue.
+ * Answering fast matters: WordPress's HTTP
  * client times out in seconds, marks a slow delivery as failed, and RETRIES —
  * which, combined with a missing idempotency key, is how one submission became
  * up to four contacts. Every delivery is therefore deduped on the Fluent Forms
@@ -73,10 +73,13 @@ export async function POST(request: Request) {
       contact_id: contact.id,
       status: 'processed',
     });
-    // Search AFTER the response: two SERP engines can take 10–60s, far past
-    // the sender's timeout. Failures inside are logged + flag the contact.
-    after(() => runAutoSearchSafely(contact.id));
-    return NextResponse.json({ ok: true, contact_id: contact.id, search: 'deferred' });
+    // Two SERP engines can take 10–60s, so cron drains this durable job later.
+    await enqueueJob(
+      'auto_search',
+      { contactId: contact.id },
+      `auto-search:fluent-forms:${eventId}`
+    );
+    return NextResponse.json({ ok: true, contact_id: contact.id, search: 'queued' });
   } catch (e: any) {
     await releaseWebhookReceipt('fluent_forms', eventId);
     await admin.from('webhook_leads').insert({

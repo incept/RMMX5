@@ -43,13 +43,16 @@ export default function VoicemailPage() {
     setBusy(true);
     const res = await fetch('/api/voicemail/send', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': sendForm.requestKey,
+      },
       body: JSON.stringify({ dropId: sendForm.dropId, listId: sendForm.listId }),
     });
     const data = await res.json();
     setBusy(false);
     if (res.ok) {
-      alert(`Voicemail drop queued: ${data.sent} sent, ${data.failed} failed.`);
+      alert(`Queued ${data.queued} voicemail(s)${data.duplicates ? `; ${data.duplicates} already queued` : ''}.`);
       setSendForm(null);
       load();
     } else alert(data.error ?? 'Send failed');
@@ -88,7 +91,11 @@ export default function VoicemailPage() {
                   {failed ? ` · ${failed} failed` : ''}
                 </div>
               </div>
-              <button className="btn" onClick={() => setSendForm({ dropId: d.id, listId: '' })}>
+              <button className="btn" onClick={() => setSendForm({
+                dropId: d.id,
+                listId: '',
+                requestKey: crypto.randomUUID(),
+              })}>
                 Send to list…
               </button>
               <button

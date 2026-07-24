@@ -10,6 +10,8 @@ import {
   validateVoicemailFile,
 } from '../lib/uploads.ts';
 import { verifyBearerSecret, verifyEmailitWebhook } from '../lib/webhook-auth.ts';
+import { parseCallScalerPage } from '../lib/callscaler-page.ts';
+import { deliveryKey, validIdempotencyKey } from '../lib/bulk-delivery.ts';
 
 test('the public landing page has no signup call', async () => {
   const source = await readFile(new URL('../app/page.tsx', import.meta.url), 'utf8');
@@ -91,4 +93,56 @@ test('the forward migration contains the database-level concurrency controls', a
   );
   assert.match(migration, /notifications_log_dedupe_idx/i);
   assert.match(migration, /webhook_receipts/i);
+});
+
+test('CallScaler pagination parses the documented nested response envelope', () => {
+  const page = parseCallScalerPage({
+    data: {
+      calls: [{ id: 'call-1' }],
+      has_more: true,
+      next_cursor: 'cursor-2',
+    },
+  });
+  assert.deepEqual(page.calls, [{ id: 'call-1' }]);
+  assert.equal(page.hasMore, true);
+  assert.equal(page.nextCursor, 'cursor-2');
+  assert.throws(() => parseCallScalerPage({ data: { total: 1 } }), /calls array/);
+});
+
+test('bulk delivery keys are stable and recipient-specific', () => {
+  const requestKey = '018f0c73-4f8a-7f62-bf29-5f60fbe60610';
+  assert.equal(validIdempotencyKey(requestKey), true);
+  assert.equal(validIdempotencyKey('short'), false);
+  assert.equal(
+    deliveryKey('email', requestKey, 'contact-1'),
+    `email:${requestKey}:contact-1`
+  );
+});
+
+test('operational migration has atomic leases, jobs, usage, and durable call claims', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/0009_operational_resilience.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /try_acquire_app_lease/i);
+  assert.match(migration, /for update skip locked/i);
+  assert.match(migration, /reserve_usage_event/i);
+  assert.match(migration, /claim_call_processing/i);
+  assert.match(migration, /phone_normalized text[\s\S]*generated always/i);
+  assert.match(migration, /email_messages_delivery_key_idx/i);
+});
+
+test('webhooks persist searches instead of retaining response workers', async () => {
+  const fluent = await readFile(
+    new URL('../app/api/webhooks/fluent-forms/route.ts', import.meta.url),
+    'utf8'
+  );
+  const calls = await readFile(
+    new URL('../app/api/webhooks/callscaler/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.doesNotMatch(fluent, /\bafter\s*\(/);
+  assert.doesNotMatch(calls, /\bafter\s*\(/);
+  assert.match(fluent, /enqueueJob/);
+  assert.match(calls, /enqueueJob/);
 });

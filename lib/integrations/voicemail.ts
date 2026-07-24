@@ -23,6 +23,7 @@ export async function sendVoicemailDrop(opts: {
 
   const res = await fetch(cfg.provider_url, {
     method: 'POST',
+    signal: AbortSignal.timeout(20_000),
     headers: {
       'Content-Type': 'application/json',
       ...(cfg.api_key ? { Authorization: `Bearer ${cfg.api_key}` } : {}),
@@ -35,7 +36,7 @@ export async function sendVoicemailDrop(opts: {
   });
 
   if (!res.ok) {
-    return { ok: false, error: `Voicemail provider error: ${res.status} ${await res.text()}` };
+    return { ok: false, error: `Voicemail provider error: ${res.status} ${(await res.text()).slice(0, 500)}` };
   }
   return { ok: true };
 }
