@@ -1,4 +1,5 @@
 import { getSetting } from '@/lib/settings';
+import { logDebug } from '@/lib/debug-log';
 
 /**
  * BrightData integration.
@@ -39,6 +40,7 @@ export async function runGoogleSearch(
 
   const res = await fetch('https://api.brightdata.com/request', {
     method: 'POST',
+    signal: AbortSignal.timeout(60_000),
     headers: {
       Authorization: `Bearer ${cfg.api_key}`,
       'Content-Type': 'application/json',
@@ -46,12 +48,66 @@ export async function runGoogleSearch(
     body: JSON.stringify({ zone: cfg.serp_zone, url: target, format: 'raw' }),
   });
 
+  // Read as text first. A 200 with an empty or non-JSON body is a real
+  // BrightData failure mode (wrong zone type, zone disabled, upstream block),
+  // and res.json() would only report "Unexpected end of JSON input" — which
+  // says nothing about the cause.
+  const bodyText = await res.text();
+  const snippet = bodyText.slice(0, 300);
+
   if (!res.ok) {
-    throw new Error(`BrightData SERP request failed: ${res.status} ${await res.text()}`);
+    await logDebug({
+      source: 'brightdata',
+      message: `SERP request failed: HTTP ${res.status}`,
+      context: { zone: cfg.serp_zone, query, response: snippet },
+    });
+    throw new Error(`BrightData SERP request failed: ${res.status} ${snippet}`);
   }
 
-  const data = await res.json();
-  const organic = data.organic ?? data.organic_results ?? [];
+  if (!bodyText.trim()) {
+    await logDebug({
+      source: 'brightdata',
+      message: 'SERP returned HTTP 200 with an empty body',
+      context: { zone: cfg.serp_zone, query },
+    });
+    throw new Error(
+      `BrightData returned an empty response for zone "${cfg.serp_zone}". ` +
+        'Confirm the zone exists, is active, and is a SERP API zone (not a proxy zone).'
+    );
+  }
+
+  let data: any;
+  try {
+    data = JSON.parse(bodyText);
+  } catch {
+    await logDebug({
+      source: 'brightdata',
+      message: 'SERP returned a non-JSON body',
+      context: { zone: cfg.serp_zone, query, response: snippet },
+    });
+    throw new Error(`BrightData returned a non-JSON response: ${snippet}`);
+  }
+
+  // Depending on zone configuration BrightData may wrap the target response
+  // in an envelope ({ body: "<json string>" }) instead of returning it raw.
+  if (data && typeof data.body === 'string') {
+    try {
+      data = JSON.parse(data.body);
+    } catch {
+      // Not JSON inside the envelope — fall through to the empty-results path.
+    }
+  }
+
+  const organic = data?.organic ?? data?.organic_results ?? [];
+
+  if (!Array.isArray(organic) || organic.length === 0) {
+    await logDebug({
+      level: 'warn',
+      source: 'brightdata',
+      message: 'SERP response contained no organic results',
+      context: { zone: cfg.serp_zone, query, top_level_keys: Object.keys(data ?? {}) },
+    });
+  }
 
   return organic.map((r: any, i: number) => ({
     title: r.title ?? '',
