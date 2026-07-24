@@ -16,6 +16,7 @@ interface ContactRow {
   status_id: string | null;
   reputation_score: number | null;
   link_score: number | null;
+  search_flag: string | null;
   created_at: string;
   statuses: StatusOption | null;
   contact_links: { id: string; url: string; status: string }[];
@@ -39,6 +40,7 @@ export default function ContactsPage() {
   const [statuses, setStatuses] = useState<StatusOption[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('');
+  const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>('created_at');
   const [sortAsc, setSortAsc] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -51,7 +53,7 @@ export default function ContactsPage() {
     let query = supabase
       .from('contacts')
       .select(
-        'id, name, city, state, email, phone, status_id, reputation_score, link_score, created_at, statuses ( id, name, color ), contact_links ( id, url, status )'
+        'id, name, city, state, email, phone, status_id, reputation_score, link_score, search_flag, created_at, statuses ( id, name, color ), contact_links ( id, url, status )'
       )
       .limit(1000);
 
@@ -60,11 +62,12 @@ export default function ContactsPage() {
       query = query.or(`name.ilike.%${q}%,email.ilike.%${q}%,phone.ilike.%${q}%`);
     }
     if (statusFilter) query = query.eq('status_id', statusFilter);
+    if (flaggedOnly) query = query.not('search_flag', 'is', null);
 
     const { data } = await query;
     setContacts((data as any) ?? []);
     setLoading(false);
-  }, [supabase, search, statusFilter]);
+  }, [supabase, search, statusFilter, flaggedOnly]);
 
   useEffect(() => {
     const t = setTimeout(load, search ? 250 : 0); // debounce typing
@@ -200,6 +203,14 @@ export default function ContactsPage() {
             </option>
           ))}
         </select>
+        <button
+          type="button"
+          onClick={() => setFlaggedOnly((v) => !v)}
+          title="Show only contacts whose auto search skipped or came back partial"
+          className={`btn ${flaggedOnly ? 'border-amber-400 bg-amber-50 text-amber-700' : ''}`}
+        >
+          ⚑ Flagged
+        </button>
         <div className="ml-auto flex items-center gap-2">
           <span className="text-xs text-gray-400">
             {loading ? 'Loading…' : `${sorted.length} contact${sorted.length === 1 ? '' : 's'}`}
@@ -241,7 +252,17 @@ export default function ContactsPage() {
                   className="grid-row"
                   onClick={() => setSelectedId(contact.id)}
                 >
-                  <td className="grid-td font-medium">{contact.name}</td>
+                  <td className="grid-td font-medium">
+                    {contact.search_flag && (
+                      <span
+                        className="mr-1.5 cursor-help text-amber-500"
+                        title={`Search needs a re-run: ${contact.search_flag}`}
+                      >
+                        ⚑
+                      </span>
+                    )}
+                    {contact.name}
+                  </td>
                   <td className="grid-td" onClick={(e) => e.stopPropagation()}>
                     <StatusPill
                       status={contact.statuses}

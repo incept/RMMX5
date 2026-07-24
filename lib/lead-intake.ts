@@ -22,6 +22,23 @@ import { logDebug, errorMessage } from '@/lib/debug-log';
  *    filter of "sites we care about" — mugshot sites, complaint boards, etc.)
  * 4. Fill link slots 1–14 with those results and compute the scores.
  */
+/**
+ * Marks (or clears) the contact's search flag. A non-null `flag` is a short
+ * human-readable reason shown in the contacts grid and the Link Data panel so a
+ * search that skipped or came back partial can be found and re-run by hand.
+ * Passing null clears it — done on a fully successful search.
+ */
+async function setSearchFlag(
+  supabase: ReturnType<typeof createAdminClient>,
+  contactId: string,
+  flag: string | null
+) {
+  await supabase
+    .from('contacts')
+    .update({ search_flag: flag, search_flagged_at: flag ? new Date().toISOString() : null })
+    .eq('id', contactId);
+}
+
 export async function runAutoSearchForContact(contactId: string, actorId?: string | null) {
   const supabase = createAdminClient();
 
@@ -63,6 +80,13 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
     const reason = contact.ip
       ? `no location for the search (IP ${contact.ip} did not geolocate — likely ip-api rate limit; a commercial key removes it)`
       : 'no location for the search (lead has no city/state and no IP to geolocate)';
+    await setSearchFlag(
+      supabase,
+      contactId,
+      contact.ip
+        ? 'No location to search — IP did not geolocate (likely ip-api rate limit)'
+        : 'No location to search — no city/state and no IP'
+    );
     await logDebug({
       level: 'warn',
       source: 'lead-intake:auto-search',
@@ -105,7 +129,10 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
     });
   }
   // Only a total failure aborts — matches the old single-engine behaviour.
-  if (lists.length === 0) throw new Error(`All search engines failed — ${failures.join('; ')}`);
+  if (lists.length === 0) {
+    await setSearchFlag(supabase, contactId, 'All search engines failed');
+    throw new Error(`All search engines failed — ${failures.join('; ')}`);
+  }
 
   const results = mergeSerpResults(lists);
 
@@ -142,6 +169,17 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
   }
 
   const scores = await applyScores(contactId);
+
+  // Flag a partial run (one engine failed but the other returned) so it can be
+  // re-run once the failing engine recovers; a clean run clears any prior flag.
+  const failedEngines = engines.filter((e) => !succeeded.includes(e));
+  await setSearchFlag(
+    supabase,
+    contactId,
+    failedEngines.length
+      ? `${failedEngines.join(' + ')} search failed — results may be incomplete`
+      : null
+  );
 
   await logActivity({
     contactId,
