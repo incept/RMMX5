@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
 import { stopEnrollmentsFor } from '@/lib/sequence-runner';
 import { verifyTrackingUrl } from '@/lib/signing';
+import { isTrackableId, passesCooldown } from '@/lib/track-guard';
 
 /**
  * Click tracking + redirect: GET /api/track/click?m=<message id>&u=<url>&s=<hmac>
@@ -16,29 +17,30 @@ export async function GET(request: Request) {
   const sig = params.get('s');
 
   const valid =
-    !!messageId && !!url && /^https?:\/\//i.test(url) && verifyTrackingUrl(messageId, url, sig);
+    isTrackableId(messageId) &&
+    !!url &&
+    /^https?:\/\//i.test(url) &&
+    verifyTrackingUrl(messageId, url, sig);
 
-  if (valid) {
+  // The cooldown gates COUNTING, never the redirect — a user clicking the
+  // same link twice must still land on the page both times.
+  if (valid && passesCooldown(`click:${messageId}:${url}`)) {
     try {
       const admin = createAdminClient();
-      const { data: message } = await admin
-        .from('email_messages')
-        .select('id, contact_id, click_count')
-        .eq('id', messageId)
-        .maybeSingle();
+      // Atomic increment (no read-modify-write race); returns contact_id so
+      // the event insert needs no second lookup. Empty result = unknown id.
+      const { data } = await admin
+        .rpc('track_email_event', { p_message_id: messageId, p_event: 'click' })
+        .maybeSingle<{ message_id: string; contact_id: string | null }>();
 
-      if (message) {
-        await admin
-          .from('email_messages')
-          .update({ click_count: message.click_count + 1 })
-          .eq('id', message.id);
+      if (data) {
         await admin.from('email_events').insert({
-          message_id: message.id,
-          contact_id: message.contact_id,
+          message_id: data.message_id,
+          contact_id: data.contact_id,
           type: 'click',
           url,
         });
-        if (message.contact_id) await stopEnrollmentsFor(message.contact_id, 'click');
+        if (data.contact_id) await stopEnrollmentsFor(data.contact_id, 'click');
       }
     } catch {
       // tracking must never break the redirect

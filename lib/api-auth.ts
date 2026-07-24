@@ -8,13 +8,18 @@ import { NextResponse } from 'next/server';
  */
 export async function requireUser() {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // getClaims verifies the JWT locally (against Supabase's cached JWKS) when
+  // the project uses the new asymmetric keys, instead of getUser()'s network
+  // round-trip to the Auth server on EVERY api call. Falls back to a server
+  // check automatically on legacy symmetric keys. The profile select below
+  // stays authoritative for role/status — a revoked user is cut off there.
+  const { data } = await supabase.auth.getClaims();
+  const claims = data?.claims;
 
-  if (!user) {
+  if (!claims?.sub) {
     return { error: NextResponse.json({ error: 'Not authenticated' }, { status: 401 }) };
   }
+  const user = { id: claims.sub as string, email: (claims.email as string) ?? null };
 
   const { data: profile } = await supabase
     .from('profiles')

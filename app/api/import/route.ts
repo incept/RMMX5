@@ -30,56 +30,69 @@ export async function POST(request: Request) {
   let imported = 0;
   const errors: string[] = [];
 
-  for (const row of rows) {
+  // Batched: one contacts insert and one links insert per 100 rows, instead
+  // of one round-trip per row (and per link). Large CSVs went from thousands
+  // of sequential DB calls to a few dozen. Trade-off: a bad value fails its
+  // whole chunk, so the error message carries the chunk range.
+  const CHUNK = 100;
+  const usable = rows.filter((row) => row.name || row.email);
+
+  for (let offset = 0; offset < usable.length; offset += CHUNK) {
+    const chunk = usable.slice(offset, offset + CHUNK);
     try {
-      if (!row.name && !row.email) continue; // nothing identifiable
+      const contactRows = chunk.map((row) => ({
+        name: row.name || row.email || '(no name)',
+        email: row.email || null,
+        phone: row.phone || null,
+        city: row.city || null,
+        state: row.state || null,
+        status_id:
+          (row.status
+            ? (statusByName.get(row.status.toLowerCase().trim()) ?? defaultStatus?.id)
+            : defaultStatus?.id) ?? null,
+        browser: row.browser || null,
+        ppc_kw: row.ppc_kw || null,
+        source: row.source || 'import',
+        ip: row.ip || null,
+        utm: row.utm || null,
+      }));
 
-      const statusId = row.status
-        ? (statusByName.get(row.status.toLowerCase().trim()) ?? defaultStatus?.id)
-        : defaultStatus?.id;
-
-      const { data: contact, error } = await admin
+      const { data: contacts, error } = await admin
         .from('contacts')
-        .insert({
-          name: row.name || row.email || '(no name)',
-          email: row.email || null,
-          phone: row.phone || null,
-          city: row.city || null,
-          state: row.state || null,
-          status_id: statusId ?? null,
-          browser: row.browser || null,
-          ppc_kw: row.ppc_kw || null,
-          source: row.source || 'import',
-          ip: row.ip || null,
-          utm: row.utm || null,
-        })
-        .select('id')
-        .single();
-      if (error || !contact) throw new Error(error?.message ?? 'insert failed');
-
-      const linkStatus = ['live', 'requested', 'removed'].includes(
-        (row.link_status ?? '').toLowerCase().trim()
-      )
-        ? (row.link_status.toLowerCase().trim() as string)
-        : 'live';
-
-      let hasLinks = false;
-      for (let i = 1; i <= 14; i++) {
-        const url = (row[`link${i}`] ?? '').trim();
-        if (!url) continue;
-        hasLinks = true;
-        await admin.from('contact_links').insert({
-          contact_id: contact.id,
-          position: i,
-          url,
-          status: linkStatus,
-        });
+        .insert(contactRows)
+        .select('id');
+      if (error || !contacts || contacts.length !== chunk.length) {
+        throw new Error(error?.message ?? 'chunk insert failed');
       }
-      if (hasLinks) await applyScores(contact.id);
 
-      imported += 1;
+      // Returned rows are in input order, so contacts[i] belongs to chunk[i].
+      const linkRows: Record<string, any>[] = [];
+      const scoreIds: string[] = [];
+      chunk.forEach((row, i) => {
+        const linkStatus = ['live', 'requested', 'removed'].includes(
+          (row.link_status ?? '').toLowerCase().trim()
+        )
+          ? row.link_status.toLowerCase().trim()
+          : 'live';
+        let hasLinks = false;
+        for (let n = 1; n <= 14; n++) {
+          const url = (row[`link${n}`] ?? '').trim();
+          if (!url) continue;
+          hasLinks = true;
+          linkRows.push({ contact_id: contacts[i].id, position: n, url, status: linkStatus });
+        }
+        if (hasLinks) scoreIds.push(contacts[i].id);
+      });
+
+      if (linkRows.length) {
+        const { error: linkError } = await admin.from('contact_links').insert(linkRows);
+        if (linkError) errors.push(`links (rows ${offset + 1}–${offset + chunk.length}): ${linkError.message}`);
+      }
+      for (const id of scoreIds) await applyScores(id);
+
+      imported += chunk.length;
     } catch (e: any) {
-      errors.push(e.message);
+      errors.push(`rows ${offset + 1}–${offset + chunk.length}: ${e.message}`);
     }
   }
 
