@@ -1,5 +1,5 @@
 import { createServerClient } from '@supabase/ssr';
-import { createClient as createSupabaseClient } from '@supabase/supabase-js';
+import { createClient as createSupabaseClient, type SupabaseClient } from '@supabase/supabase-js';
 import { cookies } from 'next/headers';
 
 // Server-side env reads are live (never inlined into the public bundle), so
@@ -51,9 +51,14 @@ export async function createClient() {
  * NEVER import this into a Client Component or expose it to the browser.
  * Only use inside Route Handlers after verifying the caller, or inside the
  * signed cron/webhook endpoints.
+ *
+ * Singleton: the client is stateless (no session, no cookies), and hot paths
+ * were constructing a fresh one per logDebug/getSetting/logActivity call.
  */
-export function createAdminClient() {
-  return createSupabaseClient(url(), serviceKey(), {
+let adminClient: SupabaseClient<any, any, any> | null = null;
+export function createAdminClient(): SupabaseClient<any, any, any> {
+  adminClient ??= createSupabaseClient(url(), serviceKey(), {
     auth: { autoRefreshToken: false, persistSession: false },
   });
+  return adminClient;
 }

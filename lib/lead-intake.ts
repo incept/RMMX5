@@ -33,10 +33,19 @@ async function setSearchFlag(
   contactId: string,
   flag: string | null
 ) {
-  await supabase
+  const { error } = await supabase
     .from('contacts')
     .update({ search_flag: flag, search_flagged_at: flag ? new Date().toISOString() : null })
     .eq('id', contactId);
+  if (error) {
+    // A flag that fails to persist means a broken search nobody will re-run.
+    await logDebug({
+      source: 'lead-intake:search-flag',
+      message: `Failed to persist search flag: ${error.message}`,
+      context: { flag },
+      contactId,
+    });
+  }
 }
 
 export async function runAutoSearchForContact(contactId: string, actorId?: string | null) {
@@ -58,7 +67,18 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
       city = city || located.city;
       state = state || located.region || located.regionName;
       if (city !== contact.city || state !== contact.state) {
-        await supabase.from('contacts').update({ city, state }).eq('id', contactId);
+        const { error: locError } = await supabase
+          .from('contacts')
+          .update({ city, state })
+          .eq('id', contactId);
+        if (locError) {
+          await logDebug({
+            source: 'lead-intake:auto-search',
+            message: `Failed to persist geolocated city/state: ${locError.message}`,
+            context: { city, state },
+            contactId,
+          });
+        }
         await logActivity({
           contactId,
           actorId,

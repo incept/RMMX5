@@ -59,7 +59,7 @@ export async function POST(request: Request) {
       const result = await sendCrmEmail({
         to: contact.email,
         subject: renderTemplate(body.subject, contact),
-        html: renderTemplate(body.html, contact),
+        html: renderTemplate(body.html, contact, { html: true }),
         accountId,
         contactId: contact.id,
         actorId: auth.profile.id,
@@ -83,7 +83,7 @@ export async function POST(request: Request) {
   const result = await sendCrmEmail({
     to,
     subject: contact ? renderTemplate(body.subject, contact) : body.subject,
-    html: contact ? renderTemplate(body.html, contact) : body.html,
+    html: contact ? renderTemplate(body.html, contact, { html: true }) : body.html,
     accountId,
     contactId: contact?.id ?? null,
     actorId: auth.profile.id,

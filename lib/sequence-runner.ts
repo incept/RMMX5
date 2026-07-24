@@ -15,11 +15,32 @@ import { sequenceFailureUpdate } from '@/lib/sequence-retry';
  * whatever is due.
  */
 
-/** Render {{placeholders}} against a contact row. */
-export function renderTemplate(text: string, contact: Record<string, any>): string {
+const HTML_ESCAPES: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+};
+
+/**
+ * Render {{placeholders}} against a contact row.
+ *
+ * `html: true` escapes the SUBSTITUTED VALUES (never the template itself —
+ * the admin's markup is trusted). Contact fields are attacker-supplied: a
+ * form submission with `<a href=...>` in the name would otherwise be mailed
+ * out as live markup under our sending domain. Subjects and SMS bodies are
+ * plain text, so they render unescaped.
+ */
+export function renderTemplate(
+  text: string,
+  contact: Record<string, any>,
+  opts?: { html?: boolean }
+): string {
   return text.replace(/\{\{\s*(\w+)\s*\}\}/g, (_m, key) => {
     const value = contact[key] ?? contact.custom?.[key] ?? '';
-    return value == null ? '' : String(value);
+    const str = value == null ? '' : String(value);
+    return opts?.html ? str.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]) : str;
   });
 }
 
@@ -144,7 +165,7 @@ export async function processDueEnrollments(): Promise<{ sent: number; errors: n
       const result = await sendCrmEmail({
         to: contact.email,
         subject: renderTemplate(template?.subject ?? '', contact),
-        html: renderTemplate(template?.html ?? '', contact),
+        html: renderTemplate(template?.html ?? '', contact, { html: true }),
         accountId: sequence.send_account_id,
         contactId: contact.id,
         sequenceId: sequence.id,
