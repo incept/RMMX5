@@ -4,9 +4,11 @@ import { logDebug } from '@/lib/debug-log';
 /**
  * BrightData integration.
  *
- * SERP API (https://brightdata.com/products/serp-api): we send a Google
- * search URL through the customer's SERP zone and get parsed JSON back.
- * Used for the auto-search on lead import and for manual "Search Google"
+ * SERP API (https://brightdata.com/products/serp-api): we send a search-engine
+ * results URL through the customer's SERP zone and get parsed JSON back. The
+ * same zone serves Google and Bing — only the target URL differs — so the auto
+ * search queries both and merges the results (a link Google buries often ranks
+ * on Bing, and vice versa). Used on lead intake and for the manual "Run search"
  * from a contact's panel.
  *
  * The same settings blob also stores the BACKCONNECT ROTATING PROXY zone
@@ -16,17 +18,35 @@ import { logDebug } from '@/lib/debug-log';
  *   brd.superproxy.io:33335, user brd-customer-<id>-zone-<zone>, pass <pass>
  */
 
+export type SearchEngine = 'google' | 'bing';
+
 export interface SerpResult {
   title: string;
   link: string;
   snippet: string;
   position: number;
+  engine: SearchEngine;
 }
 
-export async function runGoogleSearch(
+/** Builds the engine-specific search URL. brd_json=1 asks BrightData to parse it. */
+function buildSerpTarget(
+  engine: SearchEngine,
   query: string,
-  opts?: { numResults?: number; country?: string }
+  num: number,
+  country: string
+): string {
+  const q = encodeURIComponent(query);
+  return engine === 'bing'
+    ? `https://www.bing.com/search?q=${q}&count=${num}&cc=${country}&brd_json=1`
+    : `https://www.google.com/search?q=${q}&num=${num}&gl=${country}&brd_json=1`;
+}
+
+export async function runSerpSearch(
+  query: string,
+  opts?: { engine?: SearchEngine; numResults?: number; country?: string }
 ): Promise<SerpResult[]> {
+  const engine = opts?.engine ?? 'google';
+
   const cfg = await getSetting<{ api_key?: string; serp_zone?: string }>('brightdata');
   if (!cfg.api_key || !cfg.serp_zone) {
     throw new Error('BrightData is not configured (Admin → Integrations).');
@@ -36,7 +56,7 @@ export async function runGoogleSearch(
   const num = opts?.numResults ?? search.num_results ?? 20;
   const country = opts?.country ?? search.country ?? 'us';
 
-  const target = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=${num}&gl=${country}&brd_json=1`;
+  const target = buildSerpTarget(engine, query, num, country);
 
   const res = await fetch('https://api.brightdata.com/request', {
     method: 'POST',
@@ -58,20 +78,20 @@ export async function runGoogleSearch(
   if (!res.ok) {
     await logDebug({
       source: 'brightdata',
-      message: `SERP request failed: HTTP ${res.status}`,
-      context: { zone: cfg.serp_zone, query, response: snippet },
+      message: `${engine} SERP request failed: HTTP ${res.status}`,
+      context: { engine, zone: cfg.serp_zone, query, response: snippet },
     });
-    throw new Error(`BrightData SERP request failed: ${res.status} ${snippet}`);
+    throw new Error(`BrightData ${engine} SERP request failed: ${res.status} ${snippet}`);
   }
 
   if (!bodyText.trim()) {
     await logDebug({
       source: 'brightdata',
-      message: 'SERP returned HTTP 200 with an empty body',
-      context: { zone: cfg.serp_zone, query },
+      message: `${engine} SERP returned HTTP 200 with an empty body`,
+      context: { engine, zone: cfg.serp_zone, query },
     });
     throw new Error(
-      `BrightData returned an empty response for zone "${cfg.serp_zone}". ` +
+      `BrightData returned an empty ${engine} response for zone "${cfg.serp_zone}". ` +
         'Confirm the zone exists, is active, and is a SERP API zone (not a proxy zone).'
     );
   }
@@ -82,10 +102,10 @@ export async function runGoogleSearch(
   } catch {
     await logDebug({
       source: 'brightdata',
-      message: 'SERP returned a non-JSON body',
-      context: { zone: cfg.serp_zone, query, response: snippet },
+      message: `${engine} SERP returned a non-JSON body`,
+      context: { engine, zone: cfg.serp_zone, query, response: snippet },
     });
-    throw new Error(`BrightData returned a non-JSON response: ${snippet}`);
+    throw new Error(`BrightData returned a non-JSON ${engine} response: ${snippet}`);
   }
 
   // Depending on zone configuration BrightData may wrap the target response
@@ -104,8 +124,8 @@ export async function runGoogleSearch(
     await logDebug({
       level: 'warn',
       source: 'brightdata',
-      message: 'SERP response contained no organic results',
-      context: { zone: cfg.serp_zone, query, top_level_keys: Object.keys(data ?? {}) },
+      message: `${engine} SERP response contained no organic results`,
+      context: { engine, zone: cfg.serp_zone, query, top_level_keys: Object.keys(data ?? {}) },
     });
   }
 
@@ -114,5 +134,44 @@ export async function runGoogleSearch(
     link: r.link ?? r.url ?? '',
     snippet: r.description ?? r.snippet ?? '',
     position: r.rank ?? r.position ?? i + 1,
+    engine,
   }));
+}
+
+/**
+ * Strips scheme / www / trailing slash so the same page returned by two engines
+ * dedupes to one entry. The path and query are preserved on purpose — on a
+ * mugshot or complaint site each record is a distinct URL that differs only in
+ * its path, and collapsing those would drop real results.
+ */
+function canonicalUrl(url: string): string {
+  return url
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/+$/, '');
+}
+
+/**
+ * Merges results from multiple engines, de-duplicated by canonical URL. Lists
+ * are interleaved by rank (Google #1, Bing #1, Google #2, …) so the strongest
+ * hits from each engine stay near the top; first writer wins, so a page found
+ * by both keeps whichever engine ranked it higher.
+ */
+export function mergeSerpResults(lists: SerpResult[][]): SerpResult[] {
+  const seen = new Set<string>();
+  const merged: SerpResult[] = [];
+  const maxLen = Math.max(0, ...lists.map((l) => l.length));
+  for (let i = 0; i < maxLen; i++) {
+    for (const list of lists) {
+      const result = list[i];
+      if (!result?.link) continue;
+      const key = canonicalUrl(result.link);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(result);
+    }
+  }
+  return merged;
 }

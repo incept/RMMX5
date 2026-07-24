@@ -518,7 +518,7 @@ export default function ContactPanel({
                 </button>
                 {customFor('link').length > 0 && saveButton([])}
                 <button className="btn" disabled={busy === 'search'} onClick={runSearch}>
-                  {busy === 'search' ? 'Searching…' : '🔎 Run Google search'}
+                  {busy === 'search' ? 'Searching…' : '🔎 Run web search'}
                 </button>
               </div>
             </div>
