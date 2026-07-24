@@ -1,6 +1,7 @@
 import { createAdminClient } from '@/lib/supabase/server';
 import { sendViaEmailit } from '@/lib/integrations/emailit';
 import { sendSms } from '@/lib/integrations/textlink';
+import { notificationRetryUpdate } from '@/lib/notification-retry';
 
 /**
  * Admin-configurable client notifications (notification_rules):
@@ -64,12 +65,27 @@ export async function fireNotification(
           message,
           status: 'pending',
           dedupe_key: dedupeKey,
+          attempt_count: 0,
+          next_retry_at: null,
         })
-        .select('id')
+        .select('id, attempt_count')
         .single();
-      // A unique-key collision means another cron worker already reserved it.
-      if (reservationError?.code === '23505') continue;
-      if (reservationError || !reservation) continue;
+      let activeReservation = reservation;
+      if (reservationError?.code === '23505' && dedupeKey) {
+        const { data: retry } = await supabase
+          .from('notifications_log')
+          .update({ status: 'pending', error: null, next_retry_at: null })
+          .eq('dedupe_key', dedupeKey)
+          .eq('status', 'failed')
+          .lt('attempt_count', 5)
+          .or(`next_retry_at.is.null,next_retry_at.lte.${new Date().toISOString()}`)
+          .select('id, attempt_count')
+          .maybeSingle();
+        activeReservation = retry;
+      }
+      // A sent/pending collision means another worker already owns or completed it.
+      if (reservationError && reservationError.code !== '23505') continue;
+      if (!activeReservation) continue;
 
       let status: 'sent' | 'failed' = 'sent';
       let error: string | undefined;
@@ -100,10 +116,14 @@ export async function fireNotification(
         error = e.message;
       }
 
+      const retryUpdate =
+        status === 'failed'
+          ? notificationRetryUpdate(activeReservation.attempt_count ?? 0, error)
+          : { status: 'sent' as const, error: null, next_retry_at: null };
       await supabase
         .from('notifications_log')
-        .update({ status, error: error ?? null })
-        .eq('id', reservation.id);
+        .update(retryUpdate)
+        .eq('id', activeReservation.id);
     }
   }
 }

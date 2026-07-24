@@ -3,6 +3,7 @@ import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { sendVoicemailDrop } from '@/lib/integrations/voicemail';
 import { logActivity } from '@/lib/activity';
+import { deliveryKey, MAX_BULK_RECIPIENTS, validIdempotencyKey } from '@/lib/bulk-delivery';
 
 const BUCKET = 'voicemail-audio';
 
@@ -15,6 +16,9 @@ export async function POST(request: Request) {
   if ('error' in auth) return auth.error;
   const body = await request.json();
   if (!body.dropId) return NextResponse.json({ error: 'dropId required' }, { status: 400 });
+  if (!validIdempotencyKey(body.idempotencyKey)) {
+    return NextResponse.json({ error: 'A valid idempotencyKey is required' }, { status: 400 });
+  }
 
   const admin = createAdminClient();
   const { data: drop } = await admin
@@ -48,6 +52,14 @@ export async function POST(request: Request) {
     contacts = [...contacts, ...(data ?? [])];
   }
   contacts = contacts.filter((c) => c.phone);
+  const uniqueContacts = new Map(contacts.map((contact) => [contact.id, contact]));
+  contacts = [...uniqueContacts.values()];
+  if (contacts.length > MAX_BULK_RECIPIENTS) {
+    return NextResponse.json(
+      { error: `Voicemail sends are limited to ${MAX_BULK_RECIPIENTS} recipients per request` },
+      { status: 413 }
+    );
+  }
   if (!contacts.length) {
     return NextResponse.json({ error: 'No contacts with phone numbers' }, { status: 400 });
   }
@@ -55,6 +67,33 @@ export async function POST(request: Request) {
   let sent = 0;
   let failed = 0;
   for (const contact of contacts) {
+    const key = deliveryKey('voicemail', body.idempotencyKey, contact.id);
+    const { data: sendRow, error: reserveError } = await admin
+      .from('voicemail_sends')
+      .insert({
+        drop_id: drop.id,
+        contact_id: contact.id,
+        phone: contact.phone,
+        status: 'queued',
+        delivery_key: key,
+      })
+      .select('id')
+      .single();
+    if (reserveError?.code === '23505') {
+      const { data: existing } = await admin
+        .from('voicemail_sends')
+        .select('status')
+        .eq('delivery_key', key)
+        .maybeSingle();
+      if (existing?.status === 'sent') sent += 1;
+      else failed += 1;
+      continue;
+    }
+    if (reserveError || !sendRow) {
+      failed += 1;
+      continue;
+    }
+
     let status: 'sent' | 'failed' = 'sent';
     let errorNote: string | null = null;
     try {
@@ -68,13 +107,7 @@ export async function POST(request: Request) {
       errorNote = e.message;
     }
 
-    await admin.from('voicemail_sends').insert({
-      drop_id: drop.id,
-      contact_id: contact.id,
-      phone: contact.phone,
-      status,
-      error: errorNote,
-    });
+    await admin.from('voicemail_sends').update({ status, error: errorNote }).eq('id', sendRow.id);
     await logActivity({
       contactId: contact.id,
       actorId: auth.profile.id,

@@ -44,7 +44,11 @@ export default function VoicemailPage() {
     const res = await fetch('/api/voicemail/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dropId: sendForm.dropId, listId: sendForm.listId }),
+      body: JSON.stringify({
+        dropId: sendForm.dropId,
+        listId: sendForm.listId,
+        idempotencyKey: sendForm.idempotencyKey,
+      }),
     });
     const data = await res.json();
     setBusy(false);
@@ -88,7 +92,16 @@ export default function VoicemailPage() {
                   {failed ? ` · ${failed} failed` : ''}
                 </div>
               </div>
-              <button className="btn" onClick={() => setSendForm({ dropId: d.id, listId: '' })}>
+              <button
+                className="btn"
+                onClick={() =>
+                  setSendForm({
+                    dropId: d.id,
+                    listId: '',
+                    idempotencyKey: crypto.randomUUID(),
+                  })
+                }
+              >
                 Send to list…
               </button>
               <button

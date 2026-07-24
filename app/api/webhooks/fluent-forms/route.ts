@@ -49,6 +49,12 @@ export async function POST(request: Request) {
     payload.submission_id ??
     payload.data?.entry_id ??
     null;
+  if (!eventId) {
+    return NextResponse.json(
+      { error: 'A stable entry_id, submission_id, or x-rmmx-idempotency-key is required' },
+      { status: 400 }
+    );
+  }
   const claimed = await claimWebhookReceipt('fluent_forms', eventId);
   if (!claimed) return NextResponse.json({ ok: true, duplicate: true });
 

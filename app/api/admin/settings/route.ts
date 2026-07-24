@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { getSetting, setSetting } from '@/lib/settings';
+import { maskSettingSecrets, mergeSettingSecrets } from '@/lib/settings-secrets';
 
 const KNOWN_KEYS = [
   'brightdata',
@@ -22,9 +23,16 @@ export async function GET() {
   if ('error' in auth) return auth.error;
 
   const entries = await Promise.all(
-    KNOWN_KEYS.map(async (key) => [key, await getSetting(key)] as const)
+    KNOWN_KEYS.map(async (key) => {
+      const masked = maskSettingSecrets(key, await getSetting<Record<string, any>>(key));
+      return [key, masked] as const;
+    })
   );
-  return NextResponse.json({ settings: Object.fromEntries(entries) });
+  const safe = Object.fromEntries(entries);
+  return NextResponse.json({
+    settings: Object.fromEntries(KNOWN_KEYS.map((key) => [key, safe[key].value])),
+    configuredSecrets: Object.fromEntries(KNOWN_KEYS.map((key) => [key, safe[key].configured])),
+  });
 }
 
 /** PUT { key, value } — upsert one settings blob. */
@@ -40,6 +48,8 @@ export async function PUT(request: Request) {
     return NextResponse.json({ error: 'value must be an object' }, { status: 400 });
   }
 
-  await setSetting(body.key, body.value, auth.profile.id);
+  const current = await getSetting<Record<string, any>>(body.key);
+  const merged = mergeSettingSecrets(body.key, current, body.value);
+  await setSetting(body.key, merged, auth.profile.id);
   return NextResponse.json({ ok: true });
 }

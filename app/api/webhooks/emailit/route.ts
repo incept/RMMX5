@@ -58,6 +58,9 @@ export async function POST(request: Request) {
   if (!recipient) return NextResponse.json({ ok: true, ignored: 'no recipient' });
 
   const eventId = body?.event_id ?? body?.id ?? null;
+  if (!eventId) {
+    return NextResponse.json({ error: 'Emailit event ID is required' }, { status: 400 });
+  }
   const claimed = await claimWebhookReceipt('emailit', eventId);
   if (!claimed) return NextResponse.json({ ok: true, duplicate: true });
 
@@ -66,7 +69,7 @@ export async function POST(request: Request) {
     const { data: contact } = await admin
       .from('contacts')
       .select('id, name, status_id')
-      .ilike('email', String(recipient))
+      .eq('email_normalized', String(recipient).trim().toLowerCase())
       .limit(1)
       .maybeSingle();
     if (!contact) return NextResponse.json({ ok: true, ignored: 'no matching contact' });

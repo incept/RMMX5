@@ -106,12 +106,17 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
 /** Admin: API keys & app configuration (stored in the settings table, admin-only). */
 export default function IntegrationsPage() {
   const [settings, setSettings] = useState<Record<string, Record<string, any>>>({});
+  const [configuredSecrets, setConfiguredSecrets] = useState<Record<string, string[]>>({});
   const [savedKey, setSavedKey] = useState<string | null>(null);
   const [origin, setOrigin] = useState('');
 
   const load = useCallback(async () => {
     const res = await fetch('/api/admin/settings');
-    if (res.ok) setSettings((await res.json()).settings ?? {});
+    if (res.ok) {
+      const data = await res.json();
+      setSettings(data.settings ?? {});
+      setConfiguredSecrets(data.configuredSecrets ?? {});
+    }
   }, []);
 
   useEffect(() => {
@@ -126,6 +131,7 @@ export default function IntegrationsPage() {
       body: JSON.stringify({ key, value: settings[key] ?? {} }),
     });
     if (res.ok) {
+      await load();
       setSavedKey(key);
       setTimeout(() => setSavedKey(null), 1500);
     } else alert((await res.json()).error ?? 'Save failed');
@@ -152,7 +158,11 @@ export default function IntegrationsPage() {
                 <input
                   className="input"
                   type={field.secret ? 'password' : 'text'}
-                  placeholder={field.placeholder}
+                  placeholder={
+                    field.secret && configuredSecrets[section.key]?.includes(field.key)
+                      ? 'Configured — leave blank to keep'
+                      : field.placeholder
+                  }
                   value={settings[section.key]?.[field.key] ?? ''}
                   onChange={(e) =>
                     setSettings((s) => ({

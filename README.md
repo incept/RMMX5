@@ -27,24 +27,24 @@ voicemail drops, vendor management, revenue projection, and a full admin panel.
 | Lead statuses (16 seeded, colored) & client stages | Admin → Statuses & Stages |
 | URL rules: link scoring weights, difficulty, removal price, relevance | Admin → URL Rules |
 | Client notifications (link status change / status change / countdown) | Admin → Notifications |
-| API keys: BrightData, Emailit, TextLink, Stripe, Fluent Forms, voicemail | Admin → Integrations |
-| Fluent Forms lead webhook → auto Google search → link scoring | `/api/webhooks/fluent-forms` |
+| API keys: BrightData, Emailit, TextLink, Stripe, Fluent Forms, CallScaler, voicemail | Admin → Integrations |
+| Fluent Forms lead webhook → Google/Bing search → link scoring | `/api/webhooks/fluent-forms` |
+| CallScaler webhook + paginated missed-call recovery | `/api/webhooks/callscaler`, cron tick |
 | Backconnect rotating proxy (BrightData) for manual searches | Admin → Integrations |
 | Stripe revenue reporting | dashboard |
 
 ## 1. Set up Supabase
 
 1. Create a project at [supabase.com](https://supabase.com).
-2. In the SQL Editor, run `supabase/migrations/0001_init.sql`, then
-   `supabase/migrations/0002_security.sql`, then
-   `supabase/migrations/0003_access_and_delivery_hardening.sql`. Together they
+2. In the SQL Editor, run every file in `supabase/migrations/` in numeric order,
+   currently `0001_init.sql` through `0008_audit_remediation.sql`. Together they
    create every table, the storage buckets, seed data, RLS, SMTP ownership
    controls, atomic sequence claiming, and notification/webhook deduplication.
 3. Copy the Project URL and API keys into `.env.local` (start from
    `.env.local.example`). Mind the key types: the **publishable** key
    (`sb_publishable_…`, or legacy `anon`) goes in
-   `NEXT_PUBLIC_SUPABASE_ANON_KEY`; the **secret** key (`sb_secret_…`, or
-   legacy `service_role`) goes in `SUPABASE_SERVICE_ROLE_KEY` only. Putting a
+   `NEXT_PUBLIC_SB_PUBLISHABLE_KEY`; the **secret** key (`sb_secret_…`, or
+   legacy `service_role`) goes in `SB_SECRET_KEY` only. Putting a
    secret key in the `NEXT_PUBLIC_` var makes every page fail with
    *"Forbidden use of secret API key in browser"*. After editing
    `.env.local`, restart `npm run dev` — `NEXT_PUBLIC_*` values are baked in
@@ -95,11 +95,13 @@ Webhook credentials are never placed in URLs:
 | Fluent Forms lead capture | `POST /api/webhooks/fluent-forms` | `Authorization: Bearer <Fluent Forms secret>` |
 | Inbound email → inbox/reply detection | `POST /api/webhooks/inbound-email` | `Authorization: Bearer <inbound-email secret>` |
 | Emailit bounce/complaint events | `POST /api/webhooks/emailit` | Emailit's `X-Emailit-Signature` + `X-Emailit-Timestamp` |
+| CallScaler post-call events | `POST /api/webhooks/callscaler` | `X-RMMX-Webhook-Secret: <CallScaler secret>` |
 
-Configure separate values under Admin → Integrations. Fluent Forms supports
-custom request headers; send a stable `X-RMMX-Idempotency-Key` as well when an
-entry/submission ID is available. Copy Emailit's `whsec_…` signing secret into
-the Emailit section. Signed provider event IDs are deduplicated across retries.
+Configure separate values under Admin → Integrations. Every provider delivery
+must carry its stable event/message/submission ID (or
+`X-RMMX-Idempotency-Key`); requests without one are rejected so retries cannot
+create duplicate contacts or messages. Copy Emailit's `whsec_…` signing secret
+into the Emailit section. Provider event IDs are deduplicated across retries.
 
 The Fluent Forms feed should send the form fields (name/email/phone/city/
 state) plus tracking fields (ip, browser/user_agent, utm_source, utm_term…).
@@ -109,8 +111,9 @@ fills link slots 1–14, and computes the Reputation Score.
 
 ## 5. How scoring works
 
-- Every **live** link is matched against Admin → URL Rules (substring match on
-  the domain). Matched links contribute the rule's `score_weight`; unmatched
+- Every **live** link is matched against Admin → URL Rules by exact hostname
+  (including subdomains) and optional path prefix. Matched links contribute the
+  rule's `score_weight`; unmatched
   live links contribute 10. Negative-sentiment titles/snippets add +5
   (lexicon ported from ContextAI).
 - `reputation_score = clamp(100 − link_score, 0, 100)` — removals raise it.

@@ -3,6 +3,7 @@ import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { sendCrmEmail } from '@/lib/email-send';
 import { renderTemplate } from '@/lib/sequence-runner';
+import { deliveryKey, MAX_BULK_RECIPIENTS, validIdempotencyKey } from '@/lib/bulk-delivery';
 
 /**
  * POST — compose/send from the unified inbox or blast a list.
@@ -46,13 +47,24 @@ export async function POST(request: Request) {
 
   // List blast
   if (body.listId) {
-    const { data: members } = await admin
+    if (!validIdempotencyKey(body.idempotencyKey)) {
+      return NextResponse.json({ error: 'A valid idempotencyKey is required for list sends' }, { status: 400 });
+    }
+    const { data: members, count } = await admin
       .from('email_list_members')
-      .select('contacts ( id, name, email, city, state, custom )')
-      .eq('list_id', body.listId);
+      .select('contacts ( id, name, email, city, state, custom )', { count: 'exact' })
+      .eq('list_id', body.listId)
+      .range(0, MAX_BULK_RECIPIENTS - 1);
+    if ((count ?? 0) > MAX_BULK_RECIPIENTS) {
+      return NextResponse.json(
+        { error: `List sends are limited to ${MAX_BULK_RECIPIENTS} recipients per request` },
+        { status: 413 }
+      );
+    }
 
     let sent = 0;
     let failed = 0;
+    let duplicates = 0;
     for (const member of (members ?? []) as any[]) {
       const contact = member.contacts;
       if (!contact?.email) continue;
@@ -63,11 +75,13 @@ export async function POST(request: Request) {
         accountId,
         contactId: contact.id,
         actorId: auth.profile.id,
+        deliveryKey: deliveryKey('email', body.idempotencyKey, contact.id),
       });
+      if (result.duplicate) duplicates += 1;
       if (result.ok) sent += 1;
       else failed += 1;
     }
-    return NextResponse.json({ sent, failed });
+    return NextResponse.json({ sent, failed, duplicates });
   }
 
   // Single send

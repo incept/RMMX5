@@ -3,6 +3,7 @@ import { getSetting, setSetting } from '@/lib/settings';
 import { logActivity } from '@/lib/activity';
 import { runAutoSearchForContact } from '@/lib/lead-intake';
 import { logDebug, errorMessage } from '@/lib/debug-log';
+import { parseCallScalerPage } from '@/lib/callscaler-page';
 
 /**
  * CallScaler integration (https://callscaler.com/docs).
@@ -87,14 +88,15 @@ async function findMatchingContact(
   const digits = phoneDigits(payload.caller_number);
   if (!digits) return null;
 
-  const { data: candidates } = await supabase
+  const { data: candidate } = await supabase
     .from('contacts')
-    .select('id, phone, created_at')
-    .not('phone', 'is', null)
+    .select('id, phone')
+    .eq('phone_normalized', digits)
     .order('created_at', { ascending: false })
-    .limit(2000);
+    .limit(1)
+    .maybeSingle();
 
-  return (candidates ?? []).find((c) => phoneDigits(c.phone) === digits) ?? null;
+  return candidate ?? null;
 }
 
 /**
@@ -108,32 +110,58 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
   const callId = String(payload.call_id ?? payload.id ?? '');
   if (!callId) throw new Error('CallScaler payload has no call_id');
 
-  // Claim the call row first: ignoreDuplicates makes the unique call_id the
-  // idempotency lock, so a webhook retry or a concurrent backfill no-ops here.
-  const { data: claimed, error: claimError } = await supabase
+  const callFields = {
+    direction: payload.direction ?? null,
+    status: payload.status ?? null,
+    caller_number: payload.caller_number ?? null,
+    caller_name: payload.caller_name ?? null,
+    tracking_number: payload.tracking_number ?? null,
+    duration_seconds: payload.duration_seconds ?? null,
+    recording_url: payload.recording_url ?? null,
+    transcription: payload.transcription ?? null,
+    summary: payload.summary ?? null,
+    ai_score: payload.ai_score ?? null,
+    ai_category: payload.ai_category ?? null,
+    qualified_ai: payload.qualified_ai ?? null,
+    source: payload.source ?? payload.utm_source ?? null,
+    raw: payload,
+    started_at: payload.created_at ? new Date(payload.created_at).toISOString() : null,
+  };
+
+  // Insert the durable idempotency record if this is the first delivery.
+  const { error: insertError } = await supabase
     .from('calls')
     .upsert(
-      {
-        call_id: callId,
-        direction: payload.direction ?? null,
-        status: payload.status ?? null,
-        caller_number: payload.caller_number ?? null,
-        caller_name: payload.caller_name ?? null,
-        tracking_number: payload.tracking_number ?? null,
-        duration_seconds: payload.duration_seconds ?? null,
-        recording_url: payload.recording_url ?? null,
-        transcription: payload.transcription ?? null,
-        summary: payload.summary ?? null,
-        ai_score: payload.ai_score ?? null,
-        ai_category: payload.ai_category ?? null,
-        qualified_ai: payload.qualified_ai ?? null,
-        source: payload.source ?? payload.utm_source ?? null,
-        raw: payload,
-        started_at: payload.created_at ? new Date(payload.created_at).toISOString() : null,
-      },
+      { call_id: callId, ...callFields },
       { onConflict: 'call_id', ignoreDuplicates: true }
-    )
-    .select('id')
+    );
+  if (insertError) throw new Error(insertError.message);
+
+  // Always enrich the stored call when the API later supplies AI/transcript
+  // fields, but never replace a non-null value with an omitted/null field.
+  const enrichment = Object.fromEntries(
+    Object.entries(callFields).filter(([, value]) => value != null)
+  );
+  const { error: enrichmentError } = await supabase
+    .from('calls')
+    .update(enrichment)
+    .eq('call_id', callId);
+  if (enrichmentError) throw new Error(enrichmentError.message);
+
+  // Atomically lease pending or abandoned work. PostgreSQL re-checks the WHERE
+  // clause after a concurrent row lock, so only one worker receives the row.
+  const leaseCutoff = new Date(Date.now() - 10 * 60_000).toISOString();
+  const { data: claimed, error: claimError } = await supabase
+    .from('calls')
+    .update({
+      processing_status: 'processing',
+      processing_started_at: new Date().toISOString(),
+      processing_error: null,
+    })
+    .eq('call_id', callId)
+    .neq('processing_status', 'completed')
+    .or(`processing_started_at.is.null,processing_started_at.lt.${leaseCutoff}`)
+    .select('id, contact_id')
     .maybeSingle();
   if (claimError) throw new Error(claimError.message);
   if (!claimed) return { callId, duplicate: true };
@@ -148,10 +176,29 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
         message: `Call ${callId} stored without a contact (AI: ${payload.ai_category})`,
         context: { caller_number: payload.caller_number, ai_score: payload.ai_score },
       });
+      const { error } = await supabase
+        .from('calls')
+        .update({
+          processing_status: 'completed',
+          processing_started_at: null,
+          processed_at: new Date().toISOString(),
+        })
+        .eq('id', claimed.id);
+      if (error) throw new Error(error.message);
       return { callId, duplicate: false, skipped: payload.ai_category };
     }
 
-    const existing = await findMatchingContact(payload);
+    let existing: { id: string; phone: string | null } | null = null;
+    if (claimed.contact_id) {
+      const { data } = await supabase
+        .from('contacts')
+        .select('id, phone')
+        .eq('id', claimed.contact_id)
+        .maybeSingle();
+      existing = data;
+    } else {
+      existing = await findMatchingContact(payload);
+    }
     let contactId: string;
     let createdContact = false;
 
@@ -188,7 +235,14 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
       createdContact = true;
     }
 
-    await supabase.from('calls').update({ contact_id: contactId }).eq('id', claimed.id);
+    // Persist the contact link before later best-effort side effects. If this
+    // worker dies, the retry reuses claimed.contact_id instead of creating a
+    // second contact.
+    const { error: linkError } = await supabase
+      .from('calls')
+      .update({ contact_id: contactId })
+      .eq('id', claimed.id);
+    if (linkError) throw new Error(linkError.message);
 
     const aiNote = payload.ai_category
       ? `, AI: ${payload.ai_category}${payload.ai_score != null ? ` (${payload.ai_score})` : ''}`
@@ -204,6 +258,17 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
       },
     });
 
+    const { error: completeError } = await supabase
+      .from('calls')
+      .update({
+        processing_status: 'completed',
+        processing_started_at: null,
+        processed_at: new Date().toISOString(),
+        processing_error: null,
+      })
+      .eq('id', claimed.id);
+    if (completeError) throw new Error(completeError.message);
+
     return {
       callId,
       duplicate: false,
@@ -215,9 +280,15 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
         createdContact && looksLikeHumanName(payload.caller_name) ? contactId : undefined,
     };
   } catch (e) {
-    // Release the claim so CallScaler's retry (or the next backfill) can
-    // reprocess instead of finding a half-finished row and skipping forever.
-    await supabase.from('calls').delete().eq('id', claimed.id);
+    // Release the lease without deleting the durable idempotency record.
+    await supabase
+      .from('calls')
+      .update({
+        processing_status: 'pending',
+        processing_started_at: null,
+        processing_error: errorMessage(e).slice(0, 2000),
+      })
+      .eq('id', claimed.id);
     throw e;
   }
 }
@@ -255,51 +326,72 @@ export async function syncMissedCalls() {
   const since = state.updated_since ?? new Date(Date.now() - 24 * 3600 * 1000).toISOString();
   const syncStartedAt = new Date().toISOString();
 
-  const res = await fetch(
-    `${API_BASE}/calls?updated_since=${encodeURIComponent(since)}&limit=200`,
-    {
-      headers: { Authorization: `Bearer ${cfg.api_key}` },
-      signal: AbortSignal.timeout(30_000),
-    }
-  );
-  const bodyText = await res.text();
-  if (!res.ok) {
-    await logDebug({
-      source: 'callscaler:sync',
-      message: `Calls API returned HTTP ${res.status}`,
-      context: { response: bodyText.slice(0, 300) },
-    });
-    throw new Error(`CallScaler Calls API failed: ${res.status}`);
-  }
-
-  let data: any;
-  try {
-    data = JSON.parse(bodyText);
-  } catch {
-    throw new Error(`CallScaler Calls API returned non-JSON: ${bodyText.slice(0, 200)}`);
-  }
-  const calls: any[] = data?.calls ?? data?.data ?? (Array.isArray(data) ? data : []);
-
+  let cursor: string | null = null;
+  let fetched = 0;
   let processed = 0;
   let created = 0;
-  for (const call of calls) {
-    try {
-      const result = await processCallScalerCall(call);
-      if (!result.duplicate) {
-        processed += 1;
-        if (result.createdContact) created += 1;
-        // Cron has no 10-second deadline, so the search can run inline.
-        if (result.searchContactId) await runCallSearch(result.searchContactId);
-      }
-    } catch (e) {
+  let failed = 0;
+
+  for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+    const params = new URLSearchParams({
+      updated_since: since,
+      limit: '500',
+      include: 'transcription,summary',
+    });
+    if (cursor) params.set('cursor', cursor);
+
+    const res = await fetch(`${API_BASE}/calls?${params}`, {
+      headers: { Authorization: `Bearer ${cfg.api_key}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    const bodyText = await res.text();
+    if (!res.ok) {
       await logDebug({
         source: 'callscaler:sync',
-        message: errorMessage(e),
-        context: { call_id: call?.call_id ?? call?.id ?? null },
+        message: `Calls API returned HTTP ${res.status}`,
+        context: { response: bodyText.slice(0, 300) },
       });
+      throw new Error(`CallScaler Calls API failed: ${res.status}`);
     }
+
+    let data: any;
+    try {
+      data = JSON.parse(bodyText);
+    } catch {
+      throw new Error(`CallScaler Calls API returned non-JSON: ${bodyText.slice(0, 200)}`);
+    }
+    const page = parseCallScalerPage(data);
+    fetched += page.calls.length;
+
+    for (const call of page.calls) {
+      try {
+        const result = await processCallScalerCall(call);
+        if (!result.duplicate) {
+          processed += 1;
+          if (result.createdContact) created += 1;
+          if (result.searchContactId) await runCallSearch(result.searchContactId);
+        }
+      } catch (e) {
+        failed += 1;
+        await logDebug({
+          source: 'callscaler:sync',
+          message: errorMessage(e),
+          context: { call_id: call?.call_id ?? call?.id ?? null },
+        });
+      }
+    }
+
+    if (!page.hasMore) break;
+    if (!page.nextCursor) {
+      throw new Error('CallScaler response has_more=true without next_cursor');
+    }
+    cursor = page.nextCursor;
+    if (pageNumber === 99) throw new Error('CallScaler pagination exceeded 100 pages');
   }
 
+  // Do not move the high-water mark past failed records. Successful records are
+  // durable duplicates, so replaying the interval on the next tick is safe.
+  if (failed) throw new Error(`CallScaler sync left ${failed} call(s) pending retry`);
   await setSetting('callscaler_sync', { updated_since: syncStartedAt });
-  return { fetched: calls.length, processed, created };
+  return { fetched, processed, created };
 }

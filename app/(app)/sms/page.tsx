@@ -48,7 +48,12 @@ export default function SmsPage() {
     <div className="mx-auto max-w-4xl p-6">
       <div className="mb-5 flex items-center justify-between">
         <h1 className="text-lg font-semibold">SMS Campaigns</h1>
-        <button className="btn btn-primary" onClick={() => setForm({ name: '', body: '', listId: '' })}>
+        <button
+          className="btn btn-primary"
+          onClick={() =>
+            setForm({ name: '', body: '', listId: '', idempotencyKey: crypto.randomUUID() })
+          }
+        >
           + New campaign
         </button>
       </div>

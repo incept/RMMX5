@@ -183,6 +183,7 @@ export default function MarketingPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         listId: blast.listId,
+        idempotencyKey: blast.idempotencyKey,
         subject: blast.subject,
         html: (blast.html ?? '').replace(/\n/g, '<br/>'),
         accountId: blast.accountId || null,
@@ -606,7 +607,17 @@ export default function MarketingPage() {
             <button className="btn btn-primary" onClick={() => setListForm({ name: '' })}>
               + New list
             </button>
-            <button className="btn" onClick={() => setBlast({ listId: '', subject: '', html: '' })}>
+            <button
+              className="btn"
+              onClick={() =>
+                setBlast({
+                  listId: '',
+                  subject: '',
+                  html: '',
+                  idempotencyKey: crypto.randomUUID(),
+                })
+              }
+            >
               ✉ Send one-off blast
             </button>
           </div>

@@ -25,6 +25,12 @@ export async function POST(request: Request) {
   if (!body?.from) return NextResponse.json({ error: 'from required' }, { status: 400 });
 
   const eventId = body.message_id ?? request.headers.get('x-rmmx-idempotency-key');
+  if (!eventId) {
+    return NextResponse.json(
+      { error: 'message_id or x-rmmx-idempotency-key is required' },
+      { status: 400 }
+    );
+  }
   const claimed = await claimWebhookReceipt('inbound_email', eventId);
   if (!claimed) return NextResponse.json({ ok: true, duplicate: true });
 
@@ -35,7 +41,7 @@ export async function POST(request: Request) {
     const { data: contact } = await admin
       .from('contacts')
       .select('id, name')
-      .ilike('email', fromEmail)
+      .eq('email_normalized', fromEmail.trim().toLowerCase())
       .limit(1)
       .maybeSingle();
 

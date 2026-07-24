@@ -24,7 +24,8 @@ export async function sendCrmEmail(opts: {
   sequenceStepId?: string | null;
   actorId?: string | null;
   appendSignature?: boolean; // default true
-}): Promise<{ ok: boolean; messageRowId: string; error?: string }> {
+  deliveryKey?: string | null;
+}): Promise<{ ok: boolean; messageRowId: string; error?: string; duplicate?: boolean }> {
   const supabase = createAdminClient();
 
   let account: any = null;
@@ -65,9 +66,23 @@ export async function sendCrmEmail(opts: {
       sequence_id: opts.sequenceId ?? null,
       sequence_step_id: opts.sequenceStepId ?? null,
       status: 'queued',
+      delivery_key: opts.deliveryKey ?? null,
     })
     .select('id')
     .single();
+  if (rowErr?.code === '23505' && opts.deliveryKey) {
+    const { data: existing } = await supabase
+      .from('email_messages')
+      .select('id, status, error')
+      .eq('delivery_key', opts.deliveryKey)
+      .maybeSingle();
+    return {
+      ok: existing?.status === 'sent',
+      messageRowId: existing?.id ?? '',
+      error: existing?.error ?? (existing?.status === 'queued' ? 'delivery already reserved' : undefined),
+      duplicate: true,
+    };
+  }
   if (rowErr || !row) return { ok: false, messageRowId: '', error: rowErr?.message ?? 'insert failed' };
 
   const appUrl = appBaseUrl();

@@ -1,4 +1,6 @@
 import { createAdminClient } from '@/lib/supabase/server';
+import { matchUrlRule } from '@/lib/url-rule-match';
+export { matchUrlRule } from '@/lib/url-rule-match';
 
 /**
  * Scoring engine.
@@ -63,16 +65,6 @@ export interface LinkLike {
   status: 'live' | 'requested' | 'removed';
   title?: string;
   snippet?: string;
-}
-
-/** Case-insensitive substring match of a rule pattern against a URL. */
-export function matchUrlRule<T extends UrlRule>(url: string, rules: T[]): T | null {
-  const normalized = url.toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '');
-  for (const rule of rules) {
-    const pattern = rule.pattern.toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '');
-    if (pattern && normalized.includes(pattern)) return rule;
-  }
-  return null;
 }
 
 export function computeLinkScore(links: LinkLike[], rules: UrlRule[]): number {
