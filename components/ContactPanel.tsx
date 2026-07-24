@@ -650,10 +650,32 @@ export default function ContactPanel({
           {tab === 'Data' && (
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-3">
-                {input('Browser', 'browser')}
-                {input('PPC KW', 'ppc_kw')}
-                {input('Source', 'source')}
                 {input('IP', 'ip')}
+                {input('Browser', 'browser')}
+                {input('Device', 'device')}
+                {input('Source', 'source')}
+                <div className="col-span-2">
+                  <label className="label">Source URL</label>
+                  <input
+                    className="input"
+                    value={contact.source_url ?? ''}
+                    onChange={(e) => setField('source_url', e.target.value)}
+                  />
+                </div>
+                {input('WordPress user', 'wp_user')}
+                <div>
+                  <label className="label">Submitted on</label>
+                  <input
+                    className="input bg-gray-50"
+                    readOnly
+                    value={
+                      contact.submitted_at
+                        ? new Date(contact.submitted_at).toLocaleString()
+                        : '—'
+                    }
+                  />
+                </div>
+                {input('PPC KW', 'ppc_kw')}
                 {input('UTM', 'utm')}
                 <div>
                   <label className="label">Status</label>
@@ -665,7 +687,16 @@ export default function ContactPanel({
                 </div>
                 {customInputs('data')}
               </div>
-              {saveButton(['browser', 'ppc_kw', 'source', 'ip', 'utm'])}
+              {saveButton([
+                'browser',
+                'ppc_kw',
+                'source',
+                'ip',
+                'utm',
+                'device',
+                'source_url',
+                'wp_user',
+              ])}
             </div>
           )}
 

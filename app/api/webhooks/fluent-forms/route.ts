@@ -4,6 +4,7 @@ import { getSetting } from '@/lib/settings';
 import { processFluentFormsLead } from '@/lib/lead-intake';
 import { verifyBearerSecret } from '@/lib/webhook-auth';
 import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receipts';
+import { logDebug, errorMessage } from '@/lib/debug-log';
 
 /**
  * Fluent Forms webhook — point the form's webhook feed at:
@@ -16,6 +17,16 @@ import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receip
 export async function POST(request: Request) {
   const cfg = await getSetting<{ webhook_secret?: string }>('fluent_forms');
   if (!verifyBearerSecret(request, cfg.webhook_secret)) {
+    // The most common setup mistake — surfaced so it is visible in Admin →
+    // Debug Log instead of being an opaque 401 on the WordPress side.
+    await logDebug({
+      level: 'warn',
+      source: 'webhook:fluent-forms',
+      message: cfg.webhook_secret
+        ? 'Rejected: Authorization header missing or secret did not match'
+        : 'Rejected: no webhook secret configured (Admin → Integrations)',
+      context: { has_authorization_header: !!request.headers.get('authorization') },
+    });
     return NextResponse.json({ error: 'Invalid webhook authorization' }, { status: 401 });
   }
 
@@ -54,8 +65,13 @@ export async function POST(request: Request) {
     await admin.from('webhook_leads').insert({
       payload,
       status: 'failed',
-      error: e.message,
+      error: errorMessage(e),
     });
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    await logDebug({
+      source: 'webhook:fluent-forms',
+      message: errorMessage(e),
+      context: { event_id: eventId, payload_keys: Object.keys(payload ?? {}) },
+    });
+    return NextResponse.json({ error: errorMessage(e) }, { status: 500 });
   }
 }

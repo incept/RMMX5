@@ -4,6 +4,7 @@ import { sendViaEmailit } from '@/lib/integrations/emailit';
 import { logActivity } from '@/lib/activity';
 import { signTrackingUrl } from '@/lib/signing';
 import { appBaseUrl } from '@/lib/app-url';
+import { logDebug } from '@/lib/debug-log';
 
 /**
  * Central outbound email path. Every CRM email (compose, sequence step,
@@ -128,6 +129,21 @@ export async function sendCrmEmail(opts: {
       sent_at: ok ? new Date().toISOString() : null,
     })
     .eq('id', row.id);
+
+  if (!ok) {
+    await logDebug({
+      source: account?.smtp_host ? 'email-send:smtp' : 'email-send:emailit',
+      message: error ?? 'Email delivery failed',
+      context: {
+        to: opts.to,
+        subject: opts.subject,
+        account: account?.name ?? null,
+        smtp_host: account?.smtp_host ?? null,
+        sequence_id: opts.sequenceId ?? null,
+      },
+      contactId: opts.contactId ?? null,
+    });
+  }
 
   if (opts.contactId) {
     await logActivity({

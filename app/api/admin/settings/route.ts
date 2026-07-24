@@ -9,6 +9,7 @@ const KNOWN_KEYS = [
   'stripe',
   'fluent_forms',
   'inbound_email',
+  'ipapi',
   'voicemail',
   'search',
   'defaults',

@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { processDueEnrollments } from '@/lib/sequence-runner';
 import { processCountdownNotifications } from '@/lib/notifications';
 import { verifyBearerSecret } from '@/lib/webhook-auth';
+import { createAdminClient } from '@/lib/supabase/server';
+import { logDebug, errorMessage } from '@/lib/debug-log';
 
 /**
  * The heartbeat. Call it every 5–15 minutes from any scheduler:
@@ -16,8 +18,35 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Invalid secret' }, { status: 401 });
   }
 
-  const sequences = await processDueEnrollments();
-  const countdown = await processCountdownNotifications();
+  let sequences: any = null;
+  let countdown: any = null;
+  try {
+    sequences = await processDueEnrollments();
+  } catch (e) {
+    await logDebug({ source: 'cron:sequences', message: errorMessage(e) });
+    sequences = { error: errorMessage(e) };
+  }
+  try {
+    countdown = await processCountdownNotifications();
+  } catch (e) {
+    await logDebug({ source: 'cron:countdown', message: errorMessage(e) });
+    countdown = { error: errorMessage(e) };
+  }
 
-  return NextResponse.json({ ok: true, sequences, countdown, at: new Date().toISOString() });
+  // Keep debug_log bounded. Best-effort: pruning must not fail the tick.
+  let pruned: number | null = null;
+  try {
+    const { data } = await createAdminClient().rpc('prune_debug_log', { p_keep_days: 14 });
+    pruned = typeof data === 'number' ? data : null;
+  } catch {
+    // ignore
+  }
+
+  return NextResponse.json({
+    ok: true,
+    sequences,
+    countdown,
+    pruned,
+    at: new Date().toISOString(),
+  });
 }
