@@ -1,5 +1,10 @@
 import { createAdminClient } from '@/lib/supabase/server';
-import { runGoogleSearch } from '@/lib/integrations/brightdata';
+import {
+  runSerpSearch,
+  mergeSerpResults,
+  type SearchEngine,
+  type SerpResult,
+} from '@/lib/integrations/brightdata';
 import { applyScores, matchUrlRule, type UrlRule } from '@/lib/scoring';
 import { logActivity } from '@/lib/activity';
 import { getSetting } from '@/lib/settings';
@@ -52,7 +57,37 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
     .filter(Boolean)
     .join(' ');
 
-  const results = await runGoogleSearch(query);
+  // Query Google and Bing in parallel and merge. allSettled so one engine
+  // failing (empty zone response, upstream block) still returns the other's
+  // results rather than losing the whole search.
+  const engines: SearchEngine[] = ['google', 'bing'];
+  const settled = await Promise.allSettled(engines.map((engine) => runSerpSearch(query, { engine })));
+
+  const lists: SerpResult[][] = [];
+  const succeeded: SearchEngine[] = [];
+  const failures: string[] = [];
+  settled.forEach((outcome, i) => {
+    if (outcome.status === 'fulfilled') {
+      lists.push(outcome.value);
+      succeeded.push(engines[i]);
+    } else {
+      failures.push(`${engines[i]}: ${errorMessage(outcome.reason)}`);
+    }
+  });
+
+  if (failures.length) {
+    await logDebug({
+      level: lists.length ? 'warn' : 'error',
+      source: 'brightdata',
+      message: `Search engine(s) failed: ${failures.join('; ')}`,
+      context: { query },
+      contactId,
+    });
+  }
+  // Only a total failure aborts — matches the old single-engine behaviour.
+  if (lists.length === 0) throw new Error(`All search engines failed — ${failures.join('; ')}`);
+
+  const results = mergeSerpResults(lists);
 
   const { data: rules } = await supabase.from('url_rules').select('*');
   const ruleRows = (rules ?? []) as UrlRule[];
@@ -92,11 +127,11 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
     contactId,
     actorId,
     type: 'search',
-    description: `Auto Google search ran (“${query}”): ${results.length} results, ${relevant.length} relevant, ${inserted} link(s) added. Reputation score: ${scores.reputation}`,
-    meta: { query, total: results.length, relevant: relevant.length, inserted },
+    description: `Auto search ran on ${succeeded.join(' + ')} (“${query}”): ${results.length} results, ${relevant.length} relevant, ${inserted} link(s) added. Reputation score: ${scores.reputation}`,
+    meta: { query, engines: succeeded, total: results.length, relevant: relevant.length, inserted },
   });
 
-  return { query, total: results.length, relevant: relevant.length, inserted, ...scores };
+  return { query, engines: succeeded, total: results.length, relevant: relevant.length, inserted, ...scores };
 }
 
 /** "User IP" → "userip", "__ip" → "ip", "first_name" → "firstname". */
