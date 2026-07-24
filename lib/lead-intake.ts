@@ -73,6 +73,20 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
   return { query, total: results.length, relevant: relevant.length, inserted, ...scores };
 }
 
+/**
+ * Fluent Forms sends "Submitted On" as a MySQL-style local datetime
+ * ("2026-07-24 02:34:01"), which `new Date()` parses inconsistently across
+ * runtimes. Normalise to ISO; return null rather than store an Invalid Date.
+ */
+function parseSubmittedAt(value: string | null): string | null {
+  if (!value) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+    ? value.replace(' ', 'T') + 'Z'
+    : value;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
 /** Maps a Fluent Forms webhook payload to a new contact + kicks off the auto search. */
 export async function processFluentFormsLead(payload: Record<string, any>) {
   const supabase = createAdminClient();
@@ -109,8 +123,17 @@ export async function processFluentFormsLead(payload: Record<string, any>) {
       city: pick('city'),
       state: pick('state', 'region'),
       status_id: newStatus?.id ?? null,
+      // Fluent Forms' default metadata block. It labels these "User IP",
+      // "Source URL", "Browser", "Device", "User" and "Submitted On"; the
+      // aliases below cover the key spellings its webhook feed actually sends.
       browser: pick('browser', 'user_agent', '__user_agent'),
-      ip: pick('ip', 'ip_address', '__ip'),
+      ip: pick('ip', 'ip_address', 'user_ip', '__ip'),
+      device: pick('device', 'platform', 'os', 'device_type'),
+      source_url: pick('source_url', '__source_url', 'page_url', 'referer', 'referrer'),
+      wp_user: pick('wp_user', 'user', 'username', 'user_login', 'user_email'),
+      submitted_at: parseSubmittedAt(
+        pick('submitted_on', 'submitted_at', 'created_at', 'submission_date')
+      ),
       source: pick('source', 'utm_source') ?? 'fluent_forms',
       utm: pick('utm', 'utm_campaign', 'utm_medium'),
       ppc_kw: pick('ppc_kw', 'keyword', 'utm_term', 'gclid_keyword'),

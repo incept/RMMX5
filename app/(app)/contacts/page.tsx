@@ -23,6 +23,15 @@ interface ContactRow {
 
 type SortKey = 'name' | 'created_at' | 'reputation_score' | 'link_score' | 'status';
 
+interface NewContactDraft {
+  name: string;
+  email: string;
+  phone: string;
+  city: string;
+  state: string;
+  status_id: string;
+}
+
 /** The main CRM view: spreadsheet-style grid with search, filter, sort, inline status. */
 export default function ContactsPage() {
   const supabase = useMemo(() => createClient(), []);
@@ -34,6 +43,8 @@ export default function ContactsPage() {
   const [sortAsc, setSortAsc] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [newContact, setNewContact] = useState<NewContactDraft | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -114,17 +125,46 @@ export default function ContactsPage() {
     });
   }
 
-  async function addContact() {
-    const newStatus = statuses.find((s) => s.name === 'New');
-    const { data } = await supabase
+  function openNewContact() {
+    setNewContact({
+      name: '',
+      email: '',
+      phone: '',
+      city: '',
+      state: '',
+      status_id: statuses.find((s) => s.name === 'New')?.id ?? '',
+    });
+  }
+
+  /** Creates the contact from the modal, then opens its panel for link entry. */
+  async function saveNewContact() {
+    if (!newContact) return;
+    if (!newContact.name.trim() && !newContact.email.trim()) {
+      alert('Enter at least a name or an email address.');
+      return;
+    }
+    setCreating(true);
+    const { data, error } = await supabase
       .from('contacts')
-      .insert({ name: 'New contact', status_id: newStatus?.id ?? null })
+      .insert({
+        name: newContact.name.trim() || newContact.email.trim(),
+        email: newContact.email.trim() || null,
+        phone: newContact.phone.trim() || null,
+        city: newContact.city.trim() || null,
+        state: newContact.state.trim() || null,
+        status_id: newContact.status_id || null,
+        source: 'manual',
+      })
       .select('id')
       .single();
-    if (data) {
-      await load();
-      setSelectedId(data.id);
+    setCreating(false);
+    if (error) {
+      alert(error.message);
+      return;
     }
+    setNewContact(null);
+    await load();
+    if (data) setSelectedId(data.id); // opens the panel on the Link Data tab flow
   }
 
   const header = (label: string, key?: SortKey) => (
@@ -167,7 +207,7 @@ export default function ContactsPage() {
           <Link href="/import" className="btn">
             Import
           </Link>
-          <button className="btn btn-primary" onClick={addContact}>
+          <button className="btn btn-primary" onClick={openNewContact}>
             + New contact
           </button>
         </div>
@@ -246,6 +286,96 @@ export default function ContactsPage() {
           </tbody>
         </table>
       </div>
+
+      {/* New contact modal — details are entered up front instead of creating
+          a placeholder row named "New contact". */}
+      {newContact && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/20"
+          onClick={() => setNewContact(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl bg-white p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="mb-1 text-sm font-semibold">New contact</h2>
+            <p className="mb-3 text-xs text-gray-400">
+              Add the links on the Link Data tab after saving — manually, or with the automatic
+              Google search.
+            </p>
+            <div className="space-y-2">
+              <div>
+                <label className="label">Name</label>
+                <input
+                  className="input"
+                  autoFocus
+                  value={newContact.name}
+                  onChange={(e) => setNewContact({ ...newContact, name: e.target.value })}
+                  onKeyDown={(e) => e.key === 'Enter' && saveNewContact()}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="label">Email</label>
+                  <input
+                    className="input"
+                    type="email"
+                    value={newContact.email}
+                    onChange={(e) => setNewContact({ ...newContact, email: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label">Phone</label>
+                  <input
+                    className="input"
+                    value={newContact.phone}
+                    onChange={(e) => setNewContact({ ...newContact, phone: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label">City</label>
+                  <input
+                    className="input"
+                    value={newContact.city}
+                    onChange={(e) => setNewContact({ ...newContact, city: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label">State</label>
+                  <input
+                    className="input"
+                    value={newContact.state}
+                    onChange={(e) => setNewContact({ ...newContact, state: e.target.value })}
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="label">Status</label>
+                <select
+                  className="input"
+                  value={newContact.status_id}
+                  onChange={(e) => setNewContact({ ...newContact, status_id: e.target.value })}
+                >
+                  <option value="">— none —</option>
+                  {statuses.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex justify-end gap-2 pt-1">
+                <button className="btn" onClick={() => setNewContact(null)}>
+                  Cancel
+                </button>
+                <button className="btn btn-primary" disabled={creating} onClick={saveNewContact}>
+                  {creating ? 'Creating…' : 'Create contact'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {selectedId && (
         <ContactPanel
