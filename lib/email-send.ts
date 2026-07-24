@@ -34,7 +34,10 @@ export async function sendCrmEmail(opts: {
       .maybeSingle();
     account = data;
   }
-  if (!account) {
+  // Only trusted background jobs may fall back to a service-role lookup of
+  // the global default. User-triggered routes resolve an RLS-visible account
+  // before calling this function and otherwise fall back to Emailit.
+  if (!account && opts.actorId == null) {
     const { data } = await supabase
       .from('email_accounts')
       .select('*')
@@ -94,6 +97,9 @@ export async function sendCrmEmail(opts: {
         port: account.smtp_port,
         secure: !!account.smtp_secure,
         auth: { user: account.smtp_username, pass: account.smtp_password },
+        connectionTimeout: 15_000,
+        greetingTimeout: 15_000,
+        socketTimeout: 30_000,
       });
       const info = await transport.sendMail({
         from: account.from_name ? `"${account.from_name}" <${account.from_email}>` : account.from_email,

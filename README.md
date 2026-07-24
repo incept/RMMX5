@@ -36,9 +36,10 @@ voicemail drops, vendor management, revenue projection, and a full admin panel.
 
 1. Create a project at [supabase.com](https://supabase.com).
 2. In the SQL Editor, run `supabase/migrations/0001_init.sql`, then
-   `supabase/migrations/0002_security.sql`. Together they create every table,
-   the storage buckets, seed statuses/stages, triggers, RLS, and the
-   column-level lockdown that keeps SMTP passwords out of the browser.
+   `supabase/migrations/0002_security.sql`, then
+   `supabase/migrations/0003_access_and_delivery_hardening.sql`. Together they
+   create every table, the storage buckets, seed data, RLS, SMTP ownership
+   controls, atomic sequence claiming, and notification/webhook deduplication.
 3. Copy the Project URL and API keys into `.env.local` (start from
    `.env.local.example`). Mind the key types: the **publishable** key
    (`sb_publishable_…`, or legacy `anon`) goes in
@@ -48,9 +49,19 @@ voicemail drops, vendor management, revenue projection, and a full admin panel.
    *"Forbidden use of secret API key in browser"*. After editing
    `.env.local`, restart `npm run dev` — `NEXT_PUBLIC_*` values are baked in
    at build time.
-4. Register through the app's landing page — **the first account to register
-   automatically becomes the admin**. Everyone after that is a worker until
-   promoted under Admin → Users.
+4. In Supabase Dashboard → Authentication → Users, create the initial account.
+   The database deliberately creates every new Auth identity as a **disabled
+   worker**. In the SQL Editor, bootstrap that one trusted account:
+
+   ```sql
+   update public.profiles
+   set role = 'admin', status = 'active'
+   where email = 'owner@your-company.example';
+   ```
+
+   Sign in with that account, then create all later users under Admin → Users.
+   Keep public Supabase signups disabled; even if they are accidentally enabled,
+   the database will not activate or promote those identities.
 
 ## 2. Run locally
 
@@ -59,31 +70,36 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:3000, register, then visit **Admin → Integrations** to
-enter your BrightData / Emailit / TextLink / Stripe keys (they live in the
-`settings` table with admin-only RLS — not in env vars).
+Open http://localhost:3000, sign in with the bootstrapped admin, then visit
+**Admin → Integrations** to enter your BrightData / Emailit / TextLink / Stripe
+keys (they live in the `settings` table with admin-only RLS — not in env vars).
 
 ## 3. The cron tick
 
 Sequences and countdown notifications are driven by one idempotent endpoint.
 Schedule it every 5–15 minutes (Vercel Cron, hPanel cron, GitHub Actions…):
 
-```
-curl "https://yourdomain.com/api/cron/tick?secret=YOUR_CRON_SECRET"
+```bash
+curl -H "Authorization: Bearer $CRON_SECRET" \
+  "https://yourdomain.com/api/cron/tick"
 ```
 
 `CRON_SECRET` comes from `.env.local`.
 
 ## 4. Webhooks
 
-All inbound webhooks share the secret configured under Admin → Integrations →
-Fluent Forms:
+Webhook credentials are never placed in URLs:
 
-| Purpose | URL |
-| --- | --- |
-| Fluent Forms lead capture | `POST /api/webhooks/fluent-forms?secret=…` |
-| Inbound email → unified inbox + reply detection | `POST /api/webhooks/inbound-email?secret=…` |
-| Emailit bounce/complaint events | `POST /api/webhooks/emailit?secret=…` |
+| Purpose | URL | Authentication |
+| --- | --- | --- |
+| Fluent Forms lead capture | `POST /api/webhooks/fluent-forms` | `Authorization: Bearer <Fluent Forms secret>` |
+| Inbound email → inbox/reply detection | `POST /api/webhooks/inbound-email` | `Authorization: Bearer <inbound-email secret>` |
+| Emailit bounce/complaint events | `POST /api/webhooks/emailit` | Emailit's `X-Emailit-Signature` + `X-Emailit-Timestamp` |
+
+Configure separate values under Admin → Integrations. Fluent Forms supports
+custom request headers; send a stable `X-RMMX-Idempotency-Key` as well when an
+entry/submission ID is available. Copy Emailit's `whsec_…` signing secret into
+the Emailit section. Signed provider event IDs are deduplicated across retries.
 
 The Fluent Forms feed should send the form fields (name/email/phone/city/
 state) plus tracking fields (ip, browser/user_agent, utm_source, utm_term…).
@@ -118,7 +134,9 @@ fills link slots 1–14, and computes the Reputation Score.
   your ringless-VM vendor's real API shape.
 - **TextLink** requires a paired Android device with an active SIM (see their
   docs); if the device is offline, sends fail.
-- **Rate limiting** is not implemented on API routes.
+- **Rate limiting** is not implemented on general authenticated API routes;
+  deploy behind a platform/WAF request limit. Upload endpoints do enforce file
+  size and active-content restrictions.
 - **Password reset** flow isn't wired into a page (Supabase supports it).
 - `xlsx` (SheetJS 0.20.3 via the official CDN tarball) parses admin-uploaded
   files only.

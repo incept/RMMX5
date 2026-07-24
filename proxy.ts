@@ -42,7 +42,16 @@ export default async function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL('/', request.url));
   }
   if (user && pathname === '/') {
-    return NextResponse.redirect(new URL('/dashboard', request.url));
+    // Disabled identities may still have a valid Supabase session. Only active
+    // profiles should be redirected into the authenticated shell.
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('status')
+      .eq('id', user.id)
+      .maybeSingle();
+    if (profile?.status === 'active') {
+      return NextResponse.redirect(new URL('/dashboard', request.url));
+    }
   }
 
   return response;

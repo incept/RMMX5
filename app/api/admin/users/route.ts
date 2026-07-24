@@ -34,9 +34,19 @@ export async function POST(request: Request) {
   });
   if (error) return NextResponse.json({ error: error.message }, { status: 400 });
 
-  // The signup trigger created the profile as 'worker'; honor a requested role.
-  if (body.role === 'admin') {
-    await admin.from('profiles').update({ role: 'admin' }).eq('id', data.user.id);
+  // The Auth trigger intentionally creates disabled workers. An authenticated
+  // administrator is the only path that activates a new app account.
+  const { error: profileError } = await admin
+    .from('profiles')
+    .update({
+      role: body.role === 'admin' ? 'admin' : 'worker',
+      status: 'active',
+    })
+    .eq('id', data.user.id);
+  if (profileError) {
+    // Avoid leaving an unusable Auth user behind when profile activation fails.
+    await admin.auth.admin.deleteUser(data.user.id);
+    return NextResponse.json({ error: profileError.message }, { status: 400 });
   }
 
   return NextResponse.json({ ok: true, userId: data.user.id });

@@ -20,6 +20,29 @@ export async function POST(request: Request) {
   }
 
   const admin = createAdminClient();
+  let accountId: string | null = null;
+
+  if (body.accountId) {
+    const { data: accessibleAccount } = await auth.supabase
+      .from('email_accounts')
+      .select('id')
+      .eq('id', body.accountId)
+      .maybeSingle();
+    if (!accessibleAccount) {
+      return NextResponse.json({ error: 'Email account not found or not accessible' }, { status: 403 });
+    }
+    accountId = accessibleAccount.id;
+  } else {
+    // Resolve the default through the caller's RLS-scoped client. The
+    // service-role sender must never select another user's private account.
+    const { data: defaultAccount } = await auth.supabase
+      .from('email_accounts')
+      .select('id')
+      .eq('is_default', true)
+      .limit(1)
+      .maybeSingle();
+    accountId = defaultAccount?.id ?? null;
+  }
 
   // List blast
   if (body.listId) {
@@ -37,7 +60,7 @@ export async function POST(request: Request) {
         to: contact.email,
         subject: renderTemplate(body.subject, contact),
         html: renderTemplate(body.html, contact),
-        accountId: body.accountId ?? null,
+        accountId,
         contactId: contact.id,
         actorId: auth.profile.id,
       });
@@ -61,7 +84,7 @@ export async function POST(request: Request) {
     to,
     subject: contact ? renderTemplate(body.subject, contact) : body.subject,
     html: contact ? renderTemplate(body.html, contact) : body.html,
-    accountId: body.accountId ?? null,
+    accountId,
     contactId: contact?.id ?? null,
     actorId: auth.profile.id,
   });

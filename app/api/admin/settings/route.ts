@@ -8,6 +8,7 @@ const KNOWN_KEYS = [
   'textlink',
   'stripe',
   'fluent_forms',
+  'inbound_email',
   'voicemail',
   'search',
   'defaults',

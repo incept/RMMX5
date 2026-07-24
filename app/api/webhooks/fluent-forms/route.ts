@@ -2,20 +2,21 @@ import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
 import { getSetting } from '@/lib/settings';
 import { processFluentFormsLead } from '@/lib/lead-intake';
-import { safeEqual } from '@/lib/signing';
+import { verifyBearerSecret } from '@/lib/webhook-auth';
+import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receipts';
 
 /**
  * Fluent Forms webhook — point the form's webhook feed at:
- *   POST https://yourdomain.com/api/webhooks/fluent-forms?secret=<webhook_secret>
+ *   POST https://yourdomain.com/api/webhooks/fluent-forms
+ * with Authorization: Bearer <webhook_secret>.
  * (secret configured under Admin → Integrations → Fluent Forms).
  *
  * Creates the contact, then runs the automatic Google search / link scoring.
  */
 export async function POST(request: Request) {
   const cfg = await getSetting<{ webhook_secret?: string }>('fluent_forms');
-  const secret = new URL(request.url).searchParams.get('secret');
-  if (!cfg.webhook_secret || !secret || !safeEqual(secret, cfg.webhook_secret)) {
-    return NextResponse.json({ error: 'Invalid secret' }, { status: 401 });
+  if (!verifyBearerSecret(request, cfg.webhook_secret)) {
+    return NextResponse.json({ error: 'Invalid webhook authorization' }, { status: 401 });
   }
 
   let payload: Record<string, any>;
@@ -31,6 +32,15 @@ export async function POST(request: Request) {
   }
 
   const admin = createAdminClient();
+  const eventId =
+    request.headers.get('x-rmmx-idempotency-key') ??
+    payload.entry_id ??
+    payload.submission_id ??
+    payload.data?.entry_id ??
+    null;
+  const claimed = await claimWebhookReceipt('fluent_forms', eventId);
+  if (!claimed) return NextResponse.json({ ok: true, duplicate: true });
+
   try {
     const { contact, search } = await processFluentFormsLead(payload);
     await admin.from('webhook_leads').insert({
@@ -40,6 +50,7 @@ export async function POST(request: Request) {
     });
     return NextResponse.json({ ok: true, contact_id: contact.id, search });
   } catch (e: any) {
+    await releaseWebhookReceipt('fluent_forms', eventId);
     await admin.from('webhook_leads').insert({
       payload,
       status: 'failed',

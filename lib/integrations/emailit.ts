@@ -21,6 +21,7 @@ export async function sendViaEmailit(opts: {
 
   const res = await fetch('https://api.emailit.com/v1/emails', {
     method: 'POST',
+    signal: AbortSignal.timeout(30_000),
     headers: {
       Authorization: `Bearer ${cfg.api_key}`,
       'Content-Type': 'application/json',

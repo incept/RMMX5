@@ -32,14 +32,17 @@ async function isClient(contact: any): Promise<boolean> {
 export async function fireNotification(
   event: 'link_status_change' | 'status_change' | 'client_countdown',
   contact: any,
-  vars: Record<string, string | number>
+  vars: Record<string, string | number>,
+  options?: { ruleId?: string; dedupeKey?: string }
 ) {
   const supabase = createAdminClient();
-  const { data: rules } = await supabase
+  let rulesQuery = supabase
     .from('notification_rules')
     .select('*')
     .eq('event', event)
     .eq('enabled', true);
+  if (options?.ruleId) rulesQuery = rulesQuery.eq('id', options.ruleId);
+  const { data: rules } = await rulesQuery;
 
   if (!rules?.length) return;
 
@@ -51,6 +54,23 @@ export async function fireNotification(
     const message = render(rule.template, { name: contact.name, ...vars });
 
     for (const channel of rule.channels as string[]) {
+      const dedupeKey = options?.dedupeKey ? `${options.dedupeKey}:${channel}` : null;
+      const { data: reservation, error: reservationError } = await supabase
+        .from('notifications_log')
+        .insert({
+          contact_id: contact.id,
+          rule_id: rule.id,
+          channel,
+          message,
+          status: 'pending',
+          dedupe_key: dedupeKey,
+        })
+        .select('id')
+        .single();
+      // A unique-key collision means another cron worker already reserved it.
+      if (reservationError?.code === '23505') continue;
+      if (reservationError || !reservation) continue;
+
       let status: 'sent' | 'failed' = 'sent';
       let error: string | undefined;
 
@@ -80,14 +100,10 @@ export async function fireNotification(
         error = e.message;
       }
 
-      await supabase.from('notifications_log').insert({
-        contact_id: contact.id,
-        rule_id: rule.id,
-        channel,
-        message,
-        status,
-        error: error ?? null,
-      });
+      await supabase
+        .from('notifications_log')
+        .update({ status, error: error ?? null })
+        .eq('id', reservation.id);
     }
   }
 }
@@ -130,17 +146,15 @@ export async function processCountdownNotifications() {
       const thresholds: number[] = rule.config?.days_before ?? [7, 1];
       if (!thresholds.includes(daysLeft)) continue;
 
-      // Don't re-send the same threshold for the same contact.
-      const { data: already } = await supabase
-        .from('notifications_log')
-        .select('id')
-        .eq('contact_id', contact.id)
-        .eq('rule_id', rule.id)
-        .ilike('message', `%${daysLeft} day%`)
-        .limit(1);
-      if (already?.length) continue;
-
-      await fireNotification('client_countdown', contact, { days_left: daysLeft });
+      await fireNotification(
+        'client_countdown',
+        contact,
+        { days_left: daysLeft },
+        {
+          ruleId: rule.id,
+          dedupeKey: `countdown:${rule.id}:${contact.id}:${contact.client_since}:${daysLeft}`,
+        }
+      );
     }
   }
   return { checked };

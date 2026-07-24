@@ -1,5 +1,6 @@
 import { createAdminClient } from '@/lib/supabase/server';
 import { sendCrmEmail } from '@/lib/email-send';
+import { sequenceFailureUpdate } from '@/lib/sequence-retry';
 
 /**
  * Email sequence engine.
@@ -41,6 +42,8 @@ export async function enrollContact(sequenceId: string, contactId: string) {
       current_step: 0,
       next_send_at: new Date(Date.now() + delayMs).toISOString(),
       stop_reason: null,
+      attempt_count: 0,
+      last_error: null,
     },
     { onConflict: 'sequence_id,contact_id' }
   );
@@ -102,14 +105,13 @@ export async function processDueEnrollments(): Promise<{ sent: number; errors: n
   let sent = 0;
   let errors = 0;
 
-  const { data: due } = await supabase
-    .from('sequence_enrollments')
-    .select('id, sequence_id, contact_id, current_step')
-    .eq('status', 'active')
-    .lte('next_send_at', new Date().toISOString())
-    .limit(100);
+  const { data: due, error: claimError } = await supabase.rpc(
+    'claim_due_sequence_enrollments',
+    { p_limit: 25 }
+  );
+  if (claimError) throw claimError;
 
-  for (const enrollment of due ?? []) {
+  for (const enrollment of (due ?? []) as any[]) {
     try {
       const [{ data: sequence }, { data: steps }, { data: contact }] = await Promise.all([
         supabase.from('email_sequences').select('*').eq('id', enrollment.sequence_id).single(),
@@ -149,8 +151,20 @@ export async function processDueEnrollments(): Promise<{ sent: number; errors: n
         sequenceStepId: nextStep.id,
       });
 
-      if (!result.ok) errors += 1;
-      else sent += 1;
+      if (!result.ok) {
+        errors += 1;
+        await supabase
+          .from('sequence_enrollments')
+          .update(
+            sequenceFailureUpdate(
+              enrollment.attempt_count ?? 0,
+              result.error ?? 'Email delivery failed'
+            )
+          )
+          .eq('id', enrollment.id);
+        continue;
+      }
+      sent += 1;
 
       const following = (steps ?? [])[enrollment.current_step + 1];
       await supabase
@@ -159,15 +173,32 @@ export async function processDueEnrollments(): Promise<{ sent: number; errors: n
           following
             ? {
                 current_step: enrollment.current_step + 1,
+                attempt_count: 0,
+                last_error: null,
                 next_send_at: new Date(
                   Date.now() + following.delay_days * 24 * 60 * 60 * 1000
                 ).toISOString(),
               }
-            : { current_step: enrollment.current_step + 1, status: 'completed', next_send_at: null }
+            : {
+                current_step: enrollment.current_step + 1,
+                attempt_count: 0,
+                last_error: null,
+                status: 'completed',
+                next_send_at: null,
+              }
         )
         .eq('id', enrollment.id);
-    } catch {
+    } catch (error: any) {
       errors += 1;
+      await supabase
+        .from('sequence_enrollments')
+        .update(
+          sequenceFailureUpdate(
+            enrollment.attempt_count ?? 0,
+            error?.message ?? 'Unexpected sequence processing failure'
+          )
+        )
+        .eq('id', enrollment.id);
     }
   }
 
