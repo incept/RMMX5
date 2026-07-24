@@ -160,10 +160,22 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
     while (usedPositions.has(position) && position <= 14) position += 1;
     if (position > 14) break;
 
-    await supabase.from('contact_links').upsert(
+    const { error: linkError } = await supabase.from('contact_links').upsert(
       { contact_id: contactId, position, url: result.link, status: 'live' },
       { onConflict: 'contact_id,position' }
     );
+    if (linkError) {
+      // A relevant result that fails to store is exactly the "search said N
+      // links but the tab is empty" mystery — make it loud, don't lose it.
+      await logDebug({
+        level: 'error',
+        source: 'lead-intake:auto-search',
+        message: `Failed to store link slot ${position}: ${linkError.message}`,
+        context: { url: result.link, position },
+        contactId,
+      });
+      continue;
+    }
     usedPositions.add(position);
     inserted += 1;
   }
@@ -273,7 +285,12 @@ function parseSubmittedAt(value: string | null): string | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
-/** Maps a Fluent Forms webhook payload to a new contact + kicks off the auto search. */
+/**
+ * Maps a Fluent Forms webhook payload to a new contact. Does NOT run the auto
+ * search — the webhook route defers that with after() so the response returns
+ * within WordPress's HTTP timeout. A slow response makes Fluent Forms mark the
+ * delivery failed and retry, which is how duplicate contacts happen.
+ */
 export async function processFluentFormsLead(payload: Record<string, any>) {
   const supabase = createAdminClient();
 
@@ -380,23 +397,46 @@ export async function processFluentFormsLead(payload: Record<string, any>) {
     contactId: contact.id,
   });
 
-  // Auto search is best-effort: a missing BrightData key shouldn't lose the lead.
-  let search: any = null;
+  return { contact };
+}
+
+/**
+ * Auto search is best-effort: a missing BrightData key, a rate-limited ip-api,
+ * or a SERP failure must never lose the lead (and, from a webhook, must never
+ * turn into a 500 that makes the sender retry). Failures land in the activity
+ * feed and Debug Log; runAutoSearchForContact flags the contact itself.
+ */
+export async function runAutoSearchSafely(contactId: string) {
   try {
-    search = await runAutoSearchForContact(contact.id);
+    return await runAutoSearchForContact(contactId);
   } catch (e: any) {
     await logActivity({
-      contactId: contact.id,
+      contactId,
       type: 'search',
       description: `Auto search skipped: ${errorMessage(e)}`,
     });
     await logDebug({
       source: 'lead-intake:auto-search',
       message: errorMessage(e),
-      context: { contact_name: contact.name, ip: contact.ip },
-      contactId: contact.id,
+      contactId,
     });
+    return null;
   }
+}
 
-  return { contact, search };
+/**
+ * Best-available idempotency key for a Fluent Forms delivery. Fluent Forms
+ * sends its entry id under flat dotted keys (`submission.id`, `entry.id` …) —
+ * never as a top-level `entry_id` — so this reuses the same flattening index
+ * the field mapping uses. When no id key exists at all, the caller should fall
+ * back to hashing the payload: a retry re-sends the identical body, so the
+ * hash still collapses duplicates.
+ */
+export function extractFluentFormsEventId(payload: Record<string, any>): string | null {
+  const index = indexPayload(payload);
+  for (const key of ['entry_id', 'submission_id', 'serial_number', 'id']) {
+    const v = index.get(normalizeKey(key));
+    if (v != null && v !== '') return v;
+  }
+  return null;
 }
