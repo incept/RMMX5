@@ -99,6 +99,52 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
   return { query, total: results.length, relevant: relevant.length, inserted, ...scores };
 }
 
+/** "User IP" → "userip", "__ip" → "ip", "first_name" → "firstname". */
+function normalizeKey(key: string): string {
+  return key.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * Indexes every scalar in the payload under a normalised key.
+ *
+ * Two things make raw key matching unreliable with Fluent Forms:
+ *   1. Composite fields arrive as nested objects — the default name field is
+ *      `names: {first_name, last_name}` and address is
+ *      `address_1: {city, state, …}`. Matching the outer key would stringify
+ *      the object to "[object Object]", so nested scalars are flattened out
+ *      and indexed under both their bare and prefixed names.
+ *   2. Metadata keys vary in spelling and casing between setups — "User IP",
+ *      "user_ip" and "__ip" all mean the same thing. Normalising strips the
+ *      difference.
+ *
+ * A `{ data: {...} }` wrapper is handled for free by the same flattening.
+ * First writer wins, so a real form field beats a same-named nested value.
+ */
+function indexPayload(payload: Record<string, any>): Map<string, string> {
+  const index = new Map<string, string>();
+
+  const add = (key: string, value: any) => {
+    if (value == null || value === '' || typeof value === 'object') return;
+    const normalized = normalizeKey(key);
+    if (normalized && !index.has(normalized)) index.set(normalized, String(value));
+  };
+
+  const walk = (obj: Record<string, any>, prefix: string, depth: number) => {
+    if (!obj || typeof obj !== 'object' || depth > 3) return;
+    for (const [key, value] of Object.entries(obj)) {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        walk(value as Record<string, any>, `${prefix}${key}_`, depth + 1);
+        continue;
+      }
+      add(key, value);
+      if (prefix) add(`${prefix}${key}`, value);
+    }
+  };
+
+  walk(payload, '', 0);
+  return index;
+}
+
 /**
  * Fluent Forms sends "Submitted On" as a MySQL-style local datetime
  * ("2026-07-24 02:34:01"), which `new Date()` parses inconsistently across
@@ -117,22 +163,23 @@ function parseSubmittedAt(value: string | null): string | null {
 export async function processFluentFormsLead(payload: Record<string, any>) {
   const supabase = createAdminClient();
 
-  // Fluent Forms posts field values keyed by the form field names; support
-  // both flat payloads and the { data: {...} } wrapper, and common aliases.
-  const data = payload.data ?? payload;
+  const index = indexPayload(payload);
   const pick = (...keys: string[]) => {
     for (const key of keys) {
-      const v = data[key] ?? payload[key];
-      if (v != null && v !== '') return String(v);
+      const v = index.get(normalizeKey(key));
+      if (v != null && v !== '') return v;
     }
     return null;
   };
 
+  // Composite name fields are flattened by indexPayload, so first/last are
+  // reachable even though Fluent Forms nests them under `names`.
   const firstName = pick('first_name', 'fname');
   const lastName = pick('last_name', 'lname');
   const name =
-    pick('name', 'full_name', 'names') ??
-    [firstName, lastName].filter(Boolean).join(' ');
+    pick('name', 'full_name', 'your_name') ||
+    [firstName, lastName].filter(Boolean).join(' ') ||
+    null;
 
   const { data: newStatus } = await supabase
     .from('statuses')
@@ -152,10 +199,10 @@ export async function processFluentFormsLead(payload: Record<string, any>) {
       // Fluent Forms' default metadata block. It labels these "User IP",
       // "Source URL", "Browser", "Device", "User" and "Submitted On"; the
       // aliases below cover the key spellings its webhook feed actually sends.
-      browser: pick('browser', 'user_agent', '__user_agent'),
-      ip: pick('ip', 'ip_address', 'user_ip', '__ip'),
-      device: pick('device', 'platform', 'os', 'device_type'),
-      source_url: pick('source_url', '__source_url', 'page_url', 'referer', 'referrer'),
+      browser: pick('browser', 'user_agent'),
+      ip: pick('ip', 'user_ip', 'ip_address', 'client_ip'),
+      device: pick('device', 'device_type', 'platform', 'os'),
+      source_url: pick('source_url', 'page_url', 'referer', 'referrer', 'permalink'),
       wp_user: pick('wp_user', 'user', 'username', 'user_login', 'user_email'),
       submitted_at: parseSubmittedAt(
         pick('submitted_on', 'submitted_at', 'created_at', 'submission_date')
@@ -173,6 +220,22 @@ export async function processFluentFormsLead(payload: Record<string, any>) {
     type: 'created',
     description: `Lead captured from Fluent Forms (${contact.email ?? 'no email'})`,
     meta: { source: 'fluent_forms' },
+  });
+
+  // Records exactly which keys arrived and which mapped, so a field that
+  // silently lands empty can be diagnosed from Admin → Debug Log instead of
+  // by querying webhook_leads for the raw payload.
+  const unmapped = ['name', 'email', 'phone', 'city', 'state', 'ip'].filter(
+    (field) => !(contact as any)[field]
+  );
+  await logDebug({
+    level: unmapped.length ? 'warn' : 'info',
+    source: 'lead-intake:mapping',
+    message: unmapped.length
+      ? `Lead stored, but these fields did not map: ${unmapped.join(', ')}`
+      : 'Lead stored with all core fields mapped',
+    context: { payload_keys: [...index.keys()].sort(), unmapped },
+    contactId: contact.id,
   });
 
   // Auto search is best-effort: a missing BrightData key shouldn't lose the lead.
