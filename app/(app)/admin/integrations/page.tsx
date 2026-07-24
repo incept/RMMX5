@@ -189,7 +189,13 @@ export default function IntegrationsPage() {
               </div>
               <div className="space-y-1 font-mono">
                 <div>URL: {origin}/api/webhooks/callscaler</div>
-                <div>Custom header — Authorization: Bearer &lt;webhook_secret&gt;</div>
+                <div>Custom header — name: x-rmmx-webhook-secret</div>
+                <div>Custom header — value: &lt;webhook_secret&gt; (the secret alone)</div>
+              </div>
+              <div className="mt-2">
+                Use the <span className="font-semibold">x-rmmx-webhook-secret</span> header, not
+                Authorization — CallScaler strips the Authorization header, so the call arrives
+                unauthenticated and is rejected.
               </div>
               <div className="mt-2">
                 Set the webhook mode to <span className="font-semibold">“Wait for AI”</span> so the
