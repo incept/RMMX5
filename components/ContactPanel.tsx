@@ -449,6 +449,16 @@ export default function ContactPanel({
 
           {tab === 'Link Data' && (
             <div className="space-y-4">
+              {contact.search_flag && (
+                <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  <span className="mr-1">⚑</span>
+                  <span className="font-semibold">Search needs a re-run:</span>{' '}
+                  {contact.search_flag}. Fix the cause if needed (e.g. add a city/state
+                  or a commercial ip-api key), then press{' '}
+                  <span className="font-semibold">🔎 Run web search</span> below — a
+                  successful run clears this flag.
+                </div>
+              )}
               <div className="flex items-center gap-3">
                 <div className="card flex-1 py-3 text-center">
                   <div className="text-2xl font-bold text-brand-700">
