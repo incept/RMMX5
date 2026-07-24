@@ -256,19 +256,34 @@ export async function processFluentFormsLead(payload: Record<string, any>) {
   // Records exactly which keys arrived and which mapped, so a field that
   // silently lands empty can be diagnosed from Admin → Debug Log instead of
   // by querying webhook_leads for the raw payload.
-  // '(no name)' is the placeholder used when nothing mapped, so it has to count
-  // as unmapped — otherwise a lead with no usable name reports as fully mapped.
-  const unmapped = ['name', 'email', 'phone', 'city', 'state', 'ip'].filter((field) => {
+  //
+  // Two tiers, so the log only raises a warning for something actually broken:
+  //   * critical — must come from the form. A miss here means the mapping is
+  //     wrong. ('(no name)' is the nothing-mapped placeholder, so it counts as
+  //     a miss even though the column is non-null.)
+  //   * derived  — city/state come from the IP geolocation that runs AFTER this
+  //     check (see runAutoSearchForContact), and phone is not on this form at
+  //     all. Reporting them is useful, but they are expected to be blank here
+  //     and must not trip a warning on every single lead.
+  const isMissing = (field: string) => {
     const value = (contact as any)[field];
     return !value || (field === 'name' && value === '(no name)');
-  });
+  };
+  const criticalMissing = ['name', 'email', 'ip'].filter(isMissing);
+  const derivedMissing = ['phone', 'city', 'state'].filter(isMissing);
   await logDebug({
-    level: unmapped.length ? 'warn' : 'info',
+    level: criticalMissing.length ? 'warn' : 'info',
     source: 'lead-intake:mapping',
-    message: unmapped.length
-      ? `Lead stored, but these fields did not map: ${unmapped.join(', ')}`
-      : 'Lead stored with all core fields mapped',
-    context: { payload_keys: [...index.keys()].sort(), unmapped },
+    message: criticalMissing.length
+      ? `Lead stored, but core fields did not map: ${criticalMissing.join(', ')}`
+      : derivedMissing.length
+        ? `Lead stored; core fields mapped. Not on this form / filled later: ${derivedMissing.join(', ')}`
+        : 'Lead stored with all fields mapped',
+    context: {
+      payload_keys: [...index.keys()].sort(),
+      critical_missing: criticalMissing,
+      derived_missing: derivedMissing,
+    },
     contactId: contact.id,
   });
 
