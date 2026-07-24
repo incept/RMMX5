@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import ThemeToggle from '@/components/ThemeToggle';
 
 const NAV = [
   { href: '/dashboard', label: 'Dashboard', icon: 'M3 13h4v8H3zM10 9h4v12h-4zM17 4h4v17h-4z' },
@@ -96,7 +97,8 @@ export default function Sidebar({ role, userName }: { role: string; userName: st
       </nav>
 
       <div className="border-t border-gray-200 px-4 py-3">
-        <div className="truncate text-xs font-medium text-gray-700">{userName}</div>
+        <ThemeToggle />
+        <div className="mt-3 truncate text-xs font-medium text-gray-700">{userName}</div>
         <div className="mb-2 text-[10px] text-gray-400 uppercase">{role}</div>
         <div className="flex items-center gap-3">
           <Link href="/profile" className="text-xs text-gray-500 hover:text-brand-700">

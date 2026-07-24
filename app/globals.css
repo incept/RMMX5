@@ -1,15 +1,107 @@
 @import 'tailwindcss';
 
+/* Dark mode is class-based (`<html class="dark">`) rather than media-query based,
+   so the user's choice can override their OS setting. See ThemeToggle. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --color-brand-50: #eef2ff;
   --color-brand-100: #e0e7ff;
   --color-brand-500: #6366f1;
   --color-brand-600: #4f46e5;
   --color-brand-700: #4338ca;
+
+  /* Page background and raised surfaces (cards, panels, menus). Referenced by
+     the primitives below instead of literal bg-white / bg-gray-50 so both
+     themes are defined in exactly one place. */
+  --color-surface: #ffffff;
+  --color-canvas: #f9fafb;
+}
+
+/* ---------------------------------------------------------------------------
+   Dark theme.
+
+   Tailwind v4 compiles `bg-gray-50` to `background-color: var(--color-gray-50)`,
+   so redefining the ramp here re-themes every existing utility in the app
+   without touching a single component. The gray scale is inverted — the low end
+   (backgrounds) becomes dark, the high end (text) becomes light — which is what
+   makes `text-gray-900` on `bg-gray-50` stay legible after the flip.
+
+   Two classes of exception are handled with explicit utility overrides further
+   down, because a background and a text colour that share one variable need to
+   move in OPPOSITE directions:
+     - `bg-white` must darken, but `text-white` (on coloured buttons) must not.
+     - `bg-red-600` must stay a saturated button fill, but `text-red-600`
+       (error messages) must lighten to stay readable.
+
+   gray-950 is deliberately left alone: its only use is the always-dark brand
+   panel on the login page, which should stay dark in both themes.
+--------------------------------------------------------------------------- */
+:root.dark {
+  --color-surface: #1c1f25;
+  --color-canvas: #16181d;
+
+  --color-gray-50: #16181d;
+  --color-gray-100: #24272e;
+  --color-gray-200: #2f333b;
+  --color-gray-300: #3d424c;
+  --color-gray-400: #6b7078;
+  --color-gray-500: #9aa0aa;
+  --color-gray-600: #b4bac3;
+  --color-gray-700: #ccd1d9;
+  --color-gray-800: #e0e4ea;
+  --color-gray-900: #f0f2f5;
+
+  /* Tints only. brand-500/600/700 keep their light-mode values so buttons stay
+     the same indigo; only the washes behind active nav items and focus rings
+     need to survive the dark background. */
+  --color-brand-50: #262a55;
+  --color-brand-100: #3730a3;
+
+  /* Status washes (bg-*-50/100) darken; the paired text shades lighten. */
+  --color-red-50: #2a1416;
+  --color-red-100: #3b1618;
+  --color-red-500: #f87171;
+  --color-red-600: #f87171;
+  --color-red-700: #fca5a5;
+  --color-green-50: #0f2318;
+  --color-green-100: #14301f;
+  --color-green-600: #4ade80;
+  --color-green-700: #86efac;
+  --color-green-800: #bbf7d0;
+  --color-amber-50: #2a2010;
+  --color-amber-100: #3a2b12;
+  --color-amber-600: #fbbf24;
+  --color-amber-700: #fcd34d;
+  --color-amber-800: #fde68a;
+
+  /* Native widgets: select menus, date pickers, scrollbars, form controls. */
+  color-scheme: dark;
+}
+
+/* Backgrounds that must NOT follow their variable into the light. Each pairs
+   with a text utility of the same name that has to move the other way. */
+:root.dark .bg-white {
+  background-color: var(--color-surface);
+}
+:root.dark .bg-red-600 {
+  background-color: #b91c1c;
+}
+:root.dark .bg-red-700 {
+  background-color: #991b1b;
+}
+:root.dark .bg-green-500 {
+  background-color: #22c55e;
+}
+/* Mirror image of the above: brand-700 stays dark as a button fill
+   (`.btn-primary:hover`) but must lighten wherever it is used as text. */
+:root.dark .text-brand-700,
+:root.dark .hover\:text-brand-700:hover {
+  color: #a5b4fc;
 }
 
 body {
-  @apply bg-gray-50 text-gray-900 antialiased;
+  @apply bg-canvas text-gray-900 antialiased;
   font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial,
     sans-serif;
 }
@@ -17,7 +109,7 @@ body {
 /* ---- Reusable primitives (Airtable/Monday-ish, light and dense) ---- */
 
 .btn {
-  @apply inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 shadow-xs transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-surface px-3 py-1.5 text-sm font-medium text-gray-700 shadow-xs transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .btn-primary {
@@ -33,7 +125,7 @@ body {
 }
 
 .input {
-  @apply w-full rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder-gray-400 outline-none transition-colors focus:border-brand-500 focus:ring-2 focus:ring-brand-100;
+  @apply w-full rounded-lg border border-gray-200 bg-surface px-3 py-1.5 text-sm text-gray-900 placeholder-gray-400 outline-none transition-colors focus:border-brand-500 focus:ring-2 focus:ring-brand-100;
 }
 
 .label {
@@ -41,15 +133,17 @@ body {
 }
 
 .card {
-  @apply rounded-xl border border-gray-200 bg-white p-4 shadow-xs;
+  @apply rounded-xl border border-gray-200 bg-surface p-4 shadow-xs;
 }
 
 .panel-tab {
   @apply cursor-pointer border-b-2 border-transparent px-3 py-2 text-sm font-medium text-gray-500 hover:text-gray-800;
 }
 
+/* brand-700 is a dark indigo — legible on white, not on a dark panel — so the
+   active tab and active nav item switch to a light indigo in dark mode. */
 .panel-tab-active {
-  @apply border-brand-600 text-brand-700;
+  @apply border-brand-600 text-brand-700 dark:border-brand-500 dark:text-indigo-300;
 }
 
 /* Spreadsheet grid */
@@ -73,6 +167,10 @@ body {
   background: #d1d5db;
   border-radius: 6px;
   border: 2px solid transparent;
+  background-clip: content-box;
+}
+:root.dark ::-webkit-scrollbar-thumb {
+  background: #3d424c;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-track {

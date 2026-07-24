@@ -105,35 +105,56 @@ function normalizeKey(key: string): string {
 }
 
 /**
+ * Splits a key into path segments, then returns every trailing sub-path.
+ *
+ *   "submission.ip"                 → ["submission.ip", "ip"]
+ *   "names[first_name]"             → ["names.first_name", "first_name"]
+ *   "submission.user_inputs.names"  → [full, "user_inputs.names", "names"]
+ *
+ * Only `.` and `[` `]` are treated as separators — splitting on `_` too would
+ * reduce "first_name" to "name" and collide with the full-name field.
+ */
+function keyVariants(key: string): string[] {
+  const segments = key.split(/[.[\]]+/).filter(Boolean);
+  return segments.map((_, i) => segments.slice(i).join('.'));
+}
+
+/**
  * Indexes every scalar in the payload under a normalised key.
  *
- * Two things make raw key matching unreliable with Fluent Forms:
- *   1. Composite fields arrive as nested objects — the default name field is
- *      `names: {first_name, last_name}` and address is
- *      `address_1: {city, state, …}`. Matching the outer key would stringify
- *      the object to "[object Object]", so nested scalars are flattened out
- *      and indexed under both their bare and prefixed names.
- *   2. Metadata keys vary in spelling and casing between setups — "User IP",
+ * Three things make raw key matching unreliable with Fluent Forms:
+ *   1. It does not send nested objects — it sends FLAT keys holding a dotted
+ *      path, e.g. `submission.ip`, `submission.source_url`, `names[first_name]`.
+ *      Matching on the whole key finds nothing, so each key is also indexed
+ *      under its trailing segments and the leaf name ("ip") becomes reachable.
+ *   2. Composite fields still arrive nested in some setups (`names: {…}`), so
+ *      objects are walked as well and indexed under both bare and prefixed
+ *      names. Both shapes therefore resolve to the same normalised keys.
+ *   3. Metadata keys vary in spelling and casing between setups — "User IP",
  *      "user_ip" and "__ip" all mean the same thing. Normalising strips the
  *      difference.
  *
  * A `{ data: {...} }` wrapper is handled for free by the same flattening.
- * First writer wins, so a real form field beats a same-named nested value.
+ * First writer wins, and full keys are indexed before their shorter suffixes,
+ * so a top-level `email` beats `submission.user_inputs.email`.
  */
 function indexPayload(payload: Record<string, any>): Map<string, string> {
   const index = new Map<string, string>();
 
   const add = (key: string, value: any) => {
     if (value == null || value === '' || typeof value === 'object') return;
-    const normalized = normalizeKey(key);
-    if (normalized && !index.has(normalized)) index.set(normalized, String(value));
+    // Longest first, so the most specific spelling claims each normalised slot.
+    for (const variant of keyVariants(key)) {
+      const normalized = normalizeKey(variant);
+      if (normalized && !index.has(normalized)) index.set(normalized, String(value));
+    }
   };
 
   const walk = (obj: Record<string, any>, prefix: string, depth: number) => {
     if (!obj || typeof obj !== 'object' || depth > 3) return;
     for (const [key, value] of Object.entries(obj)) {
       if (value && typeof value === 'object' && !Array.isArray(value)) {
-        walk(value as Record<string, any>, `${prefix}${key}_`, depth + 1);
+        walk(value as Record<string, any>, `${prefix}${key}.`, depth + 1);
         continue;
       }
       add(key, value);
@@ -203,12 +224,18 @@ export async function processFluentFormsLead(payload: Record<string, any>) {
       ip: pick('ip', 'user_ip', 'ip_address', 'client_ip'),
       device: pick('device', 'device_type', 'platform', 'os'),
       source_url: pick('source_url', 'page_url', 'referer', 'referrer', 'permalink'),
-      wp_user: pick('wp_user', 'user', 'username', 'user_login', 'user_email'),
+      wp_user: pick('wp_user', 'user', 'username', 'user_login', 'user_email', 'user_id'),
       submitted_at: parseSubmittedAt(
         pick('submitted_on', 'submitted_at', 'created_at', 'submission_date')
       ),
       source: pick('source', 'utm_source') ?? 'fluent_forms',
-      utm: pick('utm', 'utm_campaign', 'utm_medium'),
+      utm: pick(
+        'utm',
+        'utm_campaign',
+        'utm_medium',
+        'utm_traffic_source',
+        'utm_organic_source_str'
+      ),
       ppc_kw: pick('ppc_kw', 'keyword', 'utm_term', 'gclid_keyword'),
     })
     .select('*')
@@ -225,9 +252,12 @@ export async function processFluentFormsLead(payload: Record<string, any>) {
   // Records exactly which keys arrived and which mapped, so a field that
   // silently lands empty can be diagnosed from Admin → Debug Log instead of
   // by querying webhook_leads for the raw payload.
-  const unmapped = ['name', 'email', 'phone', 'city', 'state', 'ip'].filter(
-    (field) => !(contact as any)[field]
-  );
+  // '(no name)' is the placeholder used when nothing mapped, so it has to count
+  // as unmapped — otherwise a lead with no usable name reports as fully mapped.
+  const unmapped = ['name', 'email', 'phone', 'city', 'state', 'ip'].filter((field) => {
+    const value = (contact as any)[field];
+    return !value || (field === 'name' && value === '(no name)');
+  });
   await logDebug({
     level: unmapped.length ? 'warn' : 'info',
     source: 'lead-intake:mapping',
