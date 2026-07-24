@@ -8,6 +8,7 @@ const KNOWN_KEYS = [
   'textlink',
   'stripe',
   'fluent_forms',
+  'callscaler',
   'inbound_email',
   'ipapi',
   'voicemail',
