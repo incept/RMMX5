@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import StatusPill, { type StatusOption } from '@/components/StatusPill';
 
-const TABS = ['Contact Info', 'Link Data', 'Email', 'Data', 'Activity', 'Files'] as const;
+const TABS = ['Contact Info', 'Link Data', 'Email', 'Calls', 'Data', 'Activity', 'Files'] as const;
 type Tab = (typeof TABS)[number];
 
 interface LinkSlot {
@@ -19,6 +19,19 @@ const LINK_STATUS_COLORS: Record<string, string> = {
   requested: '#F59E0B',
   removed: '#22C55E',
 };
+
+const AI_CATEGORY_STYLES: Record<string, string> = {
+  lead: 'bg-green-100 text-green-700',
+  existing_customer: 'bg-gray-100 text-gray-600',
+  voicemail: 'bg-amber-100 text-amber-700',
+  spam: 'bg-red-100 text-red-700',
+  wrong_number: 'bg-red-100 text-red-700',
+};
+
+function callDuration(seconds: number | null): string {
+  const s = Math.max(0, Number(seconds) || 0);
+  return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+}
 
 /** Slide-over panel with the Contact Info / Link Data / Email / Data tabs (+ Activity & Files). */
 export default function ContactPanel({
@@ -40,6 +53,7 @@ export default function ContactPanel({
   const [activity, setActivity] = useState<any[]>([]);
   const [files, setFiles] = useState<any[]>([]);
   const [messages, setMessages] = useState<any[]>([]);
+  const [calls, setCalls] = useState<any[]>([]);
   const [enrollments, setEnrollments] = useState<any[]>([]);
   const [listMemberships, setListMemberships] = useState<any[]>([]);
   const [allLists, setAllLists] = useState<any[]>([]);
@@ -117,13 +131,24 @@ export default function ContactPanel({
     if (res.ok) setFiles((await res.json()).files ?? []);
   }, [contactId]);
 
+  const loadCalls = useCallback(async () => {
+    const { data } = await supabase
+      .from('calls')
+      .select('*')
+      .eq('contact_id', contactId)
+      .order('started_at', { ascending: false, nullsFirst: false })
+      .limit(50);
+    setCalls(data ?? []);
+  }, [supabase, contactId]);
+
   useEffect(() => {
     load();
   }, [load]);
   useEffect(() => {
     if (tab === 'Email') loadEmailTab();
     if (tab === 'Files') loadFiles();
-  }, [tab, loadEmailTab, loadFiles]);
+    if (tab === 'Calls') loadCalls();
+  }, [tab, loadEmailTab, loadFiles, loadCalls]);
 
   async function patchContact(patch: Record<string, any>) {
     setBusy('save');
@@ -647,6 +672,61 @@ export default function ContactPanel({
             </div>
           )}
 
+          {tab === 'Calls' && (
+            <div className="space-y-3">
+              {calls.map((c) => (
+                <div key={c.id} className="rounded-lg border border-gray-100 px-3 py-2.5 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span>{c.direction === 'outbound' ? '📤' : '📞'}</span>
+                    <span className="font-medium">
+                      {c.started_at ? new Date(c.started_at).toLocaleString() : '—'}
+                    </span>
+                    <span className="text-xs text-gray-400">{callDuration(c.duration_seconds)}</span>
+                    <span className="text-xs text-gray-400">{c.status}</span>
+                    <span className="flex-1" />
+                    {c.ai_category && (
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                          AI_CATEGORY_STYLES[c.ai_category] ?? 'bg-gray-100 text-gray-600'
+                        }`}
+                        title={c.qualified_ai ? 'AI-qualified lead' : undefined}
+                      >
+                        {c.ai_category.replace('_', ' ')}
+                        {c.ai_score != null ? ` · ${c.ai_score}` : ''}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1 flex gap-3 text-xs text-gray-400">
+                    <span>{c.caller_number}</span>
+                    {c.caller_name && <span>{c.caller_name}</span>}
+                    {c.tracking_number && <span>via {c.tracking_number}</span>}
+                  </div>
+                  {c.recording_url && (
+                    // preload="none": don't fetch every recording just to render the list
+                    <audio controls preload="none" src={c.recording_url} className="mt-2 h-8 w-full" />
+                  )}
+                  {c.summary && <p className="mt-2 text-xs text-gray-600">{c.summary}</p>}
+                  {c.transcription && (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-xs text-brand-600 select-none">
+                        Transcript
+                      </summary>
+                      <p className="mt-1 text-xs whitespace-pre-wrap text-gray-600">
+                        {c.transcription}
+                      </p>
+                    </details>
+                  )}
+                </div>
+              ))}
+              {calls.length === 0 && (
+                <div className="text-sm text-gray-400">
+                  No calls yet. Calls arrive automatically once the CallScaler webhook is configured
+                  (Admin → Integrations).
+                </div>
+              )}
+            </div>
+          )}
+
           {tab === 'Data' && (
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-3">
@@ -677,6 +757,7 @@ export default function ContactPanel({
                 </div>
                 {input('PPC KW', 'ppc_kw')}
                 {input('UTM', 'utm')}
+                {input('GCLID', 'gclid')}
                 <div>
                   <label className="label">Status</label>
                   <StatusPill
@@ -693,6 +774,7 @@ export default function ContactPanel({
                 'source',
                 'ip',
                 'utm',
+                'gclid',
                 'device',
                 'source_url',
                 'wp_user',

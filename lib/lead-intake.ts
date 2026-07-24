@@ -237,6 +237,10 @@ export async function processFluentFormsLead(payload: Record<string, any>) {
         'utm_organic_source_str'
       ),
       ppc_kw: pick('ppc_kw', 'keyword', 'utm_term', 'gclid_keyword'),
+      // Join key with CallScaler: the same gclid on a form fill and a phone
+      // call means the same ad click, so call intake can merge instead of
+      // creating a duplicate contact.
+      gclid: pick('gclid', 'google_click_id'),
     })
     .select('*')
     .single();

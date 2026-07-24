@@ -27,7 +27,7 @@ export async function PATCH(request: Request, { params }: Params) {
   const allowed = [
     'name', 'city', 'state', 'email', 'phone', 'status_id', 'browser', 'ppc_kw',
     'source', 'ip', 'utm', 'stage_id', 'client_since', 'service_days', 'custom', 'owner_id',
-    'device', 'source_url', 'wp_user',
+    'device', 'source_url', 'wp_user', 'gclid',
   ];
   const updates: Record<string, any> = {};
   for (const key of allowed) if (key in patch) updates[key] = patch[key];

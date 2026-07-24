@@ -11,6 +11,8 @@ import { createAdminClient } from '@/lib/supabase/server';
  *   textlink      { api_key, sim_card_id }
  *   stripe        { secret_key }
  *   fluent_forms  { webhook_secret }
+ *   callscaler    { api_key, webhook_secret }
+ *   callscaler_sync { updated_since }   -- cron cursor; not admin-editable
  *   inbound_email { webhook_secret }
  *   voicemail     { provider_url, api_key, caller_id }
  *   search        { country, num_results, extra_terms }
