@@ -223,6 +223,15 @@ export default function IntegrationsPage() {
             </div>
           )}
 
+          {section.key === 'brightdata' && (
+            <div className="mt-3 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
+              SERP requests this month (Google + Bing, all searches):{' '}
+              <span className="font-mono font-semibold">
+                {settings.usage?.serp?.[new Date().toISOString().slice(0, 7)] ?? 0}
+              </span>
+            </div>
+          )}
+
           {section.key === 'brightdata' && brightdata.proxy_zone && (
             <div className="mt-3 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
               <div className="mb-1 font-semibold">

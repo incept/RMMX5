@@ -31,9 +31,12 @@ export default async function proxy(request: NextRequest) {
     }
   );
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // Local JWT verification instead of a network hit to the Auth server on
+  // every request (getClaims still refreshes an expired session, which is the
+  // other job this proxy exists to do). Roles/status stay enforced by RLS and
+  // the API guards — this is only the fast bounce.
+  const { data } = await supabase.auth.getClaims();
+  const user = data?.claims?.sub ? { id: data.claims.sub as string } : null;
 
   const { pathname } = request.nextUrl;
   const isPublic = pathname === '/' || pathname.startsWith('/auth');

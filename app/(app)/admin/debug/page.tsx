@@ -41,8 +41,18 @@ export default function DebugLogPage() {
 
   useEffect(() => {
     if (!autoRefresh) return;
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
+    // 30s, and only while the tab is visible. A forgotten background tab
+    // polling every 5s was a permanent request stream that kept the host's
+    // worker pool warm and multiplying — part of the idle-process pileup.
+    const tick = () => {
+      if (document.visibilityState === 'visible') load();
+    };
+    const t = setInterval(tick, 30_000);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', tick);
+    };
   }, [autoRefresh, load]);
 
   const sources = [...new Set(entries.map((e) => e.source))].sort();

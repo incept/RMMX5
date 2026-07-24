@@ -18,6 +18,15 @@ export async function PATCH(request: Request, { params }: Params) {
     );
   }
 
+  // Whitelist: is_admin() checks role = 'admin' exactly, so an arbitrary
+  // string here would silently create a roleless account.
+  if (body.role && !['admin', 'worker'].includes(body.role)) {
+    return NextResponse.json({ error: `Invalid role: ${body.role}` }, { status: 400 });
+  }
+  if (body.status && !['active', 'disabled'].includes(body.status)) {
+    return NextResponse.json({ error: `Invalid status: ${body.status}` }, { status: 400 });
+  }
+
   const updates: Record<string, any> = {};
   if (body.role) updates.role = body.role;
   if (body.status) updates.status = body.status;

@@ -1,4 +1,4 @@
-import { getSetting } from '@/lib/settings';
+import { getSetting, bumpUsageCounter } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
 
 /**
@@ -57,6 +57,10 @@ export async function runSerpSearch(
   const country = opts?.country ?? search.country ?? 'us';
 
   const target = buildSerpTarget(engine, query, num, country);
+
+  // Meter every attempt (an upper bound on billable requests) so BrightData
+  // spend is visible in Admin → Integrations instead of a mystery.
+  void bumpUsageCounter('serp');
 
   const res = await fetch('https://api.brightdata.com/request', {
     method: 'POST',
