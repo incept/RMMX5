@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { sendViaEmailit } from '@/lib/integrations/emailit';
 import { logActivity } from '@/lib/activity';
 import { signTrackingUrl } from '@/lib/signing';
+import { appBaseUrl } from '@/lib/app-url';
 
 /**
  * Central outbound email path. Every CRM email (compose, sequence step,
@@ -68,7 +69,7 @@ export async function sendCrmEmail(opts: {
     .single();
   if (rowErr || !row) return { ok: false, messageRowId: '', error: rowErr?.message ?? 'insert failed' };
 
-  const appUrl = (process.env.NEXT_PUBLIC_APP_URL ?? '').replace(/\/$/, '');
+  const appUrl = appBaseUrl();
 
   // Click tracking: route every http(s) link through /api/track/click.
   // The HMAC (&s=) pins the redirect to URLs this app actually sent, so the
