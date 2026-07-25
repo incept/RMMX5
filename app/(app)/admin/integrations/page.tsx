@@ -274,9 +274,9 @@ export default function IntegrationsPage() {
                 </tbody>
               </table>
               <div className="mt-1.5 text-gray-400">
-                Counts come from the usage_events log; spend multiplies them by the per-call costs
-                above, so it is an estimate for orientation, not a bill. Failed requests are
-                counted because they are usually still billed.
+                Counts come from the usage_events log. BrightData charges only for successful
+                requests, so spend prices the successful ones and failures are shown as a health
+                signal rather than a cost. Still an estimate for orientation, not a bill.
               </div>
             </div>
           )}

@@ -1,5 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server';
-import { canonicalUrl } from '@/lib/integrations/brightdata';
+import { canonicalUrl, runSerpSearch } from '@/lib/integrations/brightdata';
 import { matchUrlRule, type UrlRule } from '@/lib/scoring';
 import { logActivity } from '@/lib/activity';
 import { logDebug, errorMessage } from '@/lib/debug-log';
@@ -39,6 +39,8 @@ const MAX_PROBES_PER_RUN = 24; // ~24 page fetches worst case, at 3–15 leads/d
 const PER_DOMAIN_DELAY_MS = 400; // politeness; negligible at this volume
 /** Surname plus at least one more agreeing signal. Surname alone scores 0.4. */
 const MIN_CONFIDENCE = 0.55;
+/** site: queries cost a SERP request each, so the per-run count is bounded. */
+const MAX_SERP_FALLBACKS = 4;
 
 interface ProbeSite {
   id: string;
@@ -49,6 +51,41 @@ interface ProbeSite {
   scope_state: string | null;
   scope_county: string | null;
   family: string | null;
+  active: boolean;
+  serp_fallback: boolean;
+  record_url_template: string | null;
+  needs_render: boolean;
+}
+
+/** Records which record ids came from which operator network. */
+function rememberFamilyIds(
+  store: Map<string, Set<string>>,
+  family: string | null,
+  ids: string[]
+) {
+  if (!family || !ids.length) return;
+  const set = store.get(family) ?? new Set();
+  for (const id of ids) set.add(id);
+  store.set(family, set);
+}
+
+/** Fills a record_url_template. Returns null if a placeholder is unknown. */
+function buildRecordUrl(
+  template: string,
+  recordId: string,
+  county: string | null
+): string | null {
+  const values: Record<string, string | null> = {
+    record_id: encodeURIComponent(recordId),
+    county_slug: county ? countySlug(county) : null,
+  };
+  let out = template;
+  for (const m of template.matchAll(/[{](\w+)[}]/g)) {
+    const value = values[m[1]];
+    if (value == null || value === '') return null;
+    out = out.replaceAll('{' + m[1] + '}', value);
+  }
+  return out;
 }
 
 export interface DeepSearchResult {
@@ -57,6 +94,8 @@ export interface DeepSearchResult {
   candidates: number;
   facts: SearchFacts;
   rounds: number;
+  serpFallbacks: number;
+  pivots: number;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -165,12 +204,15 @@ export async function runDeepSearchForContact(
   if (seedState) facts = mergeFacts(facts, { state: [seedState] });
 
   const [{ data: siteRows }, { data: ruleRows }, { data: existing }] = await Promise.all([
-    supabase.from('probe_sites').select('*').eq('active', true).order('scope'),
+    supabase.from('probe_sites').select('*').order('scope'),
     supabase.from('url_rules').select('*'),
     supabase.from('search_candidates').select('canonical_url').eq('contact_id', contactId),
   ]);
 
-  const sites = (siteRows ?? []) as ProbeSite[];
+  // Inactive sites still matter: they are the SERP-fallback and id-pivot
+  // targets. Only direct probing is limited to the active ones.
+  const sitesAll = (siteRows ?? []) as ProbeSite[];
+  const sites = sitesAll.filter((s) => s.active);
   const rules = (ruleRows ?? []) as UrlRule[];
   const seen = new Set((existing ?? []).map((r: any) => r.canonical_url));
 
@@ -178,6 +220,10 @@ export async function runDeepSearchForContact(
   let blocked = 0;
   let candidates = 0;
   let rounds = 0;
+  let serpFallbacks = 0;
+  let pivots = 0;
+  const blockedDomains = new Set<string>();
+  const familyIds = new Map<string, Set<string>>();
 
   for (const round of [0, 1] as const) {
     // Round 0: nothing needed, or the lead's own state. Round 1: county-scoped
@@ -218,10 +264,31 @@ export async function runDeepSearchForContact(
       probed += 1;
       await sleep(PER_DOMAIN_DELAY_MS);
 
-      const outcome = await fetchProbePage(url);
+      const outcome = await fetchProbePage(url, { render: site.needs_render });
       if (!outcome.ok) {
         blocked += 1;
+        blockedDomains.add(site.domain);
         await logProbeFailure(site.domain, url, outcome.reason, contactId);
+
+        // A policy refusal is BrightData's standing decision about the domain,
+        // so probing it again next run would waste the same call. Flag the site
+        // for SERP discovery instead of leaving it to fail forever. Additive
+        // only — nothing is disabled behind the operator's back.
+        if (outcome.policyBlocked && !site.serp_fallback) {
+          const { error } = await supabase
+            .from('probe_sites')
+            .update({ serp_fallback: true })
+            .eq('id', site.id);
+          await logDebug({
+            level: 'warn',
+            source: 'deep-search:probe',
+            message: error
+              ? `${site.domain} is policy-blocked by BrightData; could not flag it for SERP fallback: ${error.message}`
+              : `${site.domain} is policy-blocked by BrightData, so it is now flagged for site: SERP discovery instead of direct probing`,
+            context: { url },
+            contactId,
+          });
+        }
         continue;
       }
 
@@ -292,10 +359,121 @@ export async function runDeepSearchForContact(
           candidates += 1;
           // A record's own page teaches us more than the listing row did.
           facts = mergeFacts(facts, rowFacts);
+          rememberFamilyIds(familyIds, site.family, rowFacts.record_ids);
         }
       }
     }
     if (probed >= MAX_PROBES_PER_RUN) break;
+  }
+
+  /* ── SERP fallback for sites we cannot read directly ──────────────────────
+     A challenge-walled site is not a dead end: Google has already crawled it,
+     so a site:-restricted query reaches the same records without touching the
+     host. Costs one SERP request per site, so it is capped and only runs for
+     sites that were blocked this run or are flagged as never readable. */
+  const fallbackDomains = [
+    ...new Set([
+      ...blockedDomains,
+      ...sitesAll.filter((s) => s.serp_fallback).map((s) => s.domain),
+    ]),
+  ].slice(0, MAX_SERP_FALLBACKS);
+
+  for (const domain of fallbackDomains) {
+    // Unquoted on purpose. These sites render "BEACHAK GENE MICHAEL" or
+    // "Beachak, Gene", so an exact-phrase "Gene Beachak" can return nothing at
+    // all. site: already narrows hard, and scoreCorroboration supplies the
+    // precision that the quotes would have.
+    const query = `site:${domain} ${name.first} ${name.last}`.trim();
+    let results: Awaited<ReturnType<typeof runSerpSearch>> = [];
+    try {
+      results = await runSerpSearch(query, { engine: 'google', numResults: 20 });
+      serpFallbacks += 1;
+    } catch (e) {
+      await logDebug({
+        level: 'warn',
+        source: 'deep-search:serp-fallback',
+        message: `site: search of ${domain} failed: ${errorMessage(e)}`,
+        context: { query },
+        contactId,
+      });
+      continue;
+    }
+
+    const site = sitesAll.find((s) => s.domain === domain);
+    for (const r of results) {
+      if (!r.link) continue;
+      const canonical = canonicalUrl(r.link);
+      if (!canonical || seen.has(canonical)) continue;
+      // Google will return near-miss results for a site: query; the corroboration
+      // rules are what keep another person's record out.
+      const haystack = `${r.title} ${r.snippet} ${r.link}`;
+      const rowFacts = mergeFacts(
+        mergeFacts({ ...EMPTY_FACTS }, factsFromUrl(r.link, name)),
+        factsFromText(`${r.title} ${r.snippet}`, name)
+      );
+      if (seedState && rowFacts.state.length && !rowFacts.state.includes(seedState)) continue;
+      const scored = scoreCorroboration(haystack, name, mergeFacts(facts, rowFacts));
+      if (scored.confidence < MIN_CONFIDENCE) continue;
+
+      const rule = matchUrlRule(r.link, rules);
+      const { error } = await supabase.from('search_candidates').insert({
+        contact_id: contactId,
+        url: r.link,
+        canonical_url: canonical,
+        title: r.title?.slice(0, 300) || null,
+        snippet: `found via site: search (the site itself blocked us)`,
+        source: 'google',
+        source_detail: `site:${domain}`,
+        round: 2,
+        confidence: scored.confidence,
+        matched_facts: scored.matched,
+        url_rule_id: rule?.id ?? null,
+      });
+      if (!error) {
+        seen.add(canonical);
+        candidates += 1;
+        facts = mergeFacts(facts, rowFacts);
+        rememberFamilyIds(familyIds, site?.family ?? null, rowFacts.record_ids);
+      }
+    }
+  }
+
+  /* ── Record-id pivots across a network ───────────────────────────────────
+     Sibling sites share ids: wakencbusts .../view-full-profile.php?id=140252 and
+     wakepublicrecords .../sample.php?id=140252 are one booking. Once any sibling
+     gives up an id, the rest are addressable with no request at all. */
+  for (const [family, ids] of familyIds) {
+    for (const site of sitesAll) {
+      if (site.family !== family || !site.record_url_template) continue;
+      for (const id of ids) {
+        const url = buildRecordUrl(site.record_url_template, id, facts.county[0] ?? null);
+        if (!url) continue;
+        const canonical = canonicalUrl(url);
+        if (!canonical || seen.has(canonical)) continue;
+
+        const { error } = await supabase.from('search_candidates').insert({
+          contact_id: contactId,
+          url,
+          canonical_url: canonical,
+          title: `${site.name ?? site.domain} — record ${id}`,
+          snippet:
+            'derived from a sibling site sharing this record id; open it to confirm the record exists',
+          source: 'probe',
+          source_detail: `${site.domain} (id pivot, ${family})`,
+          round: 3,
+          // Deliberately below a fetched hit: the id match is strong evidence but
+          // the page itself has not been seen, so it is a lead, not a finding.
+          confidence: 0.7,
+          matched_facts: { record_id: id, family },
+          url_rule_id: matchUrlRule(url, rules)?.id ?? null,
+        });
+        if (!error) {
+          seen.add(canonical);
+          candidates += 1;
+          pivots += 1;
+        }
+      }
+    }
   }
 
   const merged = normalizeFacts(facts);
@@ -327,12 +505,14 @@ export async function runDeepSearchForContact(
     type: 'search',
     description:
       `Deep search probed ${probed} site search page(s)` +
-      `${blocked ? ` (${blocked} unreadable)` : ''}: ` +
-      `${candidates} new candidate(s) for review${learned ? `. Learned: ${learned}` : ''}`,
-    meta: { probed, blocked, candidates, rounds, facts: merged },
+      `${blocked ? ` (${blocked} unreadable)` : ''}` +
+      `${serpFallbacks ? `, searched ${serpFallbacks} blocked site(s) via Google` : ''}` +
+      `${pivots ? `, derived ${pivots} sibling record(s) from shared ids` : ''}` +
+      `: ${candidates} new candidate(s) for review${learned ? `. Learned: ${learned}` : ''}`,
+    meta: { probed, blocked, candidates, rounds, serpFallbacks, pivots, facts: merged },
   });
 
-  return { probed, blocked, candidates, facts: merged, rounds };
+  return { probed, blocked, candidates, facts: merged, rounds, serpFallbacks, pivots };
 }
 
 /** Never lets a probe failure bubble into a webhook or a job retry storm. */

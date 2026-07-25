@@ -347,3 +347,96 @@ test('a single unreadable probe page cannot abort the whole run', async () => {
   // candidate the earlier probes already found.
   assert.match(source, /try \{[\s\S]{0,400}rowsFromPage\([\s\S]{0,400}\} catch/);
 });
+
+test('a blocked site is reached through a site:-restricted SERP query', async () => {
+  // arrests.org is 20.5% of historical links and answers a datacentre IP with a
+  // Cloudflare challenge. Google has already crawled it, so the records stay
+  // reachable without touching the host.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /site:\$\{domain\}/);
+  // Bounded, because each fallback costs a SERP request.
+  assert.match(source, /MAX_SERP_FALLBACKS/);
+  // Corroboration still applies: a site: query returns near misses too.
+  assert.match(source, /scored\.confidence < MIN_CONFIDENCE/);
+});
+
+test('record ids pivot to sibling sites in the same network', async () => {
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /record_url_template/);
+  // A derived URL is a lead, not a finding: nobody has loaded the page yet, so
+  // it must score below a fetched hit.
+  assert.match(source, /confidence: 0\.7/);
+});
+
+test('the migration wires arrests.org and the Wake network for fallback and pivots', async () => {
+  const sql = await readFile(
+    new URL('../supabase/migrations/0013_serp_fallback_and_record_pivots.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(sql, /serp_fallback/);
+  assert.match(sql, /'arrests\.org'/);
+  // The confirmed shared id from the client's own example.
+  assert.match(sql, /wakencbusts\.com\/view-full-profile\.php\?id=\{record_id\}/);
+  assert.match(sql, /wakepublicrecords\.com\/sample\.php\?id=\{record_id\}/);
+  // The per-county N1 network must NOT get a pivot template: each county site
+  // has its own id space, so a Wake id would build a confident, wrong Palm
+  // Beach URL.
+  assert.doesNotMatch(sql, /county_slug\}publicrecords\.com\/sample/);
+});
+
+test('the site: fallback query is not an exact phrase', async () => {
+  // These sites render "BEACHAK GENE MICHAEL" or "Beachak, Gene", so a quoted
+  // "Gene Beachak" can match nothing. Precision comes from corroboration.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /site:\$\{domain\} \$\{name\.first\} \$\{name\.last\}/);
+});
+
+test('unlocker retries transient errors but never a policy refusal', async () => {
+  // The account log distinguishes these clearly: bustednewspaper.com shows
+  // ERR_HTTP2_PROTOCOL_ERROR interleaved with successes (retry pays), while
+  // arrests.org returns policy_20000 every time (retrying burns time on a
+  // decision already made).
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  assert.match(source, /err_http2_protocol_error/);
+  assert.match(source, /before_session_error/);
+  assert.match(source, /POLICY_ERROR\.test\(signal\)\) break/);
+  // A policy refusal must say what to do, since no retry or zone change fixes it.
+  assert.match(source, /compliance team/);
+});
+
+test('spend is priced off successful requests only', async () => {
+  // BrightData documents "you are charged only for successful requests", so
+  // pricing every attempt overstated the bill.
+  const source = await readFile(new URL('../lib/usage.ts', import.meta.url), 'utf8');
+  assert.match(source, /Object\.entries\(succeeded\)/);
+  // Failures stay visible, as health rather than cost.
+  assert.match(source, /_failed: failed/);
+});
+
+test('social domains are documented as unsupported probe targets', async () => {
+  // Web Unlocker explicitly excludes social networks, so nobody should add
+  // facebook.com as a probe site; social coverage is the SERP classifier's job.
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  assert.match(source, /social networks are explicitly outside/i);
+});
+
+test('a policy-blocked domain is flagged for SERP instead of retried forever', async () => {
+  // policy_20000 is a standing decision about the domain, so probing it again
+  // next run would waste the same call.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /outcome\.policyBlocked/);
+  assert.match(source, /serp_fallback: true/);
+});
+
+test('the migration routes arrests.org through SERP rather than the unlocker', async () => {
+  const sql = await readFile(
+    new URL('../supabase/migrations/0014_probe_render_flag.sql', import.meta.url),
+    'utf8'
+  );
+  // Direct probing off, SERP discovery on — its search path is fine, BrightData
+  // just will not fetch the domain.
+  assert.match(sql, /set active = false/);
+  assert.match(sql, /serp_fallback = true/);
+  assert.match(sql, /policy_20000/);
+  assert.match(sql, /needs_render/);
+});

@@ -224,6 +224,10 @@ export default function ContactPanel({
         `Probed ${data.probed} site search page(s)` +
           `${data.blocked ? ` (${data.blocked} unreadable — see Debug Log)` : ''}.
 ` +
+          `${data.serpFallbacks ? `${data.serpFallbacks} blocked site(s) searched via Google instead.
+` : ''}` +
+          `${data.pivots ? `${data.pivots} sibling record(s) derived from shared record ids.
+` : ''}` +
           `${data.candidates} new candidate(s) to review.` +
           (learned ? `
 Learned: ${learned}` : '')
@@ -674,7 +678,7 @@ Learned: ${learned}` : '')
                 <button
                   className="btn"
                   disabled={busy === 'deep'}
-                  title="Search the mugshot sites' own search pages, then chain what they reveal (middle name, county) into deeper probes. Uses no SERP requests."
+                  title="Searches the mugshot sites' own search pages, then chains what they reveal (middle name, county) into deeper probes. Mostly free page fetches; a site that blocks us falls back to a Google site: query, up to 4 SERP requests per run."
                   onClick={runDeepSearch}
                 >
                   {busy === 'deep' ? 'Probing…' : '🕵 Deep search'}
