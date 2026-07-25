@@ -500,3 +500,34 @@ test('every SERP fallback queries Bing as well as Google', async () => {
   assert.match(source, /Bing runs on EVERY fallback/);
   assert.match(source, /mergeSerpResults\(\[results, bing\]\)/);
 });
+
+test('arrests.org indexes BOTH a per-person record and a daily roster', () => {
+  // Google returns either shape, and they need different routes:
+  //   /Arrests/Gene_Beachak_67642359/  -> the name is in the URL, so the
+  //     site: name search finds it, and the numeric id parses out
+  //   /Wake/2026/April/22/             -> addressed by county and date, so it
+  //     is derived from facts rather than searched for
+  const GENE = splitName('Gene Beachak');
+
+  const record = factsFromUrl(
+    'https://northcarolina.arrests.org/Arrests/Gene_Beachak_67642359/',
+    GENE
+  );
+  assert.deepEqual(record.state, ['NC']);
+  assert.deepEqual(record.record_ids, ['67642359']);
+  // Surname + first name in the URL clears the corroboration floor on their own,
+  // before any help from the SERP title or snippet.
+  const scored = scoreCorroboration(
+    'https://northcarolina.arrests.org/Arrests/Gene_Beachak_67642359/',
+    GENE,
+    normalizeFacts({ county: ['Wake'], state: ['NC'] })
+  );
+  assert.ok(scored.confidence >= 0.55, 'a record URL must clear the floor unaided');
+
+  const roster = factsFromUrl('https://northcarolina.arrests.org/Wake/2026/April/22/', GENE);
+  assert.deepEqual(roster.county, ['Wake']);
+  assert.deepEqual(roster.booking_dates, ['2026-04-22']);
+  // No name anywhere in a roster URL, which is exactly why it is derived from
+  // county + date instead of scored like a search hit.
+  assert.equal(roster.middle, undefined);
+});
