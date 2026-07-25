@@ -28,6 +28,18 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
     ],
   },
   {
+    key: 'probe_proxy',
+    title: 'Deep-search proxy',
+    hint:
+      'Optional. Tried only after a plain fetch fails, and only for deep-search page fetches — never for Supabase, Stripe, or any other integration. Some record sites drop connections from datacentre IPs but serve normally from an ISP-classified address, which is what this recovers. Leave blank to skip the tier entirely. Note it cannot help with arrests.org: that block is on the TLS fingerprint, not the IP.',
+    fields: [
+      { key: 'host', label: 'Proxy host', placeholder: '52.128.5.120' },
+      { key: 'port', label: 'Proxy port', placeholder: '29842' },
+      { key: 'username', label: 'Username' },
+      { key: 'password', label: 'Password', secret: true },
+    ],
+  },
+  {
     key: 'emailit',
     title: 'Emailit',
     hint: 'Fallback email sender, client notifications, and signed bounce/complaint events.',

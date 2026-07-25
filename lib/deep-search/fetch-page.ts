@@ -1,3 +1,8 @@
+// undici's own fetch, not the global one. Node's global fetch is built on its
+// INTERNAL copy of undici and rejects a dispatcher created by the npm package
+// with UND_ERR_INVALID_ARG, so the proxy tier has to go through undici's fetch
+// for the dispatcher to be accepted at all.
+import { ProxyAgent, fetch as undiciFetch } from 'undici';
 import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
 import { finishUsage, reserveUsage } from '@/lib/usage';
@@ -13,11 +18,116 @@ import { finishUsage, reserveUsage } from '@/lib/usage';
  * outcomes mean completely different things to the operator.
  */
 
+/**
+ * One coherent browser identity: Chrome on a 64-bit Windows laptop.
+ *
+ * Worth doing — plenty of these sites gate on a missing or non-browser UA, and
+ * the previous value here sent "Chrome/124.0", a two-part version no real Chrome
+ * has ever sent. But it is NOT sufficient on the strict hosts, and the reason is
+ * worth recording so nobody re-runs this investigation:
+ *
+ * Against arrests.org (Cloudflare) from this machine, same IP, same headers:
+ *   curl  -> HTTP 200 on roster, record and search.php (30/30)
+ *   node  -> HTTP 403 Cloudflare 1020 on all three (6/6)
+ *
+ * The discriminator is the TLS handshake, not the headers. JA4 for curl here is
+ * t13d2013h1_…, for Node t13d5212h1_… . Cloudflare fingerprints the handshake
+ * (JA3/JA4) and Node's OpenSSL signature is refused. Node cannot fix this: the
+ * `ciphers` and `ecdhCurve` options change a couple of JA3 fields but not the
+ * extension list that dominates the hash, and every Chrome-shaped combination
+ * tried still returned 1020. Matching a real browser needs a patched TLS stack
+ * (curl-impersonate, utls), which is not something Node's fetch can offer.
+ *
+ * Consequence: arrests.org stays active=false with SERP discovery (0014/0015),
+ * and the curl result — which came from the Windows Schannel stack — must not be
+ * read as "the site lets us in". Hostinger is Linux/OpenSSL, like Node.
+ *
+ * Keep the version current and change it in ONE place — a UA pinned to a Chrome
+ * that is years stale is itself a signal.
+ */
+const CHROME_VERSION = '138';
 const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+  `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ` +
+  `Chrome/${CHROME_VERSION}.0.0.0 Safari/537.36`;
+
+/**
+ * Sec-Fetch-Site: none and Sec-Fetch-User: ?1 describe a top-level navigation
+ * the person started themselves (typed or bookmarked) rather than a subresource
+ * or a click-through — which is exactly what a probe is, so no Referer is sent.
+ *
+ * Accept-Encoding is deliberately NOT set: undici negotiates it and transparently
+ * decompresses. Setting it by hand can hand back raw compressed bytes, which the
+ * parsers would read as an empty page — a silent wrong answer, the worst kind.
+ */
+const BROWSER_HEADERS: Record<string, string> = {
+  'User-Agent': UA,
+  Accept:
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Upgrade-Insecure-Requests': '1',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+  'Sec-Fetch-User': '?1',
+  'sec-ch-ua': `"Google Chrome";v="${CHROME_VERSION}", "Chromium";v="${CHROME_VERSION}", "Not)A;Brand";v="99"`,
+  'sec-ch-ua-mobile': '?0',
+  'sec-ch-ua-platform': '"Windows"',
+};
+
+/**
+ * Cloudflare challenges a small share of otherwise-fine requests: measured 3 of
+ * 25 on pages that served on the very next try. One free retry converts most of
+ * those, and it runs BEFORE the paid unlocker so a transient interstitial never
+ * costs a billable call.
+ */
+const DIRECT_ATTEMPTS = 2;
+
+/**
+ * Optional proxy tier, between the free direct fetch and the paid unlocker.
+ *
+ * Some hosts drop the connection outright from a datacentre IP — mugshots.zone
+ * and bustednewspaper.com both close the socket after the TLS handshake
+ * completes (UND_ERR_SOCKET), which is 35.4% of historical client links between
+ * them. That is an IP-reputation block, and unlike the arrests.org TLS-
+ * fingerprint block it IS fixed by exiting from an ISP-classified address:
+ * measured 200 with real search results through one, vs a dropped socket direct.
+ *
+ * Scoped per request via undici's ProxyAgent rather than HTTPS_PROXY, because
+ * the env var is global — it would route Supabase and Stripe through a third
+ * party too. Only probe fetches get the dispatcher.
+ *
+ * The tunnel is CONNECT with normal certificate validation, so TLS stays
+ * end-to-end: the operator sees the hostname it is asked to connect to and
+ * nothing else. A probe URL carries the client's name in its query string, and
+ * that stays inside the encrypted stream. If a proxy ever requires disabling
+ * certificate checks to work, it is reading the traffic — do not use it.
+ */
+let proxyAgentCache: { key: string; agent: ProxyAgent } | null = null;
+
+async function getProxyAgent(): Promise<{ agent: ProxyAgent; label: string } | null> {
+  const cfg = await getSetting<{
+    host?: string;
+    port?: string | number;
+    username?: string;
+    password?: string;
+  }>('probe_proxy');
+  if (!cfg.host || !cfg.port) return null;
+
+  const auth = cfg.username
+    ? `${encodeURIComponent(cfg.username)}:${encodeURIComponent(cfg.password ?? '')}@`
+    : '';
+  const url = `http://${auth}${cfg.host}:${cfg.port}`;
+  // Agents pool connections, so rebuilding one per fetch would throw away every
+  // established tunnel. Rebuild only when the configured endpoint changes.
+  if (proxyAgentCache?.key !== url) {
+    await proxyAgentCache?.agent.close().catch(() => {});
+    proxyAgentCache = { key: url, agent: new ProxyAgent(url) };
+  }
+  return { agent: proxyAgentCache.agent, label: `${cfg.host}:${cfg.port}` };
+}
 
 export type FetchOutcome =
-  | { ok: true; html: string; via: 'direct' | 'unlocker' }
+  | { ok: true; html: string; via: 'direct' | 'proxy' | 'unlocker' }
   // policyBlocked means BrightData will refuse this host every time, which the
   // caller uses to stop spending unlocker calls on it.
   | { ok: false; reason: string; blocked: boolean; policyBlocked?: boolean };
@@ -111,29 +221,76 @@ async function unlockerRequest(
   return { ...last!, attempts: maxAttempts };
 }
 
+/**
+ * One tier of the direct path: a browser-shaped GET, optionally through a
+ * dispatcher. Retried once because Cloudflare challenges a small share of
+ * otherwise-fine requests, and a free retry beats a billable unlocker call.
+ */
+async function browserFetch(
+  url: string,
+  via: 'direct' | 'proxy',
+  dispatcher?: ProxyAgent
+): Promise<{ ok: true; html: string; via: 'direct' | 'proxy' } | { ok: false; note: string }> {
+  let note = '';
+  for (let attempt = 1; attempt <= DIRECT_ATTEMPTS; attempt++) {
+    try {
+      const res = dispatcher
+        ? await undiciFetch(url, {
+            redirect: 'follow',
+            signal: AbortSignal.timeout(20_000),
+            headers: BROWSER_HEADERS,
+            dispatcher,
+          })
+        : await fetch(url, {
+            redirect: 'follow',
+            signal: AbortSignal.timeout(20_000),
+            headers: BROWSER_HEADERS,
+          });
+      const html = await res.text();
+      if (res.ok && !looksBlocked(res.status, html)) return { ok: true, html, via };
+      note = `${via} HTTP ${res.status}${looksBlocked(res.status, html) ? ' (challenge page)' : ''}`;
+    } catch (e: any) {
+      // undici reports a dropped socket as UND_ERR_SOCKET with a bare "fetch
+      // failed" message, which says nothing on its own — keep the cause code.
+      const cause = e?.cause?.code ?? e?.cause?.message;
+      note = `${via} fetch failed: ${e?.message ?? 'unknown error'}${cause ? ` (${cause})` : ''}`;
+    }
+    // A challenge answered instantly is a bot tell, and at 3-15 leads a day
+    // there is no reason to hurry.
+    if (attempt < DIRECT_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, 1500 + Math.random() * 1500));
+    }
+  }
+  return { ok: false, note: `${note} after ${DIRECT_ATTEMPTS} attempts` };
+}
+
 export async function fetchProbePage(
   url: string,
   opts?: { render?: boolean }
 ): Promise<FetchOutcome> {
-  let directNote = '';
+  const notes: string[] = [];
+
+  // Tier 1: plain fetch. Free, and nothing leaves our own connection.
+  const direct = await browserFetch(url, 'direct');
+  if (direct.ok) return direct;
+  notes.push(direct.note);
+
+  // Tier 2: the proxy, if one is configured. Still free per request and still
+  // cheaper than the unlocker, but it does route the request through somebody
+  // else, so it goes second.
   try {
-    const res = await fetch(url, {
-      redirect: 'follow',
-      signal: AbortSignal.timeout(20_000),
-      headers: {
-        'User-Agent': UA,
-        Accept: 'text/html,application/xhtml+xml',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-    });
-    const html = await res.text();
-    if (res.ok && !looksBlocked(res.status, html)) {
-      return { ok: true, html, via: 'direct' };
+    const proxy = await getProxyAgent();
+    if (proxy) {
+      const viaProxy = await browserFetch(url, 'proxy', proxy.agent);
+      if (viaProxy.ok) return viaProxy;
+      notes.push(`${viaProxy.note} via ${proxy.label}`);
     }
-    directNote = `direct HTTP ${res.status}${looksBlocked(res.status, html) ? ' (challenge page)' : ''}`;
   } catch (e: any) {
-    directNote = `direct fetch failed: ${e?.message ?? 'unknown error'}`;
+    // A misconfigured proxy must not take the unlocker path down with it.
+    notes.push(`proxy tier unavailable: ${e?.message ?? 'unknown error'}`);
   }
+
+  const directNote = notes.join('; ');
 
   // Unlocker fallback. Uses the same /request endpoint as the SERP integration
   // but a different zone, so it is opt-in: no zone configured means no attempt.
