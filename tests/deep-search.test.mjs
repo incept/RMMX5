@@ -390,3 +390,53 @@ test('the site: fallback query is not an exact phrase', async () => {
   const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
   assert.match(source, /site:\$\{domain\} \$\{name\.first\} \$\{name\.last\}/);
 });
+
+test('unlocker retries transient errors but never a policy refusal', async () => {
+  // The account log distinguishes these clearly: bustednewspaper.com shows
+  // ERR_HTTP2_PROTOCOL_ERROR interleaved with successes (retry pays), while
+  // arrests.org returns policy_20000 every time (retrying burns time on a
+  // decision already made).
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  assert.match(source, /err_http2_protocol_error/);
+  assert.match(source, /before_session_error/);
+  assert.match(source, /POLICY_ERROR\.test\(signal\)\) break/);
+  // A policy refusal must say what to do, since no retry or zone change fixes it.
+  assert.match(source, /compliance team/);
+});
+
+test('spend is priced off successful requests only', async () => {
+  // BrightData documents "you are charged only for successful requests", so
+  // pricing every attempt overstated the bill.
+  const source = await readFile(new URL('../lib/usage.ts', import.meta.url), 'utf8');
+  assert.match(source, /Object\.entries\(succeeded\)/);
+  // Failures stay visible, as health rather than cost.
+  assert.match(source, /_failed: failed/);
+});
+
+test('social domains are documented as unsupported probe targets', async () => {
+  // Web Unlocker explicitly excludes social networks, so nobody should add
+  // facebook.com as a probe site; social coverage is the SERP classifier's job.
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  assert.match(source, /social networks are explicitly outside/i);
+});
+
+test('a policy-blocked domain is flagged for SERP instead of retried forever', async () => {
+  // policy_20000 is a standing decision about the domain, so probing it again
+  // next run would waste the same call.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /outcome\.policyBlocked/);
+  assert.match(source, /serp_fallback: true/);
+});
+
+test('the migration routes arrests.org through SERP rather than the unlocker', async () => {
+  const sql = await readFile(
+    new URL('../supabase/migrations/0014_probe_render_flag.sql', import.meta.url),
+    'utf8'
+  );
+  // Direct probing off, SERP discovery on — its search path is fine, BrightData
+  // just will not fetch the domain.
+  assert.match(sql, /set active = false/);
+  assert.match(sql, /serp_fallback = true/);
+  assert.match(sql, /policy_20000/);
+  assert.match(sql, /needs_render/);
+});

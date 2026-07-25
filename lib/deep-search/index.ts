@@ -54,6 +54,7 @@ interface ProbeSite {
   active: boolean;
   serp_fallback: boolean;
   record_url_template: string | null;
+  needs_render: boolean;
 }
 
 /** Records which record ids came from which operator network. */
@@ -263,11 +264,31 @@ export async function runDeepSearchForContact(
       probed += 1;
       await sleep(PER_DOMAIN_DELAY_MS);
 
-      const outcome = await fetchProbePage(url);
+      const outcome = await fetchProbePage(url, { render: site.needs_render });
       if (!outcome.ok) {
         blocked += 1;
         blockedDomains.add(site.domain);
         await logProbeFailure(site.domain, url, outcome.reason, contactId);
+
+        // A policy refusal is BrightData's standing decision about the domain,
+        // so probing it again next run would waste the same call. Flag the site
+        // for SERP discovery instead of leaving it to fail forever. Additive
+        // only — nothing is disabled behind the operator's back.
+        if (outcome.policyBlocked && !site.serp_fallback) {
+          const { error } = await supabase
+            .from('probe_sites')
+            .update({ serp_fallback: true })
+            .eq('id', site.id);
+          await logDebug({
+            level: 'warn',
+            source: 'deep-search:probe',
+            message: error
+              ? `${site.domain} is policy-blocked by BrightData; could not flag it for SERP fallback: ${error.message}`
+              : `${site.domain} is policy-blocked by BrightData, so it is now flagged for site: SERP discovery instead of direct probing`,
+            context: { url },
+            contactId,
+          });
+        }
         continue;
       }
 

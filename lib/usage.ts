@@ -64,9 +64,12 @@ export async function getUsageSummary() {
   };
 
   const summary: Record<string, Record<string, number>> = {};
-  // Billed separately from the totals: a failed request usually still costs,
-  // and a rising failed count is money buying nothing.
+  // Tracked separately from the totals because BrightData documents that "you
+  // are charged only for successful requests" for both Web Unlocker and SERP.
+  // So spend is priced off SUCCEEDED events, while the failed count stays
+  // visible as a health signal — a rising one means blocks, not cost.
   const failed: Record<string, Record<string, number>> = {};
+  const succeeded: Record<string, Record<string, number>> = {};
   for (const event of data ?? []) {
     const counter = event.provider === 'brightdata' && event.operation === 'serp'
       ? 'serp'
@@ -74,9 +77,10 @@ export async function getUsageSummary() {
     const month = event.created_at.slice(0, 7);
     summary[counter] ??= {};
     summary[counter][month] = (summary[counter][month] ?? 0) + event.quantity;
-    if (event.status === 'failed') {
-      failed[counter] ??= {};
-      failed[counter][month] = (failed[counter][month] ?? 0) + event.quantity;
+    const bucket = event.status === 'failed' ? failed : event.status === 'succeeded' ? succeeded : null;
+    if (bucket) {
+      bucket[counter] ??= {};
+      bucket[counter][month] = (bucket[counter][month] ?? 0) + event.quantity;
     }
   }
 
@@ -84,7 +88,7 @@ export async function getUsageSummary() {
   // admin page can show one figure for the month's provider spend.
   const cost: Record<string, Record<string, number>> = { total: {} };
   const round = (n: number) => Math.round(n * 100) / 100;
-  for (const [counter, months] of Object.entries(summary)) {
+  for (const [counter, months] of Object.entries(succeeded)) {
     const rate = price[counter] ?? 0;
     if (!rate) continue;
     cost[counter] = {};
@@ -94,5 +98,5 @@ export async function getUsageSummary() {
     }
   }
 
-  return { ...summary, _failed: failed, _cost: cost, _price: price };
+  return { ...summary, _failed: failed, _succeeded: succeeded, _cost: cost, _price: price };
 }
