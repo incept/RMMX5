@@ -140,8 +140,12 @@ async function getBrowser(executablePath: string): Promise<Browser> {
         ],
       })
       .catch((e) => {
-        // A failed launch must not poison every later attempt.
-        browserPromise = null;
+        // A failed launch must not poison every later attempt — but only clear
+        // the slot if it is still OURS. closeBrowser during a pending launch
+        // nulls browserPromise, a later call starts a second launch, and an
+        // unguarded clear here would discard that live one and start a third,
+        // leaving two browser processes running. Same guard as 'disconnected'.
+        if (browserPromise === launching) browserPromise = null;
         throw e;
       });
     browserPromise = launching;
@@ -180,17 +184,23 @@ async function acquireSlot(): Promise<void> {
     waiter.timer.unref?.();
     waiters.push(waiter);
   });
-  activePages += 1;
+  // No increment here on purpose: releaseSlot hands its slot straight over, so
+  // the count already includes this caller. See the note there.
 }
 
 function releaseSlot(): void {
-  activePages = Math.max(0, activePages - 1);
+  // Hand the slot to a waiter WITHOUT dropping the count in between. Releasing
+  // first and letting the waiter re-take it left a gap: resolve() only queues
+  // the waiter's continuation, so anything calling acquireSlot before that
+  // microtask ran saw a free slot and took it, and both then proceeded —
+  // MAX_CONCURRENT_PAGES of 2 was reachable at 3 with two runs overlapping.
   const next = waiters.shift();
   if (next) {
     clearTimeout(next.timer);
     next.resolve();
     return;
   }
+  activePages = Math.max(0, activePages - 1);
   if (activePages === 0) touchIdleTimer();
 }
 

@@ -288,6 +288,8 @@ export default function ContactPanel({
     ? (contact.service_days ?? defaultServiceDays) -
       Math.floor((Date.now() - new Date(contact.client_since).getTime()) / 86400000)
     : null;
+  /** Deep-search hits still awaiting a human decision. */
+  const newCandidateCount = candidates.filter((c) => c.status === 'new').length;
 
   useEffect(() => {
     // default service days (admin setting) is not exposed to workers via settings
@@ -547,23 +549,51 @@ export default function ContactPanel({
                   clears this flag.
                 </div>
               )}
-              <div className="flex items-center gap-3">
-                <div className="card flex-1 py-3 text-center">
-                  <div className="text-2xl font-light tabular-nums text-brand-700">
+              {/*
+                Compact stat strip: number and label sit on one line, so the row
+                costs roughly a third of the height the stacked cards did and the
+                links themselves — the reason this tab exists — start higher up.
+              */}
+              <div className="flex items-center gap-2">
+                <div className="card flex flex-1 items-center justify-center gap-1.5 py-1.5">
+                  <span className="text-sm font-medium tabular-nums text-brand-700">
                     {contact.reputation_score ?? '—'}
-                  </div>
-                  <div className="text-xs text-gray-500">Reputation Score</div>
+                  </span>
+                  <span className="text-[10px] text-gray-500">Reputation</span>
                 </div>
-                <div className="card flex-1 py-3 text-center">
-                  <div className="text-2xl font-light tabular-nums">{contact.link_score ?? '—'}</div>
-                  <div className="text-xs text-gray-500">Link Score</div>
+                <div className="card flex flex-1 items-center justify-center gap-1.5 py-1.5">
+                  <span className="text-sm font-medium tabular-nums">
+                    {contact.link_score ?? '—'}
+                  </span>
+                  <span className="text-[10px] text-gray-500">Link score</span>
+                </div>
+                {/*
+                  What the last deep search actually turned up. Counts every
+                  candidate, with the unreviewed share called out separately,
+                  because "12 found" and "12 still to look at" mean different
+                  things to whoever opens this tab.
+                */}
+                <div
+                  className="card flex flex-1 items-center justify-center gap-1.5 py-1.5"
+                  title={
+                    candidates.length
+                      ? `${candidates.length} link${candidates.length === 1 ? '' : 's'} found by deep search, ${newCandidateCount} still to review`
+                      : 'No deep-search results yet — run 🕵 Deep search below'
+                  }
+                >
+                  <span className="text-sm font-medium tabular-nums">
+                    {candidates.length || '—'}
+                  </span>
+                  <span className="text-[10px] text-gray-500">
+                    Found{newCandidateCount > 0 ? ` (${newCandidateCount} new)` : ''}
+                  </span>
                 </div>
                 {isAdmin && (
-                  <div className="card flex-1 py-3 text-center">
-                    <div className="text-2xl font-light tabular-nums text-green-600">
+                  <div className="card flex flex-1 items-center justify-center gap-1.5 py-1.5">
+                    <span className="text-sm font-medium tabular-nums text-green-600">
                       ${Number(contact.revenue_projection ?? 0).toLocaleString()}
-                    </div>
-                    <div className="text-xs text-gray-500">Projected Revenue</div>
+                    </span>
+                    <span className="text-[10px] text-gray-500">Revenue</span>
                   </div>
                 )}
               </div>
@@ -676,7 +706,7 @@ export default function ContactPanel({
               {candidates.length > 0 && (
                 <div>
                   <div className="mb-2 text-[10px] font-medium tracking-widest text-gray-500 uppercase dark:text-gray-600">
-                    Candidates found ({candidates.filter((c) => c.status === 'new').length} to review)
+                    Candidates found ({newCandidateCount} to review)
                   </div>
                   <div className="space-y-1.5">
                     {candidates.map((c) => (
