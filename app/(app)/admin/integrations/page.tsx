@@ -40,6 +40,20 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
     ],
   },
   {
+    key: 'probe_browser',
+    title: 'Deep-search browser (headless Chrome)',
+    hint:
+      'Reads record sites with a real browser, which is the only way past hosts that fingerprint the TLS handshake — arrests.org among them. It reads the sites themselves rather than a search index, so a booking is found when it is published rather than when Google gets round to crawling it. Needs Chrome or Chromium installed on the server (Ubuntu: apt install chromium-browser). Leave the path blank to auto-detect the usual locations; set enabled to false to turn the tier off.',
+    fields: [
+      {
+        key: 'executable_path',
+        label: 'Chrome/Chromium path (blank = auto-detect)',
+        placeholder: '/usr/bin/chromium-browser',
+      },
+      { key: 'enabled', label: 'Enabled (false turns the tier off)', placeholder: 'true' },
+    ],
+  },
+  {
     key: 'emailit',
     title: 'Emailit',
     hint: 'Fallback email sender, client notifications, and signed bounce/complaint events.',

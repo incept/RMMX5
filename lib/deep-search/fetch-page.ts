@@ -3,6 +3,7 @@
 // with UND_ERR_INVALID_ARG, so the proxy tier has to go through undici's fetch
 // for the dispatcher to be accepted at all.
 import { ProxyAgent, fetch as undiciFetch } from 'undici';
+import { fetchWithBrowser } from './browser.ts';
 import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
 import { finishUsage, reserveUsage } from '@/lib/usage';
@@ -35,12 +36,13 @@ import { finishUsage, reserveUsage } from '@/lib/usage';
  * (JA3/JA4) and Node's OpenSSL signature is refused. Node cannot fix this: the
  * `ciphers` and `ecdhCurve` options change a couple of JA3 fields but not the
  * extension list that dominates the hash, and every Chrome-shaped combination
- * tried still returned 1020. Matching a real browser needs a patched TLS stack
- * (curl-impersonate, utls), which is not something Node's fetch can offer.
+ * tried still returned 1020. Matching a real browser needs a real browser's TLS
+ * stack, which is why the browser tier exists — Chrome negotiates through
+ * BoringSSL and is served normally. See ./browser.ts.
  *
- * Consequence: arrests.org stays active=false with SERP discovery (0014/0015),
- * and the curl result — which came from the Windows Schannel stack — must not be
- * read as "the site lets us in". Hostinger is Linux/OpenSSL, like Node.
+ * Also worth knowing: the curl result came from the Windows Schannel stack, and
+ * must not be read as "the site lets us in" generally. Hostinger is
+ * Linux/OpenSSL, like Node, so curl there would be refused too.
  *
  * Keep the version current and change it in ONE place — a UA pinned to a Chrome
  * that is years stale is itself a signal.
@@ -127,7 +129,7 @@ async function getProxyAgent(): Promise<{ agent: ProxyAgent; label: string } | n
 }
 
 export type FetchOutcome =
-  | { ok: true; html: string; via: 'direct' | 'proxy' | 'unlocker' }
+  | { ok: true; html: string; via: 'direct' | 'proxy' | 'browser' | 'unlocker' }
   // policyBlocked means BrightData will refuse this host every time, which the
   // caller uses to stop spending unlocker calls on it.
   | { ok: false; reason: string; blocked: boolean; policyBlocked?: boolean };
@@ -266,29 +268,46 @@ async function browserFetch(
 
 export async function fetchProbePage(
   url: string,
-  opts?: { render?: boolean }
+  opts?: { render?: boolean; needsBrowser?: boolean }
 ): Promise<FetchOutcome> {
   const notes: string[] = [];
 
-  // Tier 1: plain fetch. Free, and nothing leaves our own connection.
-  const direct = await browserFetch(url, 'direct');
-  if (direct.ok) return direct;
-  notes.push(direct.note);
+  // Hosts that fingerprint the TLS handshake refuse both HTTP tiers every time,
+  // and each one costs two attempts on a 20s timeout. Skip straight to Chrome.
+  if (!opts?.needsBrowser) {
+    // Tier 1: plain fetch. Free, and nothing leaves our own connection.
+    const direct = await browserFetch(url, 'direct');
+    if (direct.ok) return direct;
+    notes.push(direct.note);
 
-  // Tier 2: the proxy, if one is configured. Still free per request and still
-  // cheaper than the unlocker, but it does route the request through somebody
-  // else, so it goes second.
-  try {
-    const proxy = await getProxyAgent();
-    if (proxy) {
-      const viaProxy = await browserFetch(url, 'proxy', proxy.agent);
-      if (viaProxy.ok) return viaProxy;
-      notes.push(`${viaProxy.note} via ${proxy.label}`);
+    // Tier 2: the proxy, if one is configured. Still free per request and still
+    // cheaper than the unlocker, but it does route the request through somebody
+    // else, so it goes second.
+    try {
+      const proxy = await getProxyAgent();
+      if (proxy) {
+        const viaProxy = await browserFetch(url, 'proxy', proxy.agent);
+        if (viaProxy.ok) return viaProxy;
+        notes.push(`${viaProxy.note} via ${proxy.label}`);
+      }
+    } catch (e: any) {
+      // A misconfigured proxy must not take the unlocker path down with it.
+      notes.push(`proxy tier unavailable: ${e?.message ?? 'unknown error'}`);
     }
-  } catch (e: any) {
-    // A misconfigured proxy must not take the unlocker path down with it.
-    notes.push(`proxy tier unavailable: ${e?.message ?? 'unknown error'}`);
   }
+
+  // Tier 3: real Chrome. Costs CPU and memory rather than money, so it comes
+  // before the billable unlocker — and it is the only tier that reaches a host
+  // blocking us on the TLS fingerprint.
+  const viaBrowser = await fetchWithBrowser(url);
+  if (viaBrowser.ok && !looksBlocked(viaBrowser.status, viaBrowser.html)) {
+    return { ok: true, html: viaBrowser.html, via: 'browser' };
+  }
+  notes.push(
+    viaBrowser.ok
+      ? `browser HTTP ${viaBrowser.status} (challenge page)`
+      : viaBrowser.reason
+  );
 
   const directNote = notes.join('; ');
 

@@ -67,6 +67,7 @@ interface ProbeSite {
   serp_fallback: boolean;
   record_url_template: string | null;
   needs_render: boolean;
+  needs_browser: boolean;
   priority: number;
   date_url_template: string | null;
 }
@@ -333,7 +334,10 @@ export async function runDeepSearchForContact(
       probed += 1;
       await sleep(PER_DOMAIN_DELAY_MS);
 
-      const outcome = await fetchProbePage(url, { render: site.needs_render });
+      const outcome = await fetchProbePage(url, {
+        render: site.needs_render,
+        needsBrowser: site.needs_browser,
+      });
       if (!outcome.ok) {
         blocked += 1;
         blockedDomains.add(site.domain);
