@@ -51,7 +51,7 @@ export default function UrlRulesPage() {
   return (
     <div className="mx-auto max-w-5xl p-6">
       <div className="mb-2 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">URL Rules & Scoring</h1>
+        <h1 className="text-2xl font-light tracking-tight">URL Rules & Scoring</h1>
         <button
           className="btn btn-primary"
           onClick={() => setForm({ difficulty: 5, score_weight: 10, removal_price: 0, relevant: true })}

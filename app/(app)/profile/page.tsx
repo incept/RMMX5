@@ -86,7 +86,7 @@ export default function ProfilePage() {
   return (
     <div className="mx-auto max-w-2xl space-y-4 p-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold">My Profile</h1>
+        <h1 className="text-2xl font-light tracking-tight">My Profile</h1>
         <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600 uppercase">
           {profile.role}
         </span>

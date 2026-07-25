@@ -205,7 +205,7 @@ export default function MarketingPage() {
   return (
     <div className="p-6">
       <div className="mb-4 flex items-center gap-4">
-        <h1 className="text-lg font-semibold">Email Marketing</h1>
+        <h1 className="text-2xl font-light tracking-tight">Email Marketing</h1>
         <div className="flex gap-1">
           {TABS.map((t) => (
             <button

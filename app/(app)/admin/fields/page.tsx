@@ -55,7 +55,7 @@ export default function CustomFieldsPage() {
   return (
     <div className="mx-auto max-w-3xl p-6">
       <div className="mb-5 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Custom Fields</h1>
+        <h1 className="text-2xl font-light tracking-tight">Custom Fields</h1>
         <button className="btn btn-primary" onClick={() => setForm({ tab: 'contact', field_type: 'text' })}>
           + Add field
         </button>

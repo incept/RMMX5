@@ -52,7 +52,7 @@ export default function NotificationsPage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-6">
-      <h1 className="text-lg font-semibold">Notifications</h1>
+      <h1 className="text-2xl font-light tracking-tight">Notifications</h1>
 
       {rules.map((rule) => {
         const meta = EVENT_LABELS[rule.event] ?? { title: rule.event, hint: '', vars: '' };

@@ -116,7 +116,7 @@ export default function InboxPage() {
       {/* Message list */}
       <div className="flex w-96 shrink-0 flex-col border-r border-gray-200 bg-white">
         <div className="flex items-center gap-2 border-b border-gray-200 px-4 py-3">
-          <h1 className="text-lg font-semibold">Inbox</h1>
+          <h1 className="text-2xl font-light tracking-tight">Inbox</h1>
           <select
             className="input ml-auto w-28 py-1"
             value={filter}

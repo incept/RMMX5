@@ -61,7 +61,7 @@ export default function DebugLogPage() {
   return (
     <div className="mx-auto max-w-5xl p-6">
       <div className="mb-1 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Debug Log</h1>
+        <h1 className="text-2xl font-light tracking-tight">Debug Log</h1>
         <div className="flex items-center gap-2">
           <label className="flex items-center gap-1.5 text-xs text-gray-500">
             <input

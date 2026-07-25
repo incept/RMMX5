@@ -335,7 +335,7 @@ export default function ContactPanel({
         <div className="border-b border-gray-200 px-5 pt-4">
           <div className="flex items-start justify-between">
             <div>
-              <h2 className="text-lg font-semibold">{contact.name}</h2>
+              <h2 className="text-2xl font-light tracking-tight">{contact.name}</h2>
               <div className="mt-1 flex items-center gap-2">
                 <StatusPill
                   status={contact.statuses}
@@ -464,17 +464,17 @@ export default function ContactPanel({
               )}
               <div className="flex items-center gap-3">
                 <div className="card flex-1 py-3 text-center">
-                  <div className="text-2xl font-bold text-brand-700">
+                  <div className="text-2xl font-light tabular-nums text-brand-700">
                     {contact.reputation_score ?? '—'}
                   </div>
                   <div className="text-xs text-gray-500">Reputation Score</div>
                 </div>
                 <div className="card flex-1 py-3 text-center">
-                  <div className="text-2xl font-bold">{contact.link_score ?? '—'}</div>
+                  <div className="text-2xl font-light tabular-nums">{contact.link_score ?? '—'}</div>
                   <div className="text-xs text-gray-500">Link Score</div>
                 </div>
                 <div className="card flex-1 py-3 text-center">
-                  <div className="text-2xl font-bold text-green-600">
+                  <div className="text-2xl font-light tabular-nums text-green-600">
                     ${Number(contact.revenue_projection ?? 0).toLocaleString()}
                   </div>
                   <div className="text-xs text-gray-500">Projected Revenue</div>
@@ -498,28 +498,35 @@ export default function ContactPanel({
                           )
                         }
                       />
-                      <select
-                        className="input w-32"
-                        value={link.status}
-                        style={{ color: LINK_STATUS_COLORS[link.status] }}
-                        onChange={(e) =>
-                          setLinks((ls) =>
-                            ls.map((l, j) =>
-                              j === i ? { ...l, status: e.target.value as LinkSlot['status'] } : l
-                            )
-                          )
-                        }
-                      >
-                        <option value="live">Live</option>
-                        <option value="requested">Requested</option>
-                        <option value="removed">Removed</option>
-                      </select>
-                      <span
-                        className="w-10 text-center text-xs text-gray-400"
-                        title="Removal difficulty (from URL rules)"
-                      >
-                        {link.difficulty ? `D${link.difficulty}` : ''}
-                      </span>
+                      {/* Removal work only starts once someone becomes a
+                          client — before that the tab is just the found
+                          links, so the status dropdown stays out of the way. */}
+                      {isClient && (
+                        <>
+                          <select
+                            className="input w-32"
+                            value={link.status}
+                            style={{ color: LINK_STATUS_COLORS[link.status] }}
+                            onChange={(e) =>
+                              setLinks((ls) =>
+                                ls.map((l, j) =>
+                                  j === i ? { ...l, status: e.target.value as LinkSlot['status'] } : l
+                                )
+                              )
+                            }
+                          >
+                            <option value="live">Live</option>
+                            <option value="requested">Requested</option>
+                            <option value="removed">Removed</option>
+                          </select>
+                          <span
+                            className="w-10 text-center text-xs text-gray-400"
+                            title="Removal difficulty (from URL rules)"
+                          >
+                            {link.difficulty ? `D${link.difficulty}` : ''}
+                          </span>
+                        </>
+                      )}
                     </div>
                     {/* The auto search fills these slots, and every match still
                         gets eyeballed before we trust it — so the FULL url is
