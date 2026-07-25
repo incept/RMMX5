@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
@@ -279,4 +280,31 @@ test('counties are read from slugs and camel-cased social handles', () => {
 test('compact yyyymmdd stamps parse, and long ids do not', () => {
   assert.deepEqual(findDates('/20250928-225000/'), ['2025-09-28']);
   assert.deepEqual(findDates('id=811046071683169'), []);
+});
+
+test('unlocker page fetches are metered so probe spend is visible', async () => {
+  // Probes only cost money when they fall back to the unlocker; leaving that
+  // unmetered would hide the entire cost of deep search.
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  assert.match(source, /reserveUsage\(\{[\s\S]*?operation: 'unlocker'/);
+  // Reserved BEFORE the request, so the monthly cap can actually stop one.
+  assert.ok(
+    source.indexOf('reserveUsage') < source.indexOf('api.brightdata.com/request'),
+    'usage must be reserved before the billed request is sent'
+  );
+  // Both outcomes close the event out; a failed unlocker call is still billed.
+  assert.match(source, /finishUsage\([^)]*'failed'/);
+  assert.match(source, /finishUsage\([^)]*'succeeded'\)/);
+});
+
+test('per-call costs are validated, not silently coerced to zero', async () => {
+  const source = await readFile(
+    new URL('../app/api/admin/settings/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(source, /serp_cost/);
+  assert.match(source, /unlocker_cost/);
+  // Number.isFinite rejects "abc" instead of storing NaN, which would report a
+  // month of real spend as $0.00.
+  assert.match(source, /Number\.isFinite\(cost\)/);
 });

@@ -19,6 +19,9 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
       { key: 'serp_zone', label: 'SERP zone name', placeholder: 'serp_api1' },
       { key: 'monthly_limit', label: 'Monthly SERP request limit', placeholder: '5000' },
       { key: 'unlocker_zone', label: 'Unlocker zone (for deep-search page fetches)', placeholder: 'unblocker1' },
+      { key: 'unlocker_monthly_limit', label: 'Monthly unlocker request limit', placeholder: '2000' },
+      { key: 'serp_cost', label: 'Cost per SERP request (USD)', placeholder: '0.0015' },
+      { key: 'unlocker_cost', label: 'Cost per unlocker request (USD)', placeholder: '0.001' },
       { key: 'proxy_zone', label: 'Proxy zone name (rotating/backconnect)', placeholder: 'residential_proxy1' },
       { key: 'proxy_username', label: 'Proxy username', placeholder: 'brd-customer-XXXX-zone-YYYY' },
       { key: 'proxy_password', label: 'Proxy password', secret: true },
@@ -140,6 +143,7 @@ export default function IntegrationsPage() {
   }
 
   const brightdata = settings.brightdata ?? {};
+  const thisMonth = new Date().toISOString().slice(0, 7);
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-6">
@@ -233,10 +237,47 @@ export default function IntegrationsPage() {
 
           {section.key === 'brightdata' && (
             <div className="mt-3 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
-              SERP requests this month (Google + Bing, all searches):{' '}
-              <span className="font-mono font-semibold">
-                {settings.usage?.serp?.[new Date().toISOString().slice(0, 7)] ?? 0}
-              </span>
+              <div className="mb-1.5 font-semibold">This month&rsquo;s BrightData usage</div>
+              <table className="w-full">
+                <tbody>
+                  {[
+                    ['serp', 'SERP requests (Google + Bing)'],
+                    ['brightdata_unlocker', 'Unlocker page fetches (deep search)'],
+                  ].map(([counter, label]) => {
+                    const usage = settings.usage ?? {};
+                    const count = usage[counter]?.[thisMonth] ?? 0;
+                    const failed = usage._failed?.[counter]?.[thisMonth] ?? 0;
+                    const spend = usage._cost?.[counter]?.[thisMonth];
+                    return (
+                      <tr key={counter}>
+                        <td className="py-0.5">{label}</td>
+                        <td className="py-0.5 text-right font-mono font-semibold tabular-nums">
+                          {count}
+                        </td>
+                        <td className="py-0.5 pl-3 text-right font-mono tabular-nums">
+                          {spend != null ? `$${spend.toFixed(2)}` : '—'}
+                        </td>
+                        <td className="py-0.5 pl-3 text-right text-gray-400">
+                          {failed ? `${failed} failed` : ''}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  <tr className="border-t border-gray-200">
+                    <td className="pt-1 font-semibold">Estimated spend</td>
+                    <td />
+                    <td className="pt-1 pl-3 text-right font-mono font-semibold tabular-nums">
+                      ${Number(settings.usage?._cost?.total?.[thisMonth] ?? 0).toFixed(2)}
+                    </td>
+                    <td />
+                  </tr>
+                </tbody>
+              </table>
+              <div className="mt-1.5 text-gray-400">
+                Counts come from the usage_events log; spend multiplies them by the per-call costs
+                above, so it is an estimate for orientation, not a bill. Failed requests are
+                counted because they are usually still billed.
+              </div>
             </div>
           )}
 

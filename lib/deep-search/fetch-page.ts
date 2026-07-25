@@ -1,5 +1,6 @@
 import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
+import { finishUsage, reserveUsage } from '@/lib/usage';
 
 /**
  * Page fetching for probes.
@@ -55,7 +56,11 @@ export async function fetchProbePage(url: string): Promise<FetchOutcome> {
 
   // Unlocker fallback. Uses the same /request endpoint as the SERP integration
   // but a different zone, so it is opt-in: no zone configured means no attempt.
-  const cfg = await getSetting<{ api_key?: string; unlocker_zone?: string }>('brightdata');
+  const cfg = await getSetting<{
+    api_key?: string;
+    unlocker_zone?: string;
+    unlocker_monthly_limit?: number | string;
+  }>('brightdata');
   if (!cfg.api_key || !cfg.unlocker_zone) {
     return {
       ok: false,
@@ -63,6 +68,21 @@ export async function fetchProbePage(url: string): Promise<FetchOutcome> {
       reason: `${directNote}; no BrightData unlocker_zone configured to retry through`,
     };
   }
+
+  // Unlocker requests are billed, unlike the direct fetch above, so they are
+  // metered the same way SERP requests are — otherwise probe spend would be
+  // invisible. Reserving BEFORE the call is what lets the monthly limit stop
+  // a runaway, and it records the attempt even if the process dies mid-request.
+  const configuredLimit = Number(cfg.unlocker_monthly_limit);
+  const usage = await reserveUsage({
+    provider: 'brightdata',
+    operation: 'unlocker',
+    monthlyLimit:
+      Number.isInteger(configuredLimit) && configuredLimit > 0 && configuredLimit <= 2_147_483_647
+        ? configuredLimit
+        : null,
+    metadata: { zone: cfg.unlocker_zone, url: url.slice(0, 200) },
+  });
 
   try {
     const res = await fetch('https://api.brightdata.com/request', {
@@ -76,14 +96,17 @@ export async function fetchProbePage(url: string): Promise<FetchOutcome> {
     });
     const body = await res.text();
     if (!res.ok || !body.trim()) {
+      await finishUsage(usage.id, 'failed', `HTTP ${res.status} ${body.slice(0, 160)}`);
       return {
         ok: false,
         blocked: true,
         reason: `${directNote}; unlocker HTTP ${res.status} ${body.slice(0, 160)}`,
       };
     }
+    await finishUsage(usage.id, 'succeeded');
     return { ok: true, html: body, via: 'unlocker' };
   } catch (e: any) {
+    await finishUsage(usage.id, 'failed', e?.message ?? 'unknown error');
     return {
       ok: false,
       blocked: true,
