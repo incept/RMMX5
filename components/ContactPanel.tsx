@@ -483,42 +483,59 @@ export default function ContactPanel({
 
               <div className="space-y-1.5">
                 {links.map((link, i) => (
-                  <div key={link.position} className="flex items-center gap-2">
-                    <span className="w-6 text-right font-mono text-xs text-gray-400">
-                      {link.position}
-                    </span>
-                    <input
-                      className="input flex-1"
-                      placeholder={`Link ${link.position} URL`}
-                      value={link.url}
-                      onChange={(e) =>
-                        setLinks((ls) =>
-                          ls.map((l, j) => (j === i ? { ...l, url: e.target.value } : l))
-                        )
-                      }
-                    />
-                    <select
-                      className="input w-32"
-                      value={link.status}
-                      style={{ color: LINK_STATUS_COLORS[link.status] }}
-                      onChange={(e) =>
-                        setLinks((ls) =>
-                          ls.map((l, j) =>
-                            j === i ? { ...l, status: e.target.value as LinkSlot['status'] } : l
+                  <div key={link.position}>
+                    <div className="flex items-center gap-2">
+                      <span className="w-6 text-right font-mono text-xs text-gray-400">
+                        {link.position}
+                      </span>
+                      <input
+                        className="input flex-1"
+                        placeholder={`Link ${link.position} URL`}
+                        value={link.url}
+                        onChange={(e) =>
+                          setLinks((ls) =>
+                            ls.map((l, j) => (j === i ? { ...l, url: e.target.value } : l))
                           )
-                        )
-                      }
-                    >
-                      <option value="live">Live</option>
-                      <option value="requested">Requested</option>
-                      <option value="removed">Removed</option>
-                    </select>
-                    <span
-                      className="w-10 text-center text-xs text-gray-400"
-                      title="Removal difficulty (from URL rules)"
-                    >
-                      {link.difficulty ? `D${link.difficulty}` : ''}
-                    </span>
+                        }
+                      />
+                      <select
+                        className="input w-32"
+                        value={link.status}
+                        style={{ color: LINK_STATUS_COLORS[link.status] }}
+                        onChange={(e) =>
+                          setLinks((ls) =>
+                            ls.map((l, j) =>
+                              j === i ? { ...l, status: e.target.value as LinkSlot['status'] } : l
+                            )
+                          )
+                        }
+                      >
+                        <option value="live">Live</option>
+                        <option value="requested">Requested</option>
+                        <option value="removed">Removed</option>
+                      </select>
+                      <span
+                        className="w-10 text-center text-xs text-gray-400"
+                        title="Removal difficulty (from URL rules)"
+                      >
+                        {link.difficulty ? `D${link.difficulty}` : ''}
+                      </span>
+                    </div>
+                    {/* The auto search fills these slots, and every match still
+                        gets eyeballed before we trust it — so the FULL url is
+                        laid out (wrapped, never truncated) as a click-out to
+                        the live page in a new tab. */}
+                    {link.url.trim() && (
+                      <a
+                        href={/^https?:\/\//i.test(link.url.trim()) ? link.url.trim() : `https://${link.url.trim()}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-0.5 ml-8 block break-all text-[11px] leading-snug text-brand-600 hover:underline"
+                        title="Open in a new tab to verify"
+                      >
+                        {link.url.trim()} ↗
+                      </a>
+                    )}
                   </div>
                 ))}
               </div>
