@@ -476,3 +476,27 @@ test('arre.st is no longer searched separately from arrests.org', async () => {
   // arrests.org must outrank everything for the scarce slots.
   assert.match(sql, /set priority = 10 where domain = 'arrests\.org'/);
 });
+
+test('date-addressed pages are derived from county and booking date', async () => {
+  // northcarolina.arrests.org/Wake/2026/April/22/ is a daily county ROSTER, so a
+  // name search can miss it even when Google has it indexed. County plus date
+  // names the URL outright, which is the only route on a host BrightData will
+  // not fetch — and it costs no request at all.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /buildDateUrl/);
+  assert.match(source, /MONTH_NAMES/);
+  const sql = await readFile(
+    new URL('../supabase/migrations/0016_date_url_derivation.sql', import.meta.url),
+    'utf8'
+  );
+  // The exact observed shape: state subdomain, capitalised county, month name.
+  assert.match(sql, /\{state_name\}\.arrests\.org\/\{county\}\/\{yyyy\}\/\{month_name\}\/\{dd\}/);
+});
+
+test('every SERP fallback queries Bing as well as Google', async () => {
+  // The two crawl these sites on different schedules, so each holds records the
+  // other misses — the same reason the auto-search queries both.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /Bing runs on EVERY fallback/);
+  assert.match(source, /mergeSerpResults\(\[results, bing\]\)/);
+});

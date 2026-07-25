@@ -1,5 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server';
-import { canonicalUrl, runSerpSearch } from '@/lib/integrations/brightdata';
+import { canonicalUrl, mergeSerpResults, runSerpSearch } from '@/lib/integrations/brightdata';
 import { matchUrlRule, type UrlRule } from '@/lib/scoring';
 import { logActivity } from '@/lib/activity';
 import { logDebug, errorMessage } from '@/lib/debug-log';
@@ -56,6 +56,54 @@ interface ProbeSite {
   record_url_template: string | null;
   needs_render: boolean;
   priority: number;
+  date_url_template: string | null;
+}
+
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+/**
+ * Builds a date-addressed page URL, e.g. the daily county roster at
+ * northcarolina.arrests.org/Wake/2026/April/22/.
+ *
+ * Worth having because it needs no request at all: on a host BrightData refuses
+ * to fetch, whose name searches can miss a page addressed by date rather than by
+ * person, the county and booking date we already hold name the exact URL.
+ */
+function buildDateUrl(
+  template: string,
+  isoDate: string,
+  county: string | null,
+  state: string | null
+): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate);
+  if (!m) return null;
+  const [, yyyy, mm, dd] = m;
+  const monthName = MONTH_NAMES[Number(mm) - 1];
+  if (!monthName) return null;
+
+  const values: Record<string, string | null> = {
+    yyyy,
+    mm,
+    // Unpadded: the observed URLs use /April/22/. If single-digit days 404, this
+    // is the one place to change.
+    dd: String(Number(dd)),
+    month_name: monthName,
+    county: county ? encodeURIComponent(county.replace(/\s*county\s*/i, '').trim()) : null,
+    county_slug: county ? countySlug(county) : null,
+    state: state ?? null,
+    state_name: state ? stateName(state) : null,
+  };
+
+  let out = template;
+  for (const match of template.matchAll(/[{](\w+)[}]/g)) {
+    const value = values[match[1]];
+    if (value == null || value === '') return null;
+    out = out.replaceAll('{' + match[1] + '}', value);
+  }
+  return out;
 }
 
 /** Records which record ids came from which operator network. */
@@ -97,6 +145,7 @@ export interface DeepSearchResult {
   rounds: number;
   serpFallbacks: number;
   pivots: number;
+  derived: number;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -226,6 +275,7 @@ export async function runDeepSearchForContact(
   const blockedDomains = new Set<string>();
   const familyIds = new Map<string, Set<string>>();
   const unindexedPrioritySites: string[] = [];
+  let derived = 0;
 
   for (const round of [0, 1] as const) {
     // Round 0: nothing needed, or the lead's own state. Round 1: county-scoped
@@ -429,13 +479,22 @@ export async function runDeepSearchForContact(
     // high-value site with no Google hits gets one second look. Only for high
     // priority, and only when the first query found nothing — otherwise this
     // would double the cost of every fallback.
-    if (!results.length && (site?.priority ?? 100) <= 20) {
-      try {
-        results = await runSerpSearch(query, { engine: 'bing', numResults: 20 });
-        serpFallbacks += 1;
-      } catch {
-        // The Google attempt already reported; a Bing failure adds nothing.
-      }
+    // Bing runs on EVERY fallback, not only when Google came back empty: the two
+    // crawl these sites on different schedules and each holds records the other
+    // misses, which is exactly why the auto-search queries both. Results merge
+    // and dedupe, so a page both engines know about is still one candidate.
+    try {
+      const bing = await runSerpSearch(query, { engine: 'bing', numResults: 20 });
+      serpFallbacks += 1;
+      results = mergeSerpResults([results, bing]);
+    } catch (e) {
+      await logDebug({
+        level: 'warn',
+        source: 'deep-search:serp-fallback',
+        message: `Bing site: search of ${domain} failed: ${errorMessage(e)}`,
+        context: { query },
+        contactId,
+      });
     }
 
     // A priority site with nothing on either index usually means the page is
@@ -484,7 +543,51 @@ export async function runDeepSearchForContact(
     }
   }
 
-  /* ── Record-id pivots across a network ───────────────────────────────────
+  /* -- Date-addressed pages, derived rather than searched -------------------
+     A daily county roster is addressed by county and date, so a name search can
+     miss it even when Google has it indexed. With the county and booking date
+     already in hand the URL is fully determined -- the only route left on a host
+     BrightData will not fetch for us, and it costs nothing. */
+  for (const site of sitesAll) {
+    if (!site.date_url_template) continue;
+    for (const isoDate of facts.booking_dates.slice(0, 3)) {
+      for (const county of (facts.county.length ? facts.county : [null]).slice(0, 2)) {
+        const url = buildDateUrl(
+          site.date_url_template,
+          isoDate,
+          county,
+          facts.state[0] ?? seedState ?? null
+        );
+        if (!url) continue;
+        const canonical = canonicalUrl(url);
+        if (!canonical || seen.has(canonical)) continue;
+
+        const { error } = await supabase.from('search_candidates').insert({
+          contact_id: contactId,
+          url,
+          canonical_url: canonical,
+          title: `${site.name ?? site.domain} - ${county ?? 'county'} roster for ${isoDate}`,
+          snippet:
+            'derived from the known county and booking date; the daily roster lists everyone booked that day, so open it to confirm the client appears and to pick up their individual record link',
+          source: 'probe',
+          source_detail: `${site.domain} (derived from county + date)`,
+          round: 3,
+          // The page almost certainly exists, but that it shows THIS person is
+          // inferred from the date rather than seen, so it stays a lead.
+          confidence: 0.7,
+          matched_facts: { booking_date: isoDate, ...(county ? { county } : {}) },
+          url_rule_id: matchUrlRule(url, rules)?.id ?? null,
+        });
+        if (!error) {
+          seen.add(canonical);
+          candidates += 1;
+          derived += 1;
+        }
+      }
+    }
+  }
+
+  /* -- Record-id pivots across a network ------------------------------------────────────
      Sibling sites share ids: wakencbusts .../view-full-profile.php?id=140252 and
      wakepublicrecords .../sample.php?id=140252 are one booking. Once any sibling
      gives up an id, the rest are addressable with no request at all. */
@@ -573,11 +676,12 @@ export async function runDeepSearchForContact(
       `${blocked ? ` (${blocked} unreadable)` : ''}` +
       `${serpFallbacks ? `, searched ${serpFallbacks} blocked site(s) via Google` : ''}` +
       `${pivots ? `, derived ${pivots} sibling record(s) from shared ids` : ''}` +
+      `${derived ? `, built ${derived} date-addressed page(s) from county + booking date` : ''}` +
       `: ${candidates} new candidate(s) for review${learned ? `. Learned: ${learned}` : ''}`,
-    meta: { probed, blocked, candidates, rounds, serpFallbacks, pivots, facts: merged },
+    meta: { probed, blocked, candidates, rounds, serpFallbacks, pivots, derived, facts: merged },
   });
 
-  return { probed, blocked, candidates, facts: merged, rounds, serpFallbacks, pivots };
+  return { probed, blocked, candidates, facts: merged, rounds, serpFallbacks, pivots, derived };
 }
 
 /** Never lets a probe failure bubble into a webhook or a job retry storm. */
