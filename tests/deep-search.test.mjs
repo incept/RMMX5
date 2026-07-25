@@ -440,3 +440,126 @@ test('the migration routes arrests.org through SERP rather than the unlocker', a
   assert.match(sql, /policy_20000/);
   assert.match(sql, /needs_render/);
 });
+
+test('SERP fallback slots go by priority, not row order', async () => {
+  // The bug this pins: ordering by scope put 'national' ahead of 'state', so
+  // arre.st (19 links) consumed a slot while arrests.org (20.5% of every
+  // historical link) was cut off by the per-run cap.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /\.sort\(\(a, b\) => \(a\.site\?\.priority \?\? 100\) - \(b\.site\?\.priority \?\? 100\)\)/);
+  // One query per network: mirrors return the same records.
+  assert.match(source, /usedFamilies/);
+});
+
+test('a high-value site with no Google hits gets one Bing look', async () => {
+  // Index lag is the SERP route's real weakness; Bing crawls on its own
+  // schedule. Bounded to priority sites with zero Google results so this cannot
+  // double the cost of every fallback.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /!results\.length && \(site\?\.priority \?\? 100\) <= 20/);
+  assert.match(source, /engine: 'bing'/);
+});
+
+test('a page missing from both indexes flags the contact for a later re-run', async () => {
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /unindexedPrioritySites/);
+  // Reuses search_flag, so it appears in the grid's existing Flagged view.
+  assert.match(source, /Not yet indexed on/);
+});
+
+test('arre.st is no longer searched separately from arrests.org', async () => {
+  const sql = await readFile(
+    new URL('../supabase/migrations/0015_fallback_priority.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(sql, /set serp_fallback = false[\s\S]*?where domain = 'arre\.st'/);
+  // arrests.org must outrank everything for the scarce slots.
+  assert.match(sql, /set priority = 10 where domain = 'arrests\.org'/);
+});
+
+test('date-addressed pages are derived from county and booking date', async () => {
+  // northcarolina.arrests.org/Wake/2026/April/22/ is a daily county ROSTER, so a
+  // name search can miss it even when Google has it indexed. County plus date
+  // names the URL outright, which is the only route on a host BrightData will
+  // not fetch — and it costs no request at all.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /buildDateUrl/);
+  assert.match(source, /MONTH_NAMES/);
+  const sql = await readFile(
+    new URL('../supabase/migrations/0016_date_url_derivation.sql', import.meta.url),
+    'utf8'
+  );
+  // The exact observed shape: state subdomain, capitalised county, month name.
+  assert.match(sql, /\{state_name\}\.arrests\.org\/\{county\}\/\{yyyy\}\/\{month_name\}\/\{dd\}/);
+});
+
+test('every SERP fallback queries Bing as well as Google', async () => {
+  // The two crawl these sites on different schedules, so each holds records the
+  // other misses — the same reason the auto-search queries both.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /Bing runs on EVERY fallback/);
+  assert.match(source, /mergeSerpResults\(\[results, bing\]\)/);
+});
+
+test('arrests.org indexes BOTH a per-person record and a daily roster', () => {
+  // Google returns either shape, and they need different routes:
+  //   /Arrests/Gene_Beachak_67642359/  -> the name is in the URL, so the
+  //     site: name search finds it, and the numeric id parses out
+  //   /Wake/2026/April/22/             -> addressed by county and date, so it
+  //     is derived from facts rather than searched for
+  const GENE = splitName('Gene Beachak');
+
+  const record = factsFromUrl(
+    'https://northcarolina.arrests.org/Arrests/Gene_Beachak_67642359/',
+    GENE
+  );
+  assert.deepEqual(record.state, ['NC']);
+  assert.deepEqual(record.record_ids, ['67642359']);
+  // Surname + first name in the URL clears the corroboration floor on their own,
+  // before any help from the SERP title or snippet.
+  const scored = scoreCorroboration(
+    'https://northcarolina.arrests.org/Arrests/Gene_Beachak_67642359/',
+    GENE,
+    normalizeFacts({ county: ['Wake'], state: ['NC'] })
+  );
+  assert.ok(scored.confidence >= 0.55, 'a record URL must clear the floor unaided');
+
+  const roster = factsFromUrl('https://northcarolina.arrests.org/Wake/2026/April/22/', GENE);
+  assert.deepEqual(roster.county, ['Wake']);
+  assert.deepEqual(roster.booking_dates, ['2026-04-22']);
+  // No name anywhere in a roster URL, which is exactly why it is derived from
+  // county + date instead of scored like a search hit.
+  assert.equal(roster.middle, undefined);
+});
+
+test('a site that had a hit also yields its "all arrests" search link', async () => {
+  // A record page proves ONE booking; the site's own search shows whether the
+  // person has more. Derivable from the name alone, so it works even on a host
+  // we cannot fetch — the operator's browser has no policy problem.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /sitesWithHits/);
+  assert.match(source, /kind: 'site_search'/);
+  // Only for sites that actually produced evidence, so it is not noise.
+  assert.match(source, /!sitesWithHits\.has\(site\.domain\)\) continue/);
+  // Zero confidence: a tool link, not a scored finding, so it sorts last.
+  assert.match(source, /confidence: 0,/);
+});
+
+test('a search view cannot be accepted into a removal link slot', async () => {
+  // Link slots hold pages to be REMOVED. A search URL is not removable content,
+  // so those rows offer Done instead of Add.
+  const source = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(source, /c\.matched_facts\?\.kind === 'site_search'/);
+  assert.match(source, /search view/);
+});
+
+test('the arrests.org search link is the short human-facing form', async () => {
+  const sql = await readFile(
+    new URL('../supabase/migrations/0017_site_search_links.sql', import.meta.url),
+    'utf8'
+  );
+  // The TEMPLATE must be the short form. The surrounding comment mentions
+  // fpartial deliberately, to record why it was dropped.
+  const template = /set search_template = '([^']+)'/.exec(sql)?.[1];
+  assert.equal(template, 'https://{state_name}.arrests.org/search.php?fname={first}&lname={last}');
+});
