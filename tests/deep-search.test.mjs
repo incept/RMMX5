@@ -451,13 +451,12 @@ test('SERP fallback slots go by priority, not row order', async () => {
   assert.match(source, /usedFamilies/);
 });
 
-test('a high-value site with no Google hits gets one Bing look', async () => {
-  // Index lag is the SERP route's real weakness; Bing crawls on its own
-  // schedule. Bounded to priority sites with zero Google results so this cannot
-  // double the cost of every fallback.
+test('a priority site missing from both indexes is recorded as unindexed', async () => {
+  // Index lag is the SERP route's real weakness. Both engines now run on every
+  // fallback, so an empty result means neither index has the page.
   const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
   assert.match(source, /!results\.length && \(site\?\.priority \?\? 100\) <= 20/);
-  assert.match(source, /engine: 'bing'/);
+  assert.match(source, /unindexedPrioritySites\.push\(domain\)/);
 });
 
 test('a page missing from both indexes flags the contact for a later re-run', async () => {
@@ -493,12 +492,12 @@ test('date-addressed pages are derived from county and booking date', async () =
   assert.match(sql, /\{state_name\}\.arrests\.org\/\{county\}\/\{yyyy\}\/\{month_name\}\/\{dd\}/);
 });
 
-test('every SERP fallback queries Bing as well as Google', async () => {
+test('every SERP fallback queries both engines and merges them', async () => {
   // The two crawl these sites on different schedules, so each holds records the
   // other misses — the same reason the auto-search queries both.
   const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
-  assert.match(source, /Bing runs on EVERY fallback/);
-  assert.match(source, /mergeSerpResults\(\[results, bing\]\)/);
+  assert.match(source, /const engines: SearchEngine\[\] = \['google', 'bing'\]/);
+  assert.match(source, /mergeSerpResults\(lists\)/);
 });
 
 test('arrests.org indexes BOTH a per-person record and a daily roster', () => {
@@ -562,4 +561,20 @@ test('the arrests.org search link is the short human-facing form', async () => {
   // fpartial deliberately, to record why it was dropped.
   const template = /set search_template = '([^']+)'/.exec(sql)?.[1];
   assert.equal(template, 'https://{state_name}.arrests.org/search.php?fname={first}&lname={last}');
+});
+
+test('fallback engines run in parallel on a tighter deadline', async () => {
+  // Sequentially, a Bing timeout added its full 60s to the run for every
+  // fallback domain — four domains of that is minutes spent waiting.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /Promise\.allSettled\(\s*engines\.map/);
+  assert.match(source, /FALLBACK_TIMEOUT_MS/);
+  // One engine surviving is enough.
+  assert.match(source, /if \(!lists\.length\) continue;/);
+
+  const brightdata = await readFile(
+    new URL('../lib/integrations/brightdata.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(brightdata, /AbortSignal\.timeout\(opts\?\.timeoutMs \?\? 60_000\)/);
 });

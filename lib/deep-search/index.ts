@@ -1,5 +1,11 @@
 import { createAdminClient } from '@/lib/supabase/server';
-import { canonicalUrl, mergeSerpResults, runSerpSearch } from '@/lib/integrations/brightdata';
+import {
+  canonicalUrl,
+  mergeSerpResults,
+  runSerpSearch,
+  type SearchEngine,
+  type SerpResult,
+} from '@/lib/integrations/brightdata';
 import { matchUrlRule, type UrlRule } from '@/lib/scoring';
 import { logActivity } from '@/lib/activity';
 import { logDebug, errorMessage } from '@/lib/debug-log';
@@ -41,6 +47,12 @@ const PER_DOMAIN_DELAY_MS = 400; // politeness; negligible at this volume
 const MIN_CONFIDENCE = 0.55;
 /** site: queries cost a SERP request each, so the per-run count is bounded. */
 const MAX_SERP_FALLBACKS = 4;
+/**
+ * A fallback query is one of up to eight in a run, so it gets a tighter deadline
+ * than a name search. Bing was timing out at 60s on site: queries and adding
+ * that wait to every domain.
+ */
+const FALLBACK_TIMEOUT_MS = 25_000;
 
 interface ProbeSite {
   id: string;
@@ -462,20 +474,36 @@ export async function runDeepSearchForContact(
     // all. site: already narrows hard, and scoreCorroboration supplies the
     // precision that the quotes would have.
     const query = `site:${domain} ${name.first} ${name.last}`.trim();
-    let results: Awaited<ReturnType<typeof runSerpSearch>> = [];
-    try {
-      results = await runSerpSearch(query, { engine: 'google', numResults: 20 });
-      serpFallbacks += 1;
-    } catch (e) {
-      await logDebug({
-        level: 'warn',
-        source: 'deep-search:serp-fallback',
-        message: `site: search of ${domain} failed: ${errorMessage(e)}`,
-        context: { query },
-        contactId,
-      });
-      continue;
+    // Both engines at once, and with a shorter deadline than a name search
+    // gets. Sequentially, one slow engine added its whole timeout to the run for
+    // every fallback domain — four domains of that is minutes spent waiting.
+    // Each engine is metered separately, so a timeout costs an attempt that
+    // BrightData does not bill (only successful requests are charged).
+    const engines: SearchEngine[] = ['google', 'bing'];
+    const settled = await Promise.allSettled(
+      engines.map((engine) =>
+        runSerpSearch(query, { engine, numResults: 20, timeoutMs: FALLBACK_TIMEOUT_MS })
+      )
+    );
+    serpFallbacks += engines.length;
+
+    const lists: SerpResult[][] = [];
+    for (const [i, outcome] of settled.entries()) {
+      if (outcome.status === 'fulfilled') {
+        lists.push(outcome.value);
+      } else {
+        await logDebug({
+          level: 'warn',
+          source: 'deep-search:serp-fallback',
+          message: `${engines[i]} site: search of ${domain} failed: ${errorMessage(outcome.reason)}`,
+          context: { query },
+          contactId,
+        });
+      }
     }
+    // One engine surviving is enough; both failing means no results to judge.
+    if (!lists.length) continue;
+    let results = mergeSerpResults(lists);
 
     const site = sitesAll.find((s) => s.domain === domain);
 
@@ -485,24 +513,6 @@ export async function runDeepSearchForContact(
     // high-value site with no Google hits gets one second look. Only for high
     // priority, and only when the first query found nothing — otherwise this
     // would double the cost of every fallback.
-    // Bing runs on EVERY fallback, not only when Google came back empty: the two
-    // crawl these sites on different schedules and each holds records the other
-    // misses, which is exactly why the auto-search queries both. Results merge
-    // and dedupe, so a page both engines know about is still one candidate.
-    try {
-      const bing = await runSerpSearch(query, { engine: 'bing', numResults: 20 });
-      serpFallbacks += 1;
-      results = mergeSerpResults([results, bing]);
-    } catch (e) {
-      await logDebug({
-        level: 'warn',
-        source: 'deep-search:serp-fallback',
-        message: `Bing site: search of ${domain} failed: ${errorMessage(e)}`,
-        context: { query },
-        contactId,
-      });
-    }
-
     // A priority site with nothing on either index usually means the page is
     // published but not yet crawled. Flagging the contact puts it in the grid's
     // Flagged view so it can be re-run in a few days, which is the only real
