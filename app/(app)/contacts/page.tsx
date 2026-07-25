@@ -73,7 +73,9 @@ const DEFAULT_ORDER: ColKey[] = [
   'email', 'phone', 'location', 'status', 'rep', 'link', 'links',
   'sent', 'opens', 'clicks', 'owner', 'created',
 ];
-const DEFAULT_HIDDEN: ColKey[] = ['owner'];
+// Location is off by default because the Contact column already shows city and
+// state beside the name; turn it on for a sortable, reorderable column of its own.
+const DEFAULT_HIDDEN: ColKey[] = ['owner', 'location'];
 
 const PAGE_SIZE = 50;
 // v2: the shape changed from a visibility map to { order, hidden } when columns
@@ -895,7 +897,10 @@ export default function ContactsPage() {
                           ⚑
                         </span>
                       )}
-                      <span className="truncate text-xs font-medium">{contact.name}</span>
+                      <span className="whitespace-nowrap text-xs font-medium">{contact.name}</span>
+                      <span className="truncate text-[11px] font-light text-gray-400">
+                        {[contact.city, contact.state].filter(Boolean).join(', ')}
+                      </span>
                     </div>
                     {visibleCols.map((key) => (
                       <div key={key} className={`${COLUMNS[key].width} flex-none pr-3`}>
