@@ -792,3 +792,26 @@ test('migration numbers are unique', async () => {
   const dupes = numbers.filter((n, i) => numbers.indexOf(n) !== i);
   assert.deepEqual(dupes, [], `duplicate migration prefixes: ${dupes.join(', ')}`);
 });
+
+test('a failed deep-search enqueue answers with JSON the operator can read', async () => {
+  // A bare 500 carries no body, so the UI could only say "HTTP 500" while the
+  // cause sat in a server log nobody can reach from the CRM. The route now
+  // reports its own failure and logs it against the contact.
+  const source = await readFile(
+    new URL('../app/api/contacts/[id]/deep-search/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(source, /catch \(e\) \{/);
+  assert.match(source, /source: 'deep-search:enqueue'/);
+  assert.match(source, /contactId: id/, 'the log is attributable to the contact');
+  assert.match(
+    source,
+    /NextResponse\.json\(\s*\{ error: `Could not start deep search: \$\{message\}` \}/,
+    'the real message reaches the client'
+  );
+  // The enqueue itself must be inside the guarded region.
+  const tryAt = source.indexOf('try {');
+  const enqueueAt = source.indexOf('await enqueueJob(');
+  const catchAt = source.indexOf('} catch (e) {');
+  assert.ok(tryAt < enqueueAt && enqueueAt < catchAt, 'enqueueJob runs inside the try');
+});
