@@ -1,7 +1,7 @@
 import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
 import type { NameParts } from './facts.ts';
-import type { LlmRow } from './extract.ts';
+import { normalizeLlmRow, type LlmRow } from './extract.ts';
 
 /**
  * Optional LLM extraction, kept apart from extract.ts so the deterministic
@@ -82,7 +82,9 @@ export async function extractRowsWithLlm(
     const match = /\[[\s\S]*\]/.exec(text);
     if (!match) return [];
     const rows = JSON.parse(match[0]);
-    return Array.isArray(rows) ? rows.slice(0, 25) : [];
+    // Normalised here, at the boundary, so nothing downstream has to guess at
+    // the shape of model output.
+    return Array.isArray(rows) ? rows.slice(0, 25).map(normalizeLlmRow) : [];
   } catch (e: any) {
     await logDebug({
       level: 'warn',

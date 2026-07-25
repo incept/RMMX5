@@ -120,7 +120,11 @@ async function rowsFromPage(
       .filter((r) => r.url && /^https?:\/\//i.test(r.url))
       .map((r) => ({
         url: r.url!,
-        text: [r.name, r.middle, r.county, r.state, r.booking_date, (r.charges ?? []).join(' ')]
+        // Flattened rather than .join()ed on charges: normalizeLlmRow now
+        // guarantees an array, but this stays shape-agnostic so a future caller
+        // handing over raw model output cannot crash the run again.
+        text: [r.name, r.middle, r.county, r.state, r.booking_date]
+          .concat(Array.isArray(r.charges) ? r.charges : [r.charges as any])
           .filter(Boolean)
           .join(' '),
       }));
@@ -221,15 +225,24 @@ export async function runDeepSearchForContact(
         continue;
       }
 
-      const pageText = stripToText(outcome.html, url);
-      const { rows, llmFacts } = await rowsFromPage(
-        pageText,
-        url,
-        site.domain,
-        name,
-        contactId
-      );
-      if (llmFacts) facts = mergeFacts(facts, llmFacts);
+      // One unreadable page must not discard the whole sweep. An unexpected
+      // error inside a single probe previously aborted the run and lost every
+      // candidate the earlier probes had already found.
+      let rows: RawRow[] = [];
+      try {
+        const pageText = stripToText(outcome.html, url);
+        const parsed = await rowsFromPage(pageText, url, site.domain, name, contactId);
+        rows = parsed.rows;
+        if (parsed.llmFacts) facts = mergeFacts(facts, parsed.llmFacts);
+      } catch (e) {
+        await logDebug({
+          source: 'deep-search:probe',
+          message: `Could not read results from ${site.domain}: ${errorMessage(e)}`,
+          context: { url },
+          contactId,
+        });
+        continue;
+      }
 
       for (const row of rows) {
         const canonical = canonicalUrl(row.url);
