@@ -1,41 +1,117 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import ThemeToggle from '@/components/ThemeToggle';
 
-const NAV = [
-  { href: '/dashboard', label: 'Dashboard', icon: 'M3 13h4v8H3zM10 9h4v12h-4zM17 4h4v17h-4z' },
-  { href: '/contacts', label: 'Contacts', icon: 'M12 12a4 4 0 100-8 4 4 0 000 8zm0 2c-4 0-8 2-8 5v1h16v-1c0-3-4-5-8-5z' },
-  { href: '/clients', label: 'Clients', icon: 'M12 2l2.4 5.3L20 8l-4 4 1 5.7-5-2.7-5 2.7 1-5.7-4-4 5.6-.7z' },
-  { href: '/inbox', label: 'Inbox', icon: 'M3 5h18v14H3zm0 0l9 7 9-7' },
-  { href: '/marketing', label: 'Email Marketing', icon: 'M3 8l9 6 9-6M3 8v10h18V8M3 8l9-4 9 4' },
-  { href: '/sms', label: 'SMS', icon: 'M4 4h16v12H8l-4 4z' },
-  { href: '/voicemail', label: 'Voicemail', icon: 'M6 14a3 3 0 110-6 3 3 0 010 6zm12 0a3 3 0 110-6 3 3 0 010 6zM6 14h12' },
-  { href: '/vendors', label: 'Vendors', icon: 'M3 7h18l-2 12H5zM8 7V5a4 4 0 018 0v2' },
-  { href: '/import', label: 'Import', icon: 'M12 3v12m0 0l-4-4m4 4l4-4M4 21h16' },
+interface Leaf {
+  href: string;
+  label: string;
+}
+interface Section {
+  id: string;
+  label: string;
+  adminOnly?: boolean;
+  children: Leaf[];
+}
+
+/**
+ * Airtable-style nested tree: top-level leaves plus collapsible sections
+ * whose children hang off an indent guide line. Expansion state persists;
+ * the section owning the active route force-opens so navigation never
+ * lands on a hidden item.
+ */
+const TOP: Leaf[] = [{ href: '/dashboard', label: 'Dashboard' }];
+
+const SECTIONS: Section[] = [
+  {
+    id: 'crm',
+    label: 'CRM',
+    children: [
+      { href: '/contacts', label: 'Contacts' },
+      { href: '/clients', label: 'Clients' },
+      { href: '/vendors', label: 'Vendors' },
+      { href: '/import', label: 'Import' },
+    ],
+  },
+  {
+    id: 'outreach',
+    label: 'Outreach',
+    children: [
+      { href: '/inbox', label: 'Inbox' },
+      { href: '/marketing', label: 'Email Marketing' },
+      { href: '/sms', label: 'SMS' },
+      { href: '/voicemail', label: 'Voicemail' },
+    ],
+  },
+  {
+    id: 'admin',
+    label: 'Admin',
+    adminOnly: true,
+    children: [
+      { href: '/admin/users', label: 'Users' },
+      { href: '/admin/pipeline', label: 'Statuses & Stages' },
+      { href: '/admin/fields', label: 'Custom Fields' },
+      { href: '/admin/url-rules', label: 'URL Rules & Scoring' },
+      { href: '/admin/notifications', label: 'Notifications' },
+      { href: '/admin/integrations', label: 'Integrations & APIs' },
+      { href: '/admin/debug', label: 'Debug Log' },
+    ],
+  },
 ];
 
-const ADMIN_NAV = [
-  { href: '/admin/users', label: 'Users' },
-  { href: '/admin/pipeline', label: 'Statuses & Stages' },
-  { href: '/admin/fields', label: 'Custom Fields' },
-  { href: '/admin/url-rules', label: 'URL Rules & Scoring' },
-  { href: '/admin/notifications', label: 'Notifications' },
-  { href: '/admin/integrations', label: 'Integrations & APIs' },
-  { href: '/admin/debug', label: 'Debug Log' },
-];
+const OPEN_LS = 'rmmx5-nav-open';
 
 export default function Sidebar({ role, userName }: { role: string; userName: string }) {
   const pathname = usePathname();
   const router = useRouter();
+  const [open, setOpen] = useState<Record<string, boolean>>({ crm: true, outreach: true, admin: false });
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(OPEN_LS);
+      if (saved) setOpen((o) => ({ ...o, ...JSON.parse(saved) }));
+    } catch {
+      /* defaults are fine */
+    }
+  }, []);
+
+  function toggle(id: string) {
+    setOpen((o) => {
+      const next = { ...o, [id]: !o[id] };
+      localStorage.setItem(OPEN_LS, JSON.stringify(next));
+      return next;
+    });
+  }
 
   async function signOut() {
     await createClient().auth.signOut();
     router.push('/');
     router.refresh();
   }
+
+  const isActive = (href: string) => pathname.startsWith(href);
+
+  const leafRow = (item: Leaf, nested: boolean) => {
+    const active = isActive(item.href);
+    return (
+      <Link
+        key={item.href}
+        href={item.href}
+        className={`mb-px flex items-center rounded-lg py-1.5 text-sm transition-colors ${
+          nested ? 'px-3' : 'px-3 font-medium'
+        } ${
+          active
+            ? 'bg-brand-50 font-medium text-brand-700'
+            : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+        }`}
+      >
+        {item.label}
+      </Link>
+    );
+  };
 
   return (
     <aside className="flex w-56 shrink-0 flex-col border-r border-gray-200 bg-white">
@@ -47,53 +123,38 @@ export default function Sidebar({ role, userName }: { role: string; userName: st
       </div>
 
       <nav className="flex-1 overflow-y-auto px-2 pb-4">
-        {NAV.map((item) => {
-          const active = pathname.startsWith(item.href);
+        {TOP.map((item) => leafRow(item, false))}
+
+        {SECTIONS.filter((s) => !s.adminOnly || role === 'admin').map((section) => {
+          // The active route's section can't be collapsed shut behind the
+          // user's back — it renders open regardless of the saved state.
+          const containsActive = section.children.some((c) => isActive(c.href));
+          const expanded = open[section.id] || containsActive;
           return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`mb-0.5 flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-                active ? 'bg-brand-50 text-brand-700' : 'text-gray-600 hover:bg-gray-100'
-              }`}
-            >
-              <svg
-                viewBox="0 0 24 24"
-                className="h-4 w-4 shrink-0"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+            <div key={section.id} className="mt-1">
+              <button
+                onClick={() => toggle(section.id)}
+                className="flex w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-100"
               >
-                <path d={item.icon} />
-              </svg>
-              {item.label}
-            </Link>
+                <svg
+                  viewBox="0 0 16 16"
+                  className={`h-3 w-3 shrink-0 text-gray-400 transition-transform ${
+                    expanded ? 'rotate-90' : ''
+                  }`}
+                  fill="currentColor"
+                >
+                  <path d="M6 3l5 5-5 5V3z" />
+                </svg>
+                {section.label}
+              </button>
+              {expanded && (
+                <div className="mt-0.5 mb-1 ml-[17px] border-l border-gray-200 pl-2">
+                  {section.children.map((item) => leafRow(item, true))}
+                </div>
+              )}
+            </div>
           );
         })}
-
-        {role === 'admin' && (
-          <>
-            <div className="mt-5 mb-1 px-3 text-[10px] font-bold tracking-widest text-gray-400 uppercase">
-              Admin
-            </div>
-            {ADMIN_NAV.map((item) => {
-              const active = pathname.startsWith(item.href);
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`mb-0.5 block rounded-lg px-3 py-1.5 text-sm transition-colors ${
-                    active ? 'bg-brand-50 font-medium text-brand-700' : 'text-gray-600 hover:bg-gray-100'
-                  }`}
-                >
-                  {item.label}
-                </Link>
-              );
-            })}
-          </>
-        )}
       </nav>
 
       <div className="border-t border-gray-200 px-4 py-3">

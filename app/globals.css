@@ -176,3 +176,50 @@ body {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ── Motion (from the iCRM design study) ─────────────────────────────────
+   Small entrance animations shared by the contacts grid and the detail
+   panel/modal. Kept as plain classes (not Tailwind animate-*) so stagger
+   delays can be set inline per row. */
+@keyframes rmx-slide-in {
+  0%   { transform: translateX(30px); opacity: 0.4; }
+  70%  { transform: translateX(-2px); opacity: 1; }
+  100% { transform: translateX(0);    opacity: 1; }
+}
+@keyframes rmx-modal-in {
+  0%   { opacity: 0; transform: scale(0.955) translateY(14px); }
+  62%  { opacity: 1; transform: scale(1.005) translateY(-2px); }
+  100% { opacity: 1; transform: scale(1)     translateY(0); }
+}
+@keyframes rmx-rise-in {
+  0%   { opacity: 0; transform: translateY(16px); }
+  65%  { opacity: 1; transform: translateY(-2px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes rmx-row-in {
+  from { opacity: 0; transform: translateY(7px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes rmx-pop-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes rmx-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes rmx-shimmer {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 0.7; }
+}
+.anim-slide-in { animation: rmx-slide-in 0.32s cubic-bezier(0.22, 0.9, 0.3, 1) both; }
+.anim-modal-in { animation: rmx-modal-in 0.34s cubic-bezier(0.22, 0.9, 0.3, 1) both; }
+.anim-rise-in  { animation: rmx-rise-in 0.42s cubic-bezier(0.22, 0.9, 0.3, 1) both; }
+.anim-row-in   { animation: rmx-row-in 0.4s cubic-bezier(0.22, 0.9, 0.3, 1) both; }
+.anim-pop-in   { animation: rmx-pop-in 0.13s ease-out both; }
+.anim-fade-in  { animation: rmx-fade-in 0.22s ease both; }
+.anim-shimmer  { animation: rmx-shimmer 1.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .anim-slide-in, .anim-modal-in, .anim-rise-in, .anim-row-in, .anim-pop-in,
+  .anim-fade-in, .anim-shimmer { animation: none; }
+}

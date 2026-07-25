@@ -38,10 +38,17 @@ export default function ContactPanel({
   contactId,
   onClose,
   onChanged,
+  mode = 'panel',
 }: {
   contactId: string;
   onClose: () => void;
   onChanged: () => void;
+  /**
+   * How the detail is framed: 'panel' = slide-over (default, original
+   * behavior), 'modal' = centered dialog, 'page' = in-flow card the parent
+   * embeds in place of the list (parent owns the back affordance).
+   */
+  mode?: 'panel' | 'modal' | 'page';
 }) {
   const supabase = useMemo(() => createClient(), []);
   const [tab, setTab] = useState<Tab>('Contact Info');
@@ -322,12 +329,8 @@ export default function ContactPanel({
     </button>
   );
 
-  return (
-    <div className="fixed inset-0 z-40 flex justify-end bg-black/20" onClick={onClose}>
-      <div
-        className="flex h-full w-full max-w-2xl flex-col bg-white shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+  const panelBody = (
+    <>
         {/* Header */}
         <div className="border-b border-gray-200 px-5 pt-4">
           <div className="flex items-start justify-between">
@@ -878,6 +881,32 @@ export default function ContactPanel({
             </div>
           )}
         </div>
+    </>
+  );
+
+  // Page mode renders in-flow (no overlay) so the parent can swap it in for
+  // the list; panel and modal share the overlay-plus-shell structure.
+  if (mode === 'page') {
+    return (
+      <div className="anim-rise-in flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white">
+        {panelBody}
+      </div>
+    );
+  }
+
+  const overlayClass =
+    mode === 'modal'
+      ? 'anim-fade-in fixed inset-0 z-40 flex items-center justify-center bg-black/20 p-4 sm:p-8'
+      : 'anim-fade-in fixed inset-0 z-40 flex justify-end bg-black/20';
+  const shellClass =
+    mode === 'modal'
+      ? 'anim-modal-in flex h-[86vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl'
+      : 'anim-slide-in flex h-full w-full max-w-2xl flex-col bg-white shadow-2xl';
+
+  return (
+    <div className={overlayClass} onClick={onClose}>
+      <div className={shellClass} onClick={(e) => e.stopPropagation()}>
+        {panelBody}
       </div>
     </div>
   );
