@@ -26,7 +26,20 @@ const NOT_A_NAME = new Set([
   'county', 'jail', 'inmate', 'inmates', 'record', 'records', 'photo', 'photos',
   'busted', 'newspaper', 'view', 'full', 'profile', 'sample', 'search', 'zone',
   'public', 'details', 'detail', 'page', 'php', 'html', 'index', 'the', 'and',
-  'jr', 'sr', 'ii', 'iii', 'iv', 'unknown', 'none',
+  'jr', 'sr', 'ii', 'iii', 'iv', 'unknown', 'none', 'posts', 'post', 'reels',
+  'warrant', 'warrants', 'active', 'booked', 'charged', 'date', 'birth', 'old',
+  'year', 'from', 'was', 'and', 'jail', 'crime', 'crimes', 'busted', 'gazette',
+]);
+
+/**
+ * Path segments that sit exactly where a county name would and are not one.
+ * "virginia.arrests.org/Arrests/Jeffery_Remmark_65771891/" has no county at all,
+ * and reading "Arrests" as one produced a wrong county on 197 historical links.
+ */
+const NOT_A_COUNTY = new Set([
+  'arrest', 'arrests', 'mugshot', 'mugshots', 'record', 'records', 'search',
+  'posts', 'post', 'profile', 'p', 'reels', 'photos', 'inmate', 'inmates',
+  'booking', 'bookings', 'jail', 'news', 'about', 'contact', 'sample', 'view',
 ]);
 
 const MONTHS = [
@@ -55,6 +68,11 @@ export function findDates(text: string): string[] {
   for (const m of text.matchAll(/\b(20\d{2})[/\-.](\d{1,2})[/\-.](\d{1,2})\b/g)) {
     push(iso(m[1], m[2], m[3]));
   }
+  // bustednewspaper records and Facebook post slugs use a compact stamp:
+  // "/20250928-225000/". Anchored to a plausible year so ids are not misread.
+  for (const m of text.matchAll(/\b(20[0-2]\d)(\d{2})(\d{2})(?:[-_]\d{4,6})?\b/g)) {
+    push(iso(m[1], m[2], m[3]));
+  }
   // "/2026/April/22/" and "April 22, 2026"
   for (const m of text.matchAll(/\b(20\d{2})\/([A-Za-z]+)\/(\d{1,2})\b/g)) {
     const mi = MONTHS.indexOf(m[2].toLowerCase());
@@ -70,10 +88,18 @@ export function findDates(text: string): string[] {
 /** "... Wake County ..." → ["Wake"]. Also catches two-word counties. */
 export function findCounties(text: string): string[] {
   const out: string[] = [];
-  for (const m of text.matchAll(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+County\b/g)) {
-    const c = m[1].trim();
-    if (c && !out.includes(c)) out.push(c);
-  }
+  const add = (raw: string) => {
+    const c = titleCase(raw.replace(/[-_.]+/g, ' ').trim());
+    if (c.length > 2 && !NOT_A_COUNTY.has(c.toLowerCase()) && !out.includes(c)) out.push(c);
+  };
+  // "Wake County" in prose, titles, and SERP snippets.
+  for (const m of text.matchAll(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+County\b/g)) add(m[1]);
+  // Slug and handle forms, as used in Facebook post slugs and page names:
+  // "…-arlington-county-virginia-arrest", "mugshots.orlando.orange.county.jail".
+  for (const m of text.matchAll(/([a-z]+)[-_.]county\b/gi)) add(m[1]);
+  // Camel-cased page names: "BustedNewspaperArlingtonCountyVA", "GordonCountyCrime".
+  // No \b after "County" — the next character is usually another capital.
+  for (const m of text.matchAll(/([A-Z][a-z]+)County(?![a-z])/g)) add(m[1]);
   return out.slice(0, 4);
 }
 
@@ -103,6 +129,8 @@ export function findMiddleNames(text: string, name: NameParts): string[] {
       // "BEACHAK GENE MICHAEL ... Wake County", "Wake" is two tokens from
       // "GENE". The following word is what tells them apart.
       if (tokens[j + 1] === 'county') continue;
+      // "…-arlington-county-virginia-arrest": a state name is not a middle name.
+      if (stateCode(t)) continue;
       // Require the other half of the name nearby, so unrelated words in a
       // listing of many people don't get picked up as a middle name.
       const windowTokens = tokens.slice(Math.max(0, j - 3), j + 4);
@@ -131,10 +159,15 @@ export function factsFromUrl(url: string, name: NameParts): Partial<SearchFacts>
   // "/nc/wake/gene-beachak~206_977665" — two-letter state then county.
   const segs = path.split('/').filter(Boolean);
   for (let i = 0; i < segs.length - 1; i++) {
+    // Two-letter CODE only. A spelled-out state introduces a name slug instead
+    // ("bustednewspaper.com/virginia/remmark-jeffery-colin/"), and treating that
+    // slug as a county produced counties like "Remmark Jeffery Colin".
+    if (!/^[a-z]{2}$/i.test(segs[i])) continue;
     const code = stateCode(segs[i]);
-    if (code && /^[a-z][a-z-]+$/i.test(segs[i + 1])) {
+    const next = segs[i + 1];
+    if (code && /^[a-z][a-z-]*$/i.test(next) && !NOT_A_COUNTY.has(next.toLowerCase())) {
       states.push(code);
-      counties.push(titleCase(segs[i + 1].replace(/-/g, ' ')));
+      counties.push(titleCase(next.replace(/-/g, ' ')));
     }
   }
   // "northcarolina.arrests.org/Wake/2026/April/22/" — state as subdomain.
@@ -142,28 +175,89 @@ export function factsFromUrl(url: string, name: NameParts): Partial<SearchFacts>
   const subState = stateCode(sub);
   if (subState) {
     states.push(subState);
-    if (segs[0] && /^[A-Za-z][A-Za-z-]+$/.test(segs[0])) counties.push(titleCase(segs[0]));
+    if (
+      segs[0] &&
+      /^[A-Za-z][A-Za-z-]+$/.test(segs[0]) &&
+      !NOT_A_COUNTY.has(segs[0].toLowerCase())
+    ) {
+      counties.push(titleCase(segs[0]));
+    }
   }
   // "wakenc.mugshots.zone" — county and state fused into one subdomain label.
-  const fused = /^([a-z]{3,})([a-z]{2})$/.exec(sub);
+  // Only split a label that is not itself a state name: "virginia" would
+  // otherwise decompose into county "Virgin" + state "IA".
+  const fused = subState ? null : /^([a-z]{3,})([a-z]{2})$/.exec(sub);
   if (fused && stateCode(fused[2])) {
     states.push(stateCode(fused[2])!);
     counties.push(titleCase(fused[1]));
   }
 
-  if (states.length) facts.state = states;
-  if (counties.length) facts.county = counties;
+  // bustednewspaper records are "/virginia/remmark-jeffery-colin/...", and
+  // Facebook slugs end "...-arlington-county-virginia-arrest" — the state is
+  // spelled out rather than abbreviated.
+  for (const token of path.split(/[^A-Za-z]+/)) {
+    if (token.length < 4) continue;
+    const code = stateCode(token);
+    if (code) states.push(code);
+  }
+  // arre.st and recentlybooked put the code in a leading segment: "/FL-1160764/"
+  const lead = /^\/([A-Za-z]{2})[-/]/.exec(parsed.pathname);
+  if (lead) {
+    const code = stateCode(lead[1]);
+    if (code) states.push(code);
+  }
+
+  // Several rules can spot the same state or county in one URL (a subdomain and
+  // a path segment often agree), so collapse before returning.
+  const uniq = (values: string[]) => [...new Set(values)];
+  if (states.length) facts.state = uniq(states);
+  if (counties.length) facts.county = uniq(counties);
 
   const ids: string[] = [];
   for (const m of parsed.search.matchAll(/[?&]id=([\w-]{2,24})/gi)) ids.push(m[1]);
+  // recentlybooked: "/fl/sarasota/milen-santiano~56_202400009823"
   for (const m of path.matchAll(/~([\w-]{2,24})/g)) ids.push(m[1]);
-  if (ids.length) facts.record_ids = ids;
+  // arrests.org: "/Arrests/Jeffery_Remmark_65771891/" — trailing numeric id.
+  // Skipped when a "~" id was already found, or it would also chop
+  // recentlybooked's "~206_977665" down to a second, partial id.
+  if (!path.includes('~')) {
+    for (const m of path.matchAll(/_(\d{6,12})\/?$/g)) ids.push(m[1]);
+  }
+  // arre.st short links: "/FL-116076423/"
+  for (const m of path.matchAll(/^\/([A-Z]{2})-(\d{6,12})\/?$/g)) ids.push(m[2]);
+  if (ids.length) facts.record_ids = uniq(ids);
 
   const dates = findDates(path);
   if (dates.length) facts.booking_dates = dates;
 
-  const middles = findMiddleNames(path.replace(/[-_]/g, ' '), name);
+  // Scoped to the one path segment that contains both the first and last name —
+  // the name slug. Run across the whole path it also swallowed neighbouring
+  // segments ("/VA/Arlington/JEFFERY-REMMARK~…" yielded middle names "Va" and
+  // "Arlington"), because URL paths are full of tokens that sit as close to the
+  // name as a real middle name does.
+  const middles: string[] = [];
+  if (name.first && name.last) {
+    for (const seg of segs) {
+      const words = seg.replace(/[-_.~]/g, ' ');
+      const lower = words.toLowerCase();
+      if (!lower.includes(name.first.toLowerCase())) continue;
+      if (!lower.includes(name.last.toLowerCase())) continue;
+      for (const m of findMiddleNames(words, name)) {
+        if (!middles.includes(m)) middles.push(m);
+      }
+    }
+  }
   if (middles.length) facts.middle = middles;
+
+  // Social URLs carry their facts in the handle and the post slug rather than a
+  // tidy path — "web.facebook.com/BustedNewspaperArlingtonCountyVA/posts/
+  // remmark-jeffery-colin-mugshot-2025-09-28-225000-arlington-county-virginia-arrest".
+  // Instagram is the exception: /p/{shortcode}/ says nothing, so those rely on
+  // the SERP title and snippet instead.
+  const slugCounties = findCounties(`${host} ${path}`);
+  if (slugCounties.length) {
+    facts.county = [...(facts.county ?? []), ...slugCounties];
+  }
 
   return facts;
 }

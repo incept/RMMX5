@@ -402,6 +402,33 @@ export async function captureUnruledSerpCandidates(
       matched_facts: { ...scored.matched, kind: v.kind },
     });
     if (!error) stored += 1;
+
+    // Social and news URLs are dense with facts even when the page is closed to
+    // us: a Busted Newspaper Facebook post is
+    //   /BustedNewspaperArlingtonCountyVA/posts/remmark-jeffery-colin-mugshot-
+    //   2025-09-28-225000-arlington-county-virginia-arrest/
+    // which gives the middle name, county, state, and booking date at once.
+    // Feeding those back means a social hit can unlock the county-scoped probes.
+    facts = mergeFacts(
+      facts,
+      mergeFacts(
+        mergeFacts({ ...EMPTY_FACTS }, factsFromUrl(r.link, name)),
+        factsFromText(`${r.title} ${r.snippet}`, name)
+      )
+    );
+  }
+
+  const merged = normalizeFacts(facts);
+  const { error: factError } = await supabase
+    .from('contacts')
+    .update({ search_facts: merged })
+    .eq('id', contactId);
+  if (factError) {
+    await logDebug({
+      source: 'deep-search:facts',
+      message: `Could not persist facts learned from SERP results: ${factError.message}`,
+      contactId,
+    });
   }
   return stored;
 }

@@ -193,3 +193,90 @@ test('dateWindow falls back to a wide range when no date is known', () => {
   assert.equal(w.to, '2026-07-25');
   assert.equal(w.from, '2021-07-25');
 });
+
+/* ── Shapes taken verbatim from 1,049 historical client links ───────────── */
+
+const REMMARK = splitName('Jeffery Remmark');
+
+test('mugshots.zone county subdomain and LAST-FIRST-MIDDLE slug', () => {
+  const f = factsFromUrl(
+    'https://arlingtonva.mugshots.zone/remmark-jeffery-colin-mugshot-09-28-2025/',
+    REMMARK
+  );
+  assert.deepEqual(f.middle, ['Colin']);
+  assert.deepEqual(f.county, ['Arlington']);
+  assert.deepEqual(f.state, ['VA']);
+  assert.deepEqual(f.booking_dates, ['2025-09-28']);
+});
+
+test('bustednewspaper record: spelled-out state, name slug, compact stamp', () => {
+  const f = factsFromUrl(
+    'https://bustednewspaper.com/virginia/remmark-jeffery-colin/20250928-225000/',
+    REMMARK
+  );
+  assert.deepEqual(f.state, ['VA']);
+  assert.deepEqual(f.middle, ['Colin']);
+  // A spelled-out state introduces a NAME slug, not a county. Reading it as one
+  // produced counties like "Remmark Jeffery Colin".
+  assert.equal(f.county, undefined);
+});
+
+test('a Busted Newspaper Facebook post yields middle, county, state and date', () => {
+  // 8% of historical links are Facebook, and the post slug carries everything.
+  const f = factsFromUrl(
+    'https://web.facebook.com/BustedNewspaperArlingtonCountyVA/posts/remmark-jeffery-colin-mugshot-2025-09-28-225000-arlington-county-virginia-arrest/811046071683169/',
+    REMMARK
+  );
+  assert.deepEqual(f.middle, ['Colin']);
+  assert.deepEqual(f.county, ['Arlington']);
+  assert.deepEqual(f.state, ['VA']);
+  assert.deepEqual(f.booking_dates, ['2025-09-28']);
+});
+
+test('arrests.org record yields the state but invents no county', () => {
+  // "/Arrests/…" sits where a county segment would; reading it as a county gave
+  // a wrong county on 197 historical links.
+  const f = factsFromUrl('https://virginia.arrests.org/Arrests/Jeffery_Remmark_65771891/', REMMARK);
+  assert.deepEqual(f.state, ['VA']);
+  assert.equal(f.county, undefined);
+  assert.deepEqual(f.record_ids, ['65771891']);
+});
+
+test('a state name is never split into a county plus a state code', () => {
+  // "virginia" decomposed into county "Virgin" + state "IA" before this guard.
+  const f = factsFromUrl('https://virginia.arrests.org/Arrests/x_y_1234567/', REMMARK);
+  assert.deepEqual(f.state, ['VA']);
+  assert.ok(!(f.county ?? []).includes('Virgin'));
+});
+
+test('recentlybooked record yields state, county and id but no stray middle name', () => {
+  const f = factsFromUrl(
+    'https://recentlybooked.com/VA/Arlington/JEFFERY-REMMARK~2831_2025-00004672',
+    REMMARK
+  );
+  // One state, not one per detection rule that spotted it.
+  assert.deepEqual(f.state, ['VA']);
+  assert.deepEqual(f.county, ['Arlington']);
+  assert.ok(f.record_ids.includes('2831_2025-00004672'));
+  // Neighbouring path segments are not middle names.
+  assert.equal(f.middle, undefined);
+});
+
+test('arre.st short links yield the state and record id', () => {
+  const f = factsFromUrl('https://arre.st/FL-116076423/', REMMARK);
+  assert.deepEqual(f.state, ['FL']);
+  assert.deepEqual(f.record_ids, ['116076423']);
+});
+
+test('counties are read from slugs and camel-cased social handles', () => {
+  assert.deepEqual(findCounties('x-arlington-county-virginia-arrest'), ['Arlington']);
+  assert.deepEqual(findCounties('mugshots.orlando.orange.county.jail.arrests'), ['Orange']);
+  assert.deepEqual(findCounties('GordonCountyCrime'), ['Gordon']);
+  // Site furniture in a county-shaped position is not a county.
+  assert.deepEqual(findCounties('/Arrests/Jeffery_Remmark_65771891/'), []);
+});
+
+test('compact yyyymmdd stamps parse, and long ids do not', () => {
+  assert.deepEqual(findDates('/20250928-225000/'), ['2025-09-28']);
+  assert.deepEqual(findDates('id=811046071683169'), []);
+});
