@@ -295,6 +295,40 @@ export interface LlmRow {
   record_id?: string;
 }
 
+/**
+ * Coerces one row of model output into the shape LlmRow promises.
+ *
+ * The interface is a request, not a guarantee: asked for `charges` as an array,
+ * the model sometimes answers with a single string ("DUI, no license"), and a
+ * consumer calling .join() on it threw and aborted the whole probe run. Every
+ * field is normalised once, here, so no downstream caller has to re-check —
+ * which is what "treat model output as untrusted data" has to mean in practice.
+ */
+export function normalizeLlmRow(raw: any): LlmRow {
+  const str = (v: any): string | undefined => {
+    if (v == null || typeof v === 'object') return undefined;
+    const s = String(v).trim();
+    return s ? s.slice(0, 200) : undefined;
+  };
+  const charges: string[] = Array.isArray(raw?.charges)
+    ? raw.charges.flatMap((c: any) => (typeof c === 'object' ? [] : [String(c)]))
+    : typeof raw?.charges === 'string'
+      ? // a single string may still hold several charges
+        raw.charges.split(/[,;|]/)
+      : [];
+
+  return {
+    url: str(raw?.url),
+    name: str(raw?.name),
+    middle: str(raw?.middle),
+    county: str(raw?.county),
+    state: str(raw?.state),
+    booking_date: str(raw?.booking_date),
+    record_id: str(raw?.record_id),
+    charges: charges.map((c) => c.trim().slice(0, 120)).filter(Boolean).slice(0, 12),
+  };
+}
+
 /** Folds LLM rows into the fact set, normalising and capping as it goes. */
 export function factsFromLlmRows(rows: LlmRow[]): SearchFacts {
   let facts = { ...EMPTY_FACTS };

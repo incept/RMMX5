@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
@@ -18,6 +19,7 @@ import {
   findCounties,
   findDates,
   findMiddleNames,
+  normalizeLlmRow,
 } from '../lib/deep-search/extract.ts';
 
 // Every fixture below is a real URL or title from the Gene Beachak lead, so
@@ -279,4 +281,69 @@ test('counties are read from slugs and camel-cased social handles', () => {
 test('compact yyyymmdd stamps parse, and long ids do not', () => {
   assert.deepEqual(findDates('/20250928-225000/'), ['2025-09-28']);
   assert.deepEqual(findDates('id=811046071683169'), []);
+});
+
+test('unlocker page fetches are metered so probe spend is visible', async () => {
+  // Probes only cost money when they fall back to the unlocker; leaving that
+  // unmetered would hide the entire cost of deep search.
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  assert.match(source, /reserveUsage\(\{[\s\S]*?operation: 'unlocker'/);
+  // Reserved BEFORE the request, so the monthly cap can actually stop one.
+  assert.ok(
+    source.indexOf('reserveUsage') < source.indexOf('api.brightdata.com/request'),
+    'usage must be reserved before the billed request is sent'
+  );
+  // Both outcomes close the event out; a failed unlocker call is still billed.
+  assert.match(source, /finishUsage\([^)]*'failed'/);
+  assert.match(source, /finishUsage\([^)]*'succeeded'\)/);
+});
+
+test('per-call costs are validated, not silently coerced to zero', async () => {
+  const source = await readFile(
+    new URL('../app/api/admin/settings/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(source, /serp_cost/);
+  assert.match(source, /unlocker_cost/);
+  // Number.isFinite rejects "abc" instead of storing NaN, which would report a
+  // month of real spend as $0.00.
+  assert.match(source, /Number\.isFinite\(cost\)/);
+});
+
+test('model rows are coerced to the promised shape', () => {
+  // The live failure: asked for charges as an array, Haiku returned one string,
+  // and a .join() on it threw and aborted an entire probe run.
+  assert.deepEqual(normalizeLlmRow({ charges: 'DUI, no license' }).charges, [
+    'DUI',
+    'no license',
+  ]);
+  assert.deepEqual(normalizeLlmRow({ charges: ['Assault', 'Theft'] }).charges, [
+    'Assault',
+    'Theft',
+  ]);
+  // Absent, null, numeric, and object shapes all normalise instead of throwing.
+  assert.deepEqual(normalizeLlmRow({}).charges, []);
+  assert.deepEqual(normalizeLlmRow({ charges: null }).charges, []);
+  assert.deepEqual(normalizeLlmRow({ charges: [{ x: 1 }] }).charges, []);
+  assert.deepEqual(normalizeLlmRow({ charges: 42 }).charges, []);
+});
+
+test('model row scalars are trimmed strings, never objects', () => {
+  const row = normalizeLlmRow({
+    url: '  https://example.com/x  ',
+    county: 'Wake',
+    state: { nested: 'nope' },
+    record_id: 140252,
+  });
+  assert.equal(row.url, 'https://example.com/x');
+  assert.equal(row.county, 'Wake');
+  assert.equal(row.state, undefined, 'an object must not leak through as a string');
+  assert.equal(row.record_id, '140252');
+});
+
+test('a single unreadable probe page cannot abort the whole run', async () => {
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  // rowsFromPage is wrapped, so one bad page skips instead of discarding every
+  // candidate the earlier probes already found.
+  assert.match(source, /try \{[\s\S]{0,400}rowsFromPage\([\s\S]{0,400}\} catch/);
 });
