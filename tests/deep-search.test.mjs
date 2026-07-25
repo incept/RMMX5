@@ -347,3 +347,35 @@ test('a single unreadable probe page cannot abort the whole run', async () => {
   // candidate the earlier probes already found.
   assert.match(source, /try \{[\s\S]{0,400}rowsFromPage\([\s\S]{0,400}\} catch/);
 });
+
+test('a blocked site is reached through a site:-restricted SERP query', async () => {
+  // arrests.org is 20.5% of historical links and answers a datacentre IP with a
+  // Cloudflare challenge. Google has already crawled it, so the records stay
+  // reachable without touching the host.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /site:\$\{domain\}/);
+  // Bounded, because each fallback costs a SERP request.
+  assert.match(source, /MAX_SERP_FALLBACKS/);
+  // Corroboration still applies: a site: query returns near misses too.
+  assert.match(source, /scored\.confidence < MIN_CONFIDENCE/);
+});
+
+test('record ids pivot to sibling sites in the same network', async () => {
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /record_url_template/);
+  // A derived URL is a lead, not a finding: nobody has loaded the page yet, so
+  // it must score below a fetched hit.
+  assert.match(source, /confidence: 0\.7/);
+});
+
+test('the migration wires arrests.org and the Wake network for fallback and pivots', async () => {
+  const sql = await readFile(
+    new URL('../supabase/migrations/0013_serp_fallback_and_record_pivots.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(sql, /serp_fallback/);
+  assert.match(sql, /'arrests\.org'/);
+  // The confirmed shared id from the client's own example.
+  assert.match(sql, /wakencbusts\.com\/view-full-profile\.php\?id=\{record_id\}/);
+  assert.match(sql, /wakepublicrecords\.com\/sample\.php\?id=\{record_id\}/);
+});

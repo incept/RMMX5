@@ -95,12 +95,25 @@ export async function fetchProbePage(url: string): Promise<FetchOutcome> {
       body: JSON.stringify({ zone: cfg.unlocker_zone, url, format: 'raw' }),
     });
     const body = await res.text();
+
+    // BrightData reports zone and target problems in x-brd-* headers, and a
+    // wrong zone TYPE comes back as a 200 with an empty body — which read as an
+    // unexplained "unlocker HTTP 200" until these were surfaced.
+    const brdError = [res.headers.get('x-brd-err-code'), res.headers.get('x-brd-err-msg')]
+      .filter(Boolean)
+      .join(' ');
+
     if (!res.ok || !body.trim()) {
-      await finishUsage(usage.id, 'failed', `HTTP ${res.status} ${body.slice(0, 160)}`);
+      const detail =
+        brdError ||
+        (body.trim()
+          ? body.slice(0, 160)
+          : `empty body — confirm "${cfg.unlocker_zone}" is a WEB UNLOCKER zone (a SERP or plain proxy zone returns nothing here) and is active`);
+      await finishUsage(usage.id, 'failed', `HTTP ${res.status} ${detail}`);
       return {
         ok: false,
         blocked: true,
-        reason: `${directNote}; unlocker HTTP ${res.status} ${body.slice(0, 160)}`,
+        reason: `${directNote}; unlocker HTTP ${res.status}: ${detail}`,
       };
     }
     await finishUsage(usage.id, 'succeeded');

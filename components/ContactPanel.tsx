@@ -224,6 +224,10 @@ export default function ContactPanel({
         `Probed ${data.probed} site search page(s)` +
           `${data.blocked ? ` (${data.blocked} unreadable — see Debug Log)` : ''}.
 ` +
+          `${data.serpFallbacks ? `${data.serpFallbacks} blocked site(s) searched via Google instead.
+` : ''}` +
+          `${data.pivots ? `${data.pivots} sibling record(s) derived from shared record ids.
+` : ''}` +
           `${data.candidates} new candidate(s) to review.` +
           (learned ? `
 Learned: ${learned}` : '')
