@@ -3,19 +3,29 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
+import { useMyRole } from '@/lib/use-my-role';
 
-/** Overview: reputation health, pipeline breakdown, revenue, recent activity. */
+/**
+ * Overview: reputation health, pipeline breakdown, recent activity — plus
+ * revenue and Stripe figures for admins only (/api/revenue enforces the same
+ * rule server-side, so a worker's browser never receives them).
+ */
 export default function DashboardPage() {
   const supabase = useMemo(() => createClient(), []);
+  const { isAdmin } = useMyRole();
   const [contacts, setContacts] = useState<any[]>([]);
   const [statuses, setStatuses] = useState<any[]>([]);
   const [activity, setActivity] = useState<any[]>([]);
   const [revenue, setRevenue] = useState<any>(null);
 
   useEffect(() => {
+    // revenue_projection is only requested for admins, so it isn't in a
+    // worker's response payload at all.
+    const contactCols =
+      'id, name, status_id, reputation_score, link_score, client_since, contact_links ( status, url )';
     supabase
       .from('contacts')
-      .select('id, name, status_id, reputation_score, link_score, revenue_projection, client_since, contact_links ( status, url )')
+      .select(isAdmin ? `${contactCols}, revenue_projection` : contactCols)
       .limit(2000)
       .then(({ data }) => setContacts(data ?? []));
     supabase
@@ -29,11 +39,13 @@ export default function DashboardPage() {
       .order('created_at', { ascending: false })
       .limit(12)
       .then(({ data }) => setActivity(data ?? []));
-    fetch('/api/revenue')
-      .then((r) => (r.ok ? r.json() : null))
-      .then(setRevenue)
-      .catch(() => {});
-  }, [supabase]);
+    if (isAdmin) {
+      fetch('/api/revenue')
+        .then((r) => (r.ok ? r.json() : null))
+        .then(setRevenue)
+        .catch(() => {});
+    }
+  }, [supabase, isAdmin]);
 
   const scored = contacts.filter((c) => c.reputation_score != null);
   const avgReputation = scored.length
@@ -51,17 +63,19 @@ export default function DashboardPage() {
   }));
   const maxCount = Math.max(1, ...byStatus.map((s) => s.count));
 
-  const stats = [
+  const stats: { label: string; value: any; accent?: boolean }[] = [
     { label: 'Contacts', value: contacts.length },
     { label: 'Avg Reputation Score', value: avgReputation ?? '—', accent: true },
     { label: 'Clients', value: clientCount },
     { label: 'Live links', value: liveLinks },
     { label: 'Links removed', value: removedLinks },
-    {
+  ];
+  if (isAdmin) {
+    stats.push({
       label: 'Projected revenue',
       value: revenue ? `$${Number(revenue.projectionTotal).toLocaleString()}` : '—',
-    },
-  ];
+    });
+  }
 
   return (
     <div className="p-6">
@@ -89,7 +103,7 @@ export default function DashboardPage() {
         ))}
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className={`grid gap-4 ${isAdmin ? 'lg:grid-cols-2' : ''}`}>
         {/* Pipeline by status */}
         <div className="card anim-rise-in" style={{ animationDelay: '240ms' }}>
           <div className="mb-3 flex items-center justify-between">
@@ -126,7 +140,8 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Revenue */}
+        {/* Revenue — admin only */}
+        {isAdmin && (
         <div className="card anim-rise-in" style={{ animationDelay: '280ms' }}>
           <h2 className="mb-3 text-[10px] font-medium uppercase tracking-widest text-gray-400">
             Revenue
@@ -173,6 +188,7 @@ export default function DashboardPage() {
             </div>
           )}
         </div>
+        )}
       </div>
 
       {/* Activity */}

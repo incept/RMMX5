@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import StatusPill, { type StatusOption } from '@/components/StatusPill';
 import ContactPanel from '@/components/ContactPanel';
+import { useMyRole } from '@/lib/use-my-role';
 
 interface ContactRow {
   id: string;
@@ -31,7 +32,6 @@ interface Profile {
 
 type SortKey = 'name' | 'created_at' | 'reputation_score' | 'link_score' | 'status';
 type ViewId = 'all' | 'mine' | 'clients' | 'flagged' | 'recent';
-type DetailMode = 'panel' | 'modal' | 'page';
 
 interface NewContactDraft {
   name: string;
@@ -62,13 +62,12 @@ const DEFAULT_COLS: Record<ColKey, boolean> = {
 
 const PAGE_SIZE = 50;
 const COLS_LS = 'rmmx5-contact-cols';
-const MODE_LS = 'rmmx5-detail-mode';
 
 /**
  * The main CRM view, relaid out after the iCRM design study: saved views with
- * counts, status dot-filters, a column picker, inline email editing, bulk
- * actions on a floating bar, and a Panel / Modal / Page detail switcher —
- * all on the app's existing light/dark token palette.
+ * counts, status dot-filters, a column picker, inline email editing, and bulk
+ * actions on a floating bar — all on the app's existing light/dark token
+ * palette. Selecting a contact opens the slide-over detail panel.
  */
 export default function ContactsPage() {
   const supabase = useMemo(() => createClient(), []);
@@ -89,20 +88,18 @@ export default function ContactsPage() {
   const [emailDraft, setEmailDraft] = useState('');
   const [toast, setToast] = useState('');
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [detailMode, setDetailMode] = useState<DetailMode>('panel');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [newContact, setNewContact] = useState<NewContactDraft | null>(null);
   const [creating, setCreating] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const { isAdmin } = useMyRole();
 
   /* ── persisted prefs ── */
   useEffect(() => {
     try {
       const c = localStorage.getItem(COLS_LS);
       if (c) setCols({ ...DEFAULT_COLS, ...JSON.parse(c) });
-      const m = localStorage.getItem(MODE_LS) as DetailMode | null;
-      if (m === 'panel' || m === 'modal' || m === 'page') setDetailMode(m);
     } catch {
       /* corrupted prefs — defaults are fine */
     }
@@ -114,11 +111,6 @@ export default function ContactsPage() {
       return next;
     });
   }
-  function pickMode(m: DetailMode) {
-    setDetailMode(m);
-    localStorage.setItem(MODE_LS, m);
-  }
-
   function flash(msg: string) {
     setToast(msg);
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -281,6 +273,40 @@ export default function ContactsPage() {
     await load();
   }
 
+  /**
+   * Deletes every selected contact. Irreversible and cascading (links,
+   * activity, files, calls go with the row), so it asks first and spells out
+   * the count. Admin-only — the API rejects non-admins anyway, so the button
+   * is hidden rather than left to fail.
+   */
+  async function bulkDelete() {
+    if (bulkBusy) return;
+    const ids = [...selected];
+    const label = `${ids.length} contact${ids.length === 1 ? '' : 's'}`;
+    if (
+      !confirm(
+        `Delete ${label}?\n\nThis cannot be undone. Their links, activity, files, and call records are deleted too.`
+      )
+    ) {
+      return;
+    }
+    setBulkBusy(true);
+    let ok = 0;
+    for (const id of ids) {
+      const res = await fetch(`/api/contacts/${id}`, { method: 'DELETE' });
+      if (res.ok) ok += 1;
+    }
+    setBulkBusy(false);
+    setSelected(new Set());
+    if (selectedId && ids.includes(selectedId)) setSelectedId(null); // panel would 404
+    flash(
+      ok === ids.length
+        ? `Deleted ${label}`
+        : `Deleted ${ok} of ${ids.length} — the rest failed (admins only)`
+    );
+    await load();
+  }
+
   /* ── inline email edit ── */
   function startEmailEdit(c: ContactRow) {
     setEditEmailId(c.id);
@@ -367,7 +393,6 @@ export default function ContactsPage() {
     </div>
   );
 
-  const showPageDetail = !!selectedId && detailMode === 'page';
   const skeletonWidths = [190, 150, 210, 170, 140, 200, 160, 180];
 
   return (
@@ -491,291 +516,252 @@ export default function ContactsPage() {
           </button>
         )}
         <div className="flex-1" />
-        <div className="flex items-center gap-3">
-          <span className="text-[11px] text-gray-400">
-            Sorted by {SORT_LABELS[sortKey]} {sortAsc ? '↑' : '↓'}
+        <span className="text-[11px] text-gray-400">
+          Sorted by {SORT_LABELS[sortKey]} {sortAsc ? '↑' : '↓'}
+        </span>
+      </div>
+
+      <div className="relative flex min-h-0 flex-1 flex-col border-t border-gray-200">
+        <div className="min-h-0 flex-1 overflow-auto">
+          <div className="min-w-[1080px]">
+            {/* mini header */}
+            <div className="sticky top-0 z-10 flex h-8 items-center border-b border-gray-200 bg-canvas px-6 text-[10px] font-medium uppercase tracking-widest text-gray-400">
+              <div className="w-8 flex-none">
+                <button
+                  className={`flex h-[13px] w-[13px] items-center justify-center rounded border text-[9px] leading-none transition hover:scale-110 ${
+                    allOn
+                      ? 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900'
+                      : 'border-gray-300 bg-transparent text-transparent'
+                  }`}
+                  onClick={toggleAll}
+                >
+                  ✓
+                </button>
+              </div>
+              <div className="min-w-[220px] flex-1">{th('Contact', 'name')}</div>
+              {cols.email && <div className="w-52 flex-none">Email</div>}
+              {cols.phone && <div className="w-32 flex-none">Phone</div>}
+              {cols.location && <div className="w-36 flex-none">Location</div>}
+              {cols.status && <div className="w-36 flex-none">{th('Status', 'status')}</div>}
+              {cols.rep && <div className="w-20 flex-none">{th('Rep', 'reputation_score')}</div>}
+              {cols.link && <div className="w-20 flex-none">{th('Links', 'link_score')}</div>}
+              {cols.links && <div className="w-16 flex-none">Live</div>}
+              {cols.owner && <div className="w-28 flex-none">Owner</div>}
+              {cols.created && <div className="w-24 flex-none">{th('Created', 'created_at')}</div>}
+            </div>
+
+            {/* rows */}
+            {!loading &&
+              pageRows.map((contact, i) => {
+                const isSel = selected.has(contact.id);
+                const liveLinks = contact.contact_links.filter(
+                  (l) => l.url && l.status === 'live'
+                ).length;
+                return (
+                  <div
+                    key={contact.id}
+                    className={`anim-row-in flex h-[34px] items-center border-b border-gray-100 px-6 transition-colors hover:bg-gray-50 ${
+                      isSel ? 'bg-gray-50' : ''
+                    }`}
+                    style={{ animationDelay: `${Math.min(i * 20, 320)}ms` }}
+                  >
+                    <div className="w-8 flex-none">
+                      <button
+                        className={`flex h-[13px] w-[13px] items-center justify-center rounded border text-[9px] leading-none transition hover:scale-110 ${
+                          isSel
+                            ? 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900'
+                            : 'border-gray-300 bg-transparent text-transparent'
+                        }`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleOne(contact.id);
+                        }}
+                      >
+                        ✓
+                      </button>
+                    </div>
+                    <div
+                      className="flex min-w-[220px] flex-1 cursor-pointer items-baseline gap-2.5 pr-3"
+                      onClick={() => setSelectedId(contact.id)}
+                    >
+                      {contact.search_flag && (
+                        <span className="cursor-help text-amber-500" title={`Search needs a re-run: ${contact.search_flag}`}>
+                          ⚑
+                        </span>
+                      )}
+                      <span className="whitespace-nowrap text-xs font-medium">{contact.name}</span>
+                      <span className="truncate text-[11px] font-light text-gray-400">
+                        {[contact.city, contact.state].filter(Boolean).join(', ')}
+                      </span>
+                    </div>
+                    {cols.email && (
+                      <div className="w-52 flex-none pr-3">
+                        {editEmailId === contact.id ? (
+                          <input
+                            autoFocus
+                            className="h-6 w-44 rounded-md border border-gray-300 bg-white px-2 text-xs outline-none focus:border-brand-500"
+                            value={emailDraft}
+                            onChange={(e) => setEmailDraft(e.target.value)}
+                            onBlur={() => commitEmailEdit(contact)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') commitEmailEdit(contact);
+                              if (e.key === 'Escape') setEditEmailId(null);
+                            }}
+                          />
+                        ) : (
+                          <span
+                            className="block cursor-text truncate text-xs font-light text-gray-500 hover:text-gray-900"
+                            title="Click to edit"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              startEmailEdit(contact);
+                            }}
+                          >
+                            {contact.email || <span className="text-gray-300">—</span>}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {cols.phone && (
+                      <div className="w-32 flex-none truncate text-xs font-light text-gray-500">
+                        {contact.phone}
+                      </div>
+                    )}
+                    {cols.location && (
+                      <div className="w-36 flex-none truncate text-xs font-light text-gray-500">
+                        {[contact.city, contact.state].filter(Boolean).join(', ')}
+                      </div>
+                    )}
+                    {cols.status && (
+                      <div className="w-36 flex-none" onClick={(e) => e.stopPropagation()}>
+                        <StatusPill
+                          status={contact.statuses}
+                          options={statuses}
+                          onChange={(statusId) => setStatus(contact.id, statusId)}
+                        />
+                      </div>
+                    )}
+                    {cols.rep && (
+                      <div className="w-20 flex-none text-xs tabular-nums">
+                        {contact.reputation_score != null && (
+                          <span
+                            className={`font-medium ${
+                              Number(contact.reputation_score) >= 70
+                                ? 'text-green-600'
+                                : Number(contact.reputation_score) >= 40
+                                  ? 'text-amber-600'
+                                  : 'text-red-600'
+                            }`}
+                          >
+                            {contact.reputation_score}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {cols.link && (
+                      <div className="w-20 flex-none text-xs tabular-nums text-gray-500">
+                        {contact.link_score}
+                      </div>
+                    )}
+                    {cols.links && (
+                      <div className="w-16 flex-none text-xs text-gray-500">{liveLinks || ''}</div>
+                    )}
+                    {cols.owner && (
+                      <div className="w-28 flex-none truncate text-xs font-light text-gray-500">
+                        {ownerName(contact.owner_id)}
+                      </div>
+                    )}
+                    {cols.created && (
+                      <div className="w-24 flex-none text-xs font-light text-gray-400">
+                        {new Date(contact.created_at).toLocaleDateString()}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+            {/* skeletons */}
+            {loading &&
+              skeletonWidths.map((w, i) => (
+                <div
+                  key={i}
+                  className="flex h-[34px] items-center gap-4 border-b border-gray-100 px-6"
+                >
+                  <span className="anim-shimmer h-[13px] w-[13px] flex-none rounded bg-gray-200" />
+                  <span className="anim-shimmer h-2 rounded bg-gray-200" style={{ width: w }} />
+                  <span className="anim-shimmer h-2 w-36 rounded bg-gray-100" />
+                  <span className="anim-shimmer h-2 w-20 rounded bg-gray-100" />
+                  <span className="anim-shimmer h-2 w-28 rounded bg-gray-100" />
+                </div>
+              ))}
+          </div>
+
+          {/* empty / no-results */}
+          {!loading && sorted.length === 0 && (
+            <div className="flex flex-col items-center justify-center gap-2.5 px-6 py-16 text-center">
+              {contacts.length === 0 && !filtersDirty ? (
+                <>
+                  <span className="text-sm">No contacts yet</span>
+                  <span className="max-w-xs text-xs font-light text-gray-400">
+                    Import a CSV from your old CRM, or add the first contact by hand.
+                  </span>
+                  <div className="mt-1 flex gap-2">
+                    <Link href="/import" className="btn">Import CSV</Link>
+                    <button className="btn btn-primary" onClick={openNewContact}>New contact</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <span className="text-sm">No contacts match</span>
+                  <span className="max-w-xs text-xs font-light text-gray-400">
+                    Remove a filter or search a different name.
+                  </span>
+                  <button
+                    className="btn mt-1 rounded-full text-xs"
+                    onClick={clearFilters}
+                  >
+                    Clear filters
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* footer */}
+        <div className="flex h-9 flex-none items-center justify-between border-t border-gray-200 px-6 text-[11px] font-light text-gray-400">
+          <span className="tabular-nums">
+            {sorted.length === 0
+              ? 'No contacts'
+              : `Showing ${safePage * PAGE_SIZE + 1}–${Math.min(
+                  (safePage + 1) * PAGE_SIZE,
+                  sorted.length
+                )} of ${sorted.length}`}
           </span>
-          <span className="h-3.5 w-px bg-gray-200" />
-          <span className="text-[11px] text-gray-400">Detail</span>
-          {(['panel', 'modal', 'page'] as DetailMode[]).map((m) => (
+          <div className="flex items-center gap-4">
             <button
-              key={m}
-              className={`text-[11px] capitalize ${
-                detailMode === m
-                  ? 'text-gray-900 shadow-[inset_0_-1px_0_currentColor]'
-                  : 'text-gray-400 hover:text-gray-900'
-              }`}
-              onClick={() => pickMode(m)}
+              className="text-gray-500 hover:text-gray-900 disabled:cursor-default disabled:text-gray-300"
+              disabled={safePage === 0}
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
             >
-              {m}
+              Prev
             </button>
-          ))}
+            <span className="tabular-nums">
+              {safePage + 1} / {pageCount}
+            </span>
+            <button
+              className="text-gray-500 hover:text-gray-900 disabled:cursor-default disabled:text-gray-300"
+              disabled={safePage >= pageCount - 1}
+              onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+            >
+              Next
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* ── Page-mode detail replaces the grid ── */}
-      {showPageDetail ? (
-        <div className="min-h-0 flex-1 overflow-auto border-t border-gray-200 px-6 py-4">
-          <div className="mx-auto flex h-full max-w-5xl flex-col gap-3">
-            <button
-              className="self-start text-xs text-gray-500 hover:text-gray-900"
-              onClick={() => setSelectedId(null)}
-            >
-              ← All contacts
-            </button>
-            <div className="min-h-0 flex-1">
-              <ContactPanel
-                contactId={selectedId!}
-                mode="page"
-                onClose={() => setSelectedId(null)}
-                onChanged={load}
-              />
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="relative flex min-h-0 flex-1 flex-col border-t border-gray-200">
-          <div className="min-h-0 flex-1 overflow-auto">
-            <div className="min-w-[1080px]">
-              {/* mini header */}
-              <div className="sticky top-0 z-10 flex h-8 items-center border-b border-gray-200 bg-canvas px-6 text-[10px] font-medium uppercase tracking-widest text-gray-400">
-                <div className="w-8 flex-none">
-                  <button
-                    className={`flex h-[13px] w-[13px] items-center justify-center rounded border text-[9px] leading-none transition hover:scale-110 ${
-                      allOn
-                        ? 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900'
-                        : 'border-gray-300 bg-transparent text-transparent'
-                    }`}
-                    onClick={toggleAll}
-                  >
-                    ✓
-                  </button>
-                </div>
-                <div className="min-w-[220px] flex-1">{th('Contact', 'name')}</div>
-                {cols.email && <div className="w-52 flex-none">Email</div>}
-                {cols.phone && <div className="w-32 flex-none">Phone</div>}
-                {cols.location && <div className="w-36 flex-none">Location</div>}
-                {cols.status && <div className="w-36 flex-none">{th('Status', 'status')}</div>}
-                {cols.rep && <div className="w-20 flex-none">{th('Rep', 'reputation_score')}</div>}
-                {cols.link && <div className="w-20 flex-none">{th('Links', 'link_score')}</div>}
-                {cols.links && <div className="w-16 flex-none">Live</div>}
-                {cols.owner && <div className="w-28 flex-none">Owner</div>}
-                {cols.created && <div className="w-24 flex-none">{th('Created', 'created_at')}</div>}
-              </div>
-
-              {/* rows */}
-              {!loading &&
-                pageRows.map((contact, i) => {
-                  const isSel = selected.has(contact.id);
-                  const liveLinks = contact.contact_links.filter(
-                    (l) => l.url && l.status === 'live'
-                  ).length;
-                  return (
-                    <div
-                      key={contact.id}
-                      className={`anim-row-in flex h-[34px] items-center border-b border-gray-100 px-6 transition-colors hover:bg-gray-50 ${
-                        isSel ? 'bg-gray-50' : ''
-                      }`}
-                      style={{ animationDelay: `${Math.min(i * 20, 320)}ms` }}
-                    >
-                      <div className="w-8 flex-none">
-                        <button
-                          className={`flex h-[13px] w-[13px] items-center justify-center rounded border text-[9px] leading-none transition hover:scale-110 ${
-                            isSel
-                              ? 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900'
-                              : 'border-gray-300 bg-transparent text-transparent'
-                          }`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleOne(contact.id);
-                          }}
-                        >
-                          ✓
-                        </button>
-                      </div>
-                      <div
-                        className="flex min-w-[220px] flex-1 cursor-pointer items-baseline gap-2.5 pr-3"
-                        onClick={() => setSelectedId(contact.id)}
-                      >
-                        {contact.search_flag && (
-                          <span className="cursor-help text-amber-500" title={`Search needs a re-run: ${contact.search_flag}`}>
-                            ⚑
-                          </span>
-                        )}
-                        <span className="whitespace-nowrap text-xs font-medium">{contact.name}</span>
-                        <span className="truncate text-[11px] font-light text-gray-400">
-                          {[contact.city, contact.state].filter(Boolean).join(', ')}
-                        </span>
-                      </div>
-                      {cols.email && (
-                        <div className="w-52 flex-none pr-3">
-                          {editEmailId === contact.id ? (
-                            <input
-                              autoFocus
-                              className="h-6 w-44 rounded-md border border-gray-300 bg-white px-2 text-xs outline-none focus:border-brand-500"
-                              value={emailDraft}
-                              onChange={(e) => setEmailDraft(e.target.value)}
-                              onBlur={() => commitEmailEdit(contact)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') commitEmailEdit(contact);
-                                if (e.key === 'Escape') setEditEmailId(null);
-                              }}
-                            />
-                          ) : (
-                            <span
-                              className="block cursor-text truncate text-xs font-light text-gray-500 hover:text-gray-900"
-                              title="Click to edit"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                startEmailEdit(contact);
-                              }}
-                            >
-                              {contact.email || <span className="text-gray-300">—</span>}
-                            </span>
-                          )}
-                        </div>
-                      )}
-                      {cols.phone && (
-                        <div className="w-32 flex-none truncate text-xs font-light text-gray-500">
-                          {contact.phone}
-                        </div>
-                      )}
-                      {cols.location && (
-                        <div className="w-36 flex-none truncate text-xs font-light text-gray-500">
-                          {[contact.city, contact.state].filter(Boolean).join(', ')}
-                        </div>
-                      )}
-                      {cols.status && (
-                        <div className="w-36 flex-none" onClick={(e) => e.stopPropagation()}>
-                          <StatusPill
-                            status={contact.statuses}
-                            options={statuses}
-                            onChange={(statusId) => setStatus(contact.id, statusId)}
-                          />
-                        </div>
-                      )}
-                      {cols.rep && (
-                        <div className="w-20 flex-none text-xs tabular-nums">
-                          {contact.reputation_score != null && (
-                            <span
-                              className={`font-medium ${
-                                Number(contact.reputation_score) >= 70
-                                  ? 'text-green-600'
-                                  : Number(contact.reputation_score) >= 40
-                                    ? 'text-amber-600'
-                                    : 'text-red-600'
-                              }`}
-                            >
-                              {contact.reputation_score}
-                            </span>
-                          )}
-                        </div>
-                      )}
-                      {cols.link && (
-                        <div className="w-20 flex-none text-xs tabular-nums text-gray-500">
-                          {contact.link_score}
-                        </div>
-                      )}
-                      {cols.links && (
-                        <div className="w-16 flex-none text-xs text-gray-500">{liveLinks || ''}</div>
-                      )}
-                      {cols.owner && (
-                        <div className="w-28 flex-none truncate text-xs font-light text-gray-500">
-                          {ownerName(contact.owner_id)}
-                        </div>
-                      )}
-                      {cols.created && (
-                        <div className="w-24 flex-none text-xs font-light text-gray-400">
-                          {new Date(contact.created_at).toLocaleDateString()}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-
-              {/* skeletons */}
-              {loading &&
-                skeletonWidths.map((w, i) => (
-                  <div
-                    key={i}
-                    className="flex h-[34px] items-center gap-4 border-b border-gray-100 px-6"
-                  >
-                    <span className="anim-shimmer h-[13px] w-[13px] flex-none rounded bg-gray-200" />
-                    <span className="anim-shimmer h-2 rounded bg-gray-200" style={{ width: w }} />
-                    <span className="anim-shimmer h-2 w-36 rounded bg-gray-100" />
-                    <span className="anim-shimmer h-2 w-20 rounded bg-gray-100" />
-                    <span className="anim-shimmer h-2 w-28 rounded bg-gray-100" />
-                  </div>
-                ))}
-            </div>
-
-            {/* empty / no-results */}
-            {!loading && sorted.length === 0 && (
-              <div className="flex flex-col items-center justify-center gap-2.5 px-6 py-16 text-center">
-                {contacts.length === 0 && !filtersDirty ? (
-                  <>
-                    <span className="text-sm">No contacts yet</span>
-                    <span className="max-w-xs text-xs font-light text-gray-400">
-                      Import a CSV from your old CRM, or add the first contact by hand.
-                    </span>
-                    <div className="mt-1 flex gap-2">
-                      <Link href="/import" className="btn">Import CSV</Link>
-                      <button className="btn btn-primary" onClick={openNewContact}>New contact</button>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <span className="text-sm">No contacts match</span>
-                    <span className="max-w-xs text-xs font-light text-gray-400">
-                      Remove a filter or search a different name.
-                    </span>
-                    <button
-                      className="btn mt-1 rounded-full text-xs"
-                      onClick={clearFilters}
-                    >
-                      Clear filters
-                    </button>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* footer */}
-          <div className="flex h-9 flex-none items-center justify-between border-t border-gray-200 px-6 text-[11px] font-light text-gray-400">
-            <span className="tabular-nums">
-              {sorted.length === 0
-                ? 'No contacts'
-                : `Showing ${safePage * PAGE_SIZE + 1}–${Math.min(
-                    (safePage + 1) * PAGE_SIZE,
-                    sorted.length
-                  )} of ${sorted.length}`}
-            </span>
-            <div className="flex items-center gap-4">
-              <button
-                className="text-gray-500 hover:text-gray-900 disabled:cursor-default disabled:text-gray-300"
-                disabled={safePage === 0}
-                onClick={() => setPage((p) => Math.max(0, p - 1))}
-              >
-                Prev
-              </button>
-              <span className="tabular-nums">
-                {safePage + 1} / {pageCount}
-              </span>
-              <button
-                className="text-gray-500 hover:text-gray-900 disabled:cursor-default disabled:text-gray-300"
-                disabled={safePage >= pageCount - 1}
-                onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
-              >
-                Next
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* ── bulk actions bar ── */}
-      {selected.size > 0 && !showPageDetail && (
+      {selected.size > 0 && (
         <div className="anim-rise-in fixed bottom-5 left-1/2 z-30 flex h-11 -translate-x-1/2 items-center gap-4 rounded-full border border-gray-200 bg-white px-5 shadow-2xl">
           <span className="whitespace-nowrap text-xs font-semibold tabular-nums">
             {selected.size} selected
@@ -813,6 +799,18 @@ export default function ContactsPage() {
               ))}
             </select>
           </label>
+          {isAdmin && (
+            <>
+              <span className="h-3.5 w-px bg-gray-200" />
+              <button
+                className="text-xs font-medium text-red-600 hover:text-red-700 disabled:text-gray-300"
+                disabled={bulkBusy}
+                onClick={bulkDelete}
+              >
+                {bulkBusy ? 'Working…' : 'Delete'}
+              </button>
+            </>
+          )}
           <span className="h-3.5 w-px bg-gray-200" />
           <button
             className="text-xs text-gray-400 hover:text-gray-900"
@@ -916,11 +914,10 @@ export default function ContactsPage() {
         </div>
       )}
 
-      {/* ── panel / modal detail ── */}
-      {selectedId && detailMode !== 'page' && (
+      {/* ── slide-over detail ── */}
+      {selectedId && (
         <ContactPanel
           contactId={selectedId}
-          mode={detailMode}
           onClose={() => setSelectedId(null)}
           onChanged={load}
         />
