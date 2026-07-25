@@ -192,22 +192,6 @@ export default function ContactPanel({
     }
   }
 
-  async function runSearch() {
-    setBusy('search');
-    const res = await fetch(`/api/contacts/${contactId}/search`, { method: 'POST' });
-    const data = await res.json();
-    setBusy(null);
-    if (res.ok) {
-      alert(
-        `Search complete: ${data.total} results, ${data.relevant} relevant, ${data.inserted} link(s) added.`
-      );
-      await load();
-      onChanged();
-    } else {
-      alert(data.error ?? 'Search failed');
-    }
-  }
-
   async function runDeepSearch() {
     setBusy('deep');
     const res = await fetch(`/api/contacts/${contactId}/deep-search`, { method: 'POST' });
@@ -572,10 +556,11 @@ Learned: ${learned}` : '')
                 <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                   <span className="mr-1">⚑</span>
                   <span className="font-semibold">Search needs a re-run:</span>{' '}
-                  {contact.search_flag}. Fix the cause if needed (e.g. add a city/state
-                  or a commercial ip-api key), then press{' '}
-                  <span className="font-semibold">🔎 Run web search</span> below — a
-                  successful run clears this flag.
+                  {contact.search_flag}. Fix the cause if it has one (add a city/state, or a
+                  commercial ip-api key), then press{' '}
+                  <span className="font-semibold">🕵 Deep search</span> below. If the reason is
+                  that a page is not indexed yet, wait a few days and re-run — a successful run
+                  clears this flag.
                 </div>
               )}
               <div className="flex items-center gap-3">
@@ -655,7 +640,7 @@ Learned: ${learned}` : '')
                         href={/^https?:\/\//i.test(link.url.trim()) ? link.url.trim() : `https://${link.url.trim()}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="mt-0.5 ml-8 block break-all text-[11px] leading-snug text-brand-600 hover:underline"
+                        className="mt-0.5 ml-8 block break-all text-[11px] leading-snug text-brand-600 hover:underline dark:text-gray-900"
                         title="Open in a new tab to verify"
                       >
                         {link.url.trim()} ↗
@@ -672,9 +657,6 @@ Learned: ${learned}` : '')
                   {busy === 'links' ? 'Saving…' : 'Save links'}
                 </button>
                 {customFor('link').length > 0 && saveButton([])}
-                <button className="btn" disabled={busy === 'search'} onClick={runSearch}>
-                  {busy === 'search' ? 'Searching…' : '🔎 Run web search'}
-                </button>
                 <button
                   className="btn"
                   disabled={busy === 'deep'}
@@ -697,7 +679,7 @@ Learned: ${learned}` : '')
                 if (f.booking_dates?.length) bits.push(`Booked: ${f.booking_dates.join(' / ')}`);
                 if (f.record_ids?.length) bits.push(`Record IDs: ${f.record_ids.join(' / ')}`);
                 return bits.length ? (
-                  <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">
+                  <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:text-gray-900">
                     <span className="font-semibold">Facts found: </span>
                     {bits.join(' · ')}
                   </div>
@@ -709,7 +691,7 @@ Learned: ${learned}` : '')
                   logic auditable while it earns trust. */}
               {candidates.length > 0 && (
                 <div>
-                  <div className="mb-2 text-[10px] font-medium tracking-widest text-gray-400 uppercase">
+                  <div className="mb-2 text-[10px] font-medium tracking-widest text-gray-500 uppercase dark:text-gray-600">
                     Candidates found ({candidates.filter((c) => c.status === 'new').length} to review)
                   </div>
                   <div className="space-y-1.5">
@@ -740,11 +722,11 @@ Learned: ${learned}` : '')
                               href={c.url}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="block break-all text-[11px] leading-snug text-brand-600 hover:underline"
+                              className="block break-all text-[11px] leading-snug font-medium text-brand-600 hover:underline dark:text-gray-900"
                             >
                               {c.url} ↗
                             </a>
-                            <div className="mt-0.5 text-[10px] text-gray-400">
+                            <div className="mt-0.5 text-[10px] text-gray-500 dark:text-gray-600">
                               {c.source === 'probe' ? 'Probed' : c.source} {c.source_detail} · round{' '}
                               {c.round + 1}
                               {Object.keys(c.matched_facts ?? {}).length > 0 && (
