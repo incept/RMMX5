@@ -194,17 +194,26 @@ export default function ContactPanel({
 
   async function runDeepSearch() {
     setBusy('deep');
-    const res = await fetch(`/api/contacts/${contactId}/deep-search`, { method: 'POST' });
-    const data = await res.json();
-    setBusy(null);
-    if (res.ok) {
-      alert(
-        data.duplicate
-          ? 'Deep search is already queued.'
-          : 'Deep search queued. Results will appear after the next worker tick.'
-      );
-    } else {
-      alert(data.error ?? 'Deep search failed');
+    try {
+      const res = await fetch(`/api/contacts/${contactId}/deep-search`, { method: 'POST' });
+      // A 500 from an unhandled server error carries no JSON body, and parsing
+      // it threw BEFORE the spinner was cleared — so a request that failed
+      // outright looked like a button that span forever. Never let the shape of
+      // an error response decide whether the UI recovers.
+      const data = await res.json().catch(() => ({} as any));
+      if (res.ok) {
+        alert(
+          data.duplicate
+            ? 'Deep search is already queued.'
+            : 'Deep search queued. Results will appear after the next worker tick.'
+        );
+      } else {
+        alert(data.error ?? `Deep search failed (HTTP ${res.status})`);
+      }
+    } catch (e: any) {
+      alert(`Deep search could not be started: ${e?.message ?? 'network error'}`);
+    } finally {
+      setBusy(null);
     }
   }
 

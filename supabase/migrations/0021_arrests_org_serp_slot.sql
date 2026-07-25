@@ -1,3 +1,10 @@
+-- Renumbered from 0020, which collided with 0020_runtime_hardening.sql — the two
+-- were written in parallel and merged from different branches. Filename sort
+-- happened to apply them in a safe order, but a tool tracking migrations by
+-- numeric prefix could have skipped one, and a skipped migration is exactly what
+-- made deep search look like a hung button. Safe to re-run under the new name:
+-- the statement below is idempotent.
+
 -- Reclaim the SERP fallback slot arrests.org was holding.
 --
 -- 0019 left SERP discovery switched on for it as a second route while browser

@@ -35,7 +35,32 @@ export async function enqueueJob(
     .select('id')
     .single();
   if (error?.code === '23505') return { queued: false, duplicate: true };
-  if (error || !data) throw new Error(error?.message ?? 'Could not enqueue job');
+  if (error || !data) {
+    // Log before throwing. A rejected insert used to leave nothing behind: no
+    // row, no debug entry, and a 500 whose body the caller could not parse. A
+    // kind missing from job_queue_kind_check (23514) cost an afternoon looking
+    // like a hung button, when the database had said exactly what was wrong.
+    const constraintHint =
+      error?.code === '23514'
+        ? ` — "${kind}" is not permitted by job_queue_kind_check, which means a migration adding it has not been run against this database`
+        : '';
+    await logDebug({
+      level: 'error',
+      source: 'job-queue',
+      message: `Could not enqueue ${kind}: ${error?.message ?? 'insert returned no row'}${constraintHint}`,
+      context: {
+        kind,
+        dedupe_key: dedupeKey,
+        code: error?.code ?? null,
+        details: error?.details ?? null,
+        hint: error?.hint ?? null,
+      },
+      // Never let a logging failure replace the error we are reporting.
+    }).catch(() => {});
+    throw new Error(
+      `Could not enqueue ${kind} job: ${error?.message ?? 'insert returned no row'}${constraintHint}`
+    );
+  }
   return { queued: true, duplicate: false, id: data.id as string };
 }
 

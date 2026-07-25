@@ -748,3 +748,47 @@ test('empty link slots contribute nothing', async () => {
   assert.match(source, /if \(!slotUrl\) continue;/);
   assert.match(source, /mergeFacts\(pinned, normalizeFacts\(contact\.search_facts\)\)/);
 });
+
+test('a rejected enqueue is logged before it is thrown', async () => {
+  // The database rejected deep_search with 23514 (kind missing from
+  // job_queue_kind_check) and it left no row, no debug entry, and a 500 with an
+  // unparseable body. The clear error existed the whole time; three layers hid
+  // it. Only 23505 may be swallowed, and only as the duplicate case.
+  const source = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
+  const enqueue = source.slice(source.indexOf('export async function enqueueJob'));
+  const body = enqueue.slice(0, enqueue.indexOf('\n}'));
+  const logAt = body.indexOf('logDebug');
+  const throwAt = body.indexOf('throw new Error');
+  assert.ok(logAt > -1, 'a failed enqueue is logged');
+  assert.ok(logAt < throwAt, 'it is logged BEFORE throwing, so the trace survives');
+  // The constraint case names itself, because "violates check constraint" alone
+  // does not tell an operator that a migration is missing.
+  assert.match(body, /23514/);
+  assert.match(body, /job_queue_kind_check/);
+  // A logging failure must not replace the error being reported.
+  assert.match(body, /\}\)\.catch\(\(\) => \{\}\);/);
+});
+
+test('the deep search button always stops spinning', async () => {
+  // setBusy(null) sat after `await res.json()`, so a non-JSON error body threw
+  // first and the spinner never cleared: a failed request presented as a hang.
+  const source = await readFile(
+    new URL('../components/ContactPanel.tsx', import.meta.url),
+    'utf8'
+  );
+  const fn = source.slice(source.indexOf('async function runDeepSearch'));
+  const body = fn.slice(0, fn.indexOf('\n  }\n'));
+  assert.match(body, /finally \{\s*setBusy\(null\);/);
+  assert.match(body, /res\.json\(\)\.catch\(/, 'an unparseable error body is tolerated');
+  assert.match(body, /HTTP \$\{res\.status\}/, 'the status is shown when there is no message');
+});
+
+test('migration numbers are unique', async () => {
+  // Two 0020s shipped from parallel branches. A prefix-tracking tool can skip
+  // one, and the skipped one here was what disabled deep search entirely.
+  const { readdir } = await import('node:fs/promises');
+  const files = await readdir(new URL('../supabase/migrations/', import.meta.url));
+  const numbers = files.filter((f) => f.endsWith('.sql')).map((f) => f.slice(0, 4));
+  const dupes = numbers.filter((n, i) => numbers.indexOf(n) !== i);
+  assert.deepEqual(dupes, [], `duplicate migration prefixes: ${dupes.join(', ')}`);
+});
