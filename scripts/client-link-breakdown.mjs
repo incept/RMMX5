@@ -1,10 +1,27 @@
+/**
+ * Breaks a column of client links down by site, state, and county, so registry
+ * work can be aimed at where the business actually is.
+ *
+ *   node --experimental-strip-types scripts/client-link-breakdown.mjs <links.xlsx>
+ *
+ * Caveats worth remembering when reading the output: counts are per URL, and
+ * only URLs whose shape carries a county yield one, so the county table
+ * undercounts and the state table is the more reliable cut. Fused subdomains
+ * ("palmbeachfl") produce squashed county names, which matching tolerates.
+ */
+
 import XLSX from 'xlsx';
 import * as fs from 'node:fs';
 XLSX.set_fs(fs);
-import { factsFromUrl } from './lib/deep-search/extract.ts';
-import { stateCode } from './lib/deep-search/facts.ts';
+import { factsFromUrl } from '../lib/deep-search/extract.ts';
+import { stateCode } from '../lib/deep-search/facts.ts';
 
-const wb = XLSX.readFile(process.argv[2]);
+const file = process.argv[2];
+if (!file) {
+  console.error('usage: node --experimental-strip-types scripts/client-link-breakdown.mjs <links.xlsx>');
+  process.exit(1);
+}
+const wb = XLSX.readFile(file);
 const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, blankrows: false });
 const urls = rows.map(r => String(r[0]||'').trim()).filter(u => /^https?:/i.test(u));
 const NONAME = { first:'', last:'', middle:'' };
