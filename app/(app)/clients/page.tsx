@@ -3,10 +3,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import ContactPanel from '@/components/ContactPanel';
+import { useMyRole } from '@/lib/use-my-role';
 
 /** Clients view: stages, service countdown, revenue projection, quick panel access. */
 export default function ClientsPage() {
   const supabase = useMemo(() => createClient(), []);
+  const { isAdmin } = useMyRole(); // revenue figures are admin-only
   const [clients, setClients] = useState<any[]>([]);
   const [stages, setStages] = useState<any[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -18,11 +20,11 @@ export default function ClientsPage() {
       .eq('is_client_status', true);
     const ids = (clientStatuses ?? []).map((s) => s.id);
 
+    const cols =
+      'id, name, email, phone, stage_id, client_since, service_days, reputation_score, stages ( id, name, color )';
     let query = supabase
       .from('contacts')
-      .select(
-        'id, name, email, phone, stage_id, client_since, service_days, revenue_projection, reputation_score, stages ( id, name, color )'
-      )
+      .select(isAdmin ? `${cols}, revenue_projection` : cols)
       .order('client_since', { ascending: true });
     // Anyone with a client status OR an active service period counts as a client.
     if (ids.length) query = query.or(`status_id.in.(${ids.join(',')}),client_since.not.is.null`);
@@ -30,7 +32,7 @@ export default function ClientsPage() {
 
     const { data } = await query;
     setClients(data ?? []);
-  }, [supabase]);
+  }, [supabase, isAdmin]);
 
   useEffect(() => {
     load();
@@ -69,10 +71,15 @@ export default function ClientsPage() {
       <div className="mb-5 flex items-center justify-between">
         <h1 className="text-2xl font-light tracking-tight">Clients</h1>
         <div className="text-sm text-gray-500">
-          {clients.length} client{clients.length === 1 ? '' : 's'} · projected{' '}
-          <span className="font-mono font-semibold text-green-700">
-            ${totalProjection.toLocaleString()}
-          </span>
+          {clients.length} client{clients.length === 1 ? '' : 's'}
+          {isAdmin && (
+            <>
+              {' · projected '}
+              <span className="font-mono font-semibold text-green-700">
+                ${totalProjection.toLocaleString()}
+              </span>
+            </>
+          )}
         </div>
       </div>
 
@@ -84,7 +91,7 @@ export default function ClientsPage() {
               <th className="grid-th">Stage</th>
               <th className="grid-th">Countdown</th>
               <th className="grid-th">Rep Score</th>
-              <th className="grid-th">Projected Revenue</th>
+              {isAdmin && <th className="grid-th">Projected Revenue</th>}
               <th className="grid-th">Email</th>
               <th className="grid-th">Phone</th>
             </tr>
@@ -128,9 +135,13 @@ export default function ClientsPage() {
                     )}
                   </td>
                   <td className="grid-td font-mono">{c.reputation_score ?? ''}</td>
-                  <td className="grid-td font-mono text-green-700">
-                    {c.revenue_projection > 0 ? `$${Number(c.revenue_projection).toLocaleString()}` : ''}
-                  </td>
+                  {isAdmin && (
+                    <td className="grid-td font-mono text-green-700">
+                      {c.revenue_projection > 0
+                        ? `$${Number(c.revenue_projection).toLocaleString()}`
+                        : ''}
+                    </td>
+                  )}
                   <td className="grid-td text-gray-500">{c.email}</td>
                   <td className="grid-td text-gray-500">{c.phone}</td>
                 </tr>
@@ -138,7 +149,7 @@ export default function ClientsPage() {
             })}
             {clients.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-12 text-center text-sm text-gray-400">
+                <td colSpan={isAdmin ? 7 : 6} className="px-4 py-12 text-center text-sm text-gray-400">
                   No clients yet — set a contact's status to a client status (e.g. "Client").
                 </td>
               </tr>

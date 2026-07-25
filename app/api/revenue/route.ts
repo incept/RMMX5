@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requireUser } from '@/lib/api-auth';
+import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { fetchStripeRevenue } from '@/lib/integrations/stripe';
 
@@ -8,9 +8,13 @@ import { fetchStripeRevenue } from '@/lib/integrations/stripe';
  *   * projection: sum of per-contact revenue_projection (computed from
  *     live links × url_rules removal prices)
  *   * stripe: actual revenue by month (if Stripe is configured)
+ *
+ * ADMIN ONLY. Revenue and Stripe figures are not for worker accounts, and
+ * this endpoint aggregates every contact's projection plus company-wide
+ * monthly gross — so the guard lives here, not only in the UI that hides it.
  */
 export async function GET() {
-  const auth = await requireUser();
+  const auth = await requireAdmin();
   if ('error' in auth) return auth.error;
 
   const admin = createAdminClient();

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import StatusPill, { type StatusOption } from '@/components/StatusPill';
+import { useMyRole } from '@/lib/use-my-role';
 
 const TABS = ['Contact Info', 'Link Data', 'Email', 'Calls', 'Data', 'Activity', 'Files'] as const;
 type Tab = (typeof TABS)[number];
@@ -38,19 +39,13 @@ export default function ContactPanel({
   contactId,
   onClose,
   onChanged,
-  mode = 'panel',
 }: {
   contactId: string;
   onClose: () => void;
   onChanged: () => void;
-  /**
-   * How the detail is framed: 'panel' = slide-over (default, original
-   * behavior), 'modal' = centered dialog, 'page' = in-flow card the parent
-   * embeds in place of the list (parent owns the back affordance).
-   */
-  mode?: 'panel' | 'modal' | 'page';
 }) {
   const supabase = useMemo(() => createClient(), []);
+  const { isAdmin } = useMyRole(); // revenue figures are admin-only
   const [tab, setTab] = useState<Tab>('Contact Info');
   const [contact, setContact] = useState<any>(null);
   const [links, setLinks] = useState<LinkSlot[]>([]);
@@ -329,8 +324,12 @@ export default function ContactPanel({
     </button>
   );
 
-  const panelBody = (
-    <>
+  return (
+    <div className="anim-fade-in fixed inset-0 z-40 flex justify-end bg-black/20" onClick={onClose}>
+      <div
+        className="anim-slide-in flex h-full w-full max-w-2xl flex-col bg-white shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div className="border-b border-gray-200 px-5 pt-4">
           <div className="flex items-start justify-between">
@@ -356,7 +355,7 @@ export default function ContactPanel({
                     ⏱ {daysLeft} day{daysLeft === 1 ? '' : 's'} left
                   </span>
                 )}
-                {contact.revenue_projection > 0 && (
+                {isAdmin && contact.revenue_projection > 0 && (
                   <span className="rounded-full bg-brand-50 px-2.5 py-0.5 text-xs font-medium text-brand-700">
                     Projected ${Number(contact.revenue_projection).toLocaleString()}
                   </span>
@@ -473,12 +472,14 @@ export default function ContactPanel({
                   <div className="text-2xl font-light tabular-nums">{contact.link_score ?? '—'}</div>
                   <div className="text-xs text-gray-500">Link Score</div>
                 </div>
-                <div className="card flex-1 py-3 text-center">
-                  <div className="text-2xl font-light tabular-nums text-green-600">
-                    ${Number(contact.revenue_projection ?? 0).toLocaleString()}
+                {isAdmin && (
+                  <div className="card flex-1 py-3 text-center">
+                    <div className="text-2xl font-light tabular-nums text-green-600">
+                      ${Number(contact.revenue_projection ?? 0).toLocaleString()}
+                    </div>
+                    <div className="text-xs text-gray-500">Projected Revenue</div>
                   </div>
-                  <div className="text-xs text-gray-500">Projected Revenue</div>
-                </div>
+                )}
               </div>
 
               <div className="space-y-1.5">
@@ -905,32 +906,6 @@ export default function ContactPanel({
             </div>
           )}
         </div>
-    </>
-  );
-
-  // Page mode renders in-flow (no overlay) so the parent can swap it in for
-  // the list; panel and modal share the overlay-plus-shell structure.
-  if (mode === 'page') {
-    return (
-      <div className="anim-rise-in flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white">
-        {panelBody}
-      </div>
-    );
-  }
-
-  const overlayClass =
-    mode === 'modal'
-      ? 'anim-fade-in fixed inset-0 z-40 flex items-center justify-center bg-black/20 p-4 sm:p-8'
-      : 'anim-fade-in fixed inset-0 z-40 flex justify-end bg-black/20';
-  const shellClass =
-    mode === 'modal'
-      ? 'anim-modal-in flex h-[86vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl'
-      : 'anim-slide-in flex h-full w-full max-w-2xl flex-col bg-white shadow-2xl';
-
-  return (
-    <div className={overlayClass} onClick={onClose}>
-      <div className={shellClass} onClick={(e) => e.stopPropagation()}>
-        {panelBody}
       </div>
     </div>
   );
