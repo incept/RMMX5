@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { createAdminClient } from '@/lib/supabase/server';
 import { runAutoSearchForContact } from '@/lib/lead-intake';
+import { runDeepSearchForContact } from '@/lib/deep-search';
 import { sendCrmEmail } from '@/lib/email-send';
 import { sendSms } from '@/lib/integrations/textlink';
 import { sendVoicemailDrop } from '@/lib/integrations/voicemail';
@@ -10,6 +11,7 @@ import { errorMessage, logDebug } from '@/lib/debug-log';
 
 export type JobKind =
   | 'auto_search'
+  | 'deep_search'
   | 'email_delivery'
   | 'sms_delivery'
   | 'voicemail_delivery'
@@ -63,6 +65,11 @@ async function handleJob(job: any) {
 
   if (job.kind === 'auto_search') {
     await runAutoSearchForContact(String(payload.contactId));
+    return;
+  }
+
+  if (job.kind === 'deep_search') {
+    await runDeepSearchForContact(String(payload.contactId));
     return;
   }
 

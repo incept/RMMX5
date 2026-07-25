@@ -10,6 +10,7 @@ import { logActivity } from '@/lib/activity';
 import { getSetting } from '@/lib/settings';
 import { lookupIpLocation } from '@/lib/integrations/ipapi';
 import { logDebug, errorMessage } from '@/lib/debug-log';
+import { captureUnruledSerpCandidates } from '@/lib/deep-search';
 
 /**
  * Lead intake pipeline (Fluent Forms webhook → contact → auto search).
@@ -165,6 +166,29 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
     return rule ? rule.relevant : false;
   });
 
+  // Results on domains with no rule yet are not dropped any more: about one
+  // client in ten has the arrest surface on a news site or social post instead
+  // of a booking site, and those domains will never be in url_rules. They go to
+  // the candidate queue for review rather than into a link slot. Best-effort —
+  // a classification failure must not lose the search.
+  let unruledCandidates = 0;
+  try {
+    unruledCandidates = await captureUnruledSerpCandidates(
+      contactId,
+      contact.name,
+      results,
+      ruleRows,
+      query
+    );
+  } catch (e) {
+    await logDebug({
+      level: 'warn',
+      source: 'lead-intake:auto-search',
+      message: `Could not classify unruled results: ${errorMessage(e)}`,
+      contactId,
+    });
+  }
+
   // Fill empty link slots (don't clobber links someone entered by hand).
   const { data: existing } = await supabase
     .from('contact_links')
@@ -217,8 +241,19 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
     contactId,
     actorId,
     type: 'search',
-    description: `Auto search ran on ${succeeded.join(' + ')} (“${query}”): ${results.length} results, ${relevant.length} relevant, ${inserted} link(s) added. Reputation score: ${scores.reputation}`,
-    meta: { query, engines: succeeded, total: results.length, relevant: relevant.length, inserted },
+    description:
+      `Auto search ran on ${succeeded.join(' + ')} (“${query}”): ${results.length} results, ` +
+      `${relevant.length} relevant, ${inserted} link(s) added` +
+      `${unruledCandidates ? `, ${unruledCandidates} news/social candidate(s) to review` : ''}` +
+      `. Reputation score: ${scores.reputation}`,
+    meta: {
+      query,
+      engines: succeeded,
+      total: results.length,
+      relevant: relevant.length,
+      inserted,
+      unruled_candidates: unruledCandidates,
+    },
   });
 
   return { query, engines: succeeded, total: results.length, relevant: relevant.length, inserted, ...scores };
