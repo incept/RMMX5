@@ -44,6 +44,13 @@ type SortKey =
   | 'email_opens'
   | 'email_clicks';
 type ViewId = 'all' | 'mine' | 'clients' | 'flagged' | 'recent';
+const VIEW_DEFS: { id: ViewId; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'mine', label: 'My contacts' },
+  { id: 'clients', label: 'Clients' },
+  { id: 'flagged', label: '⚑ Flagged' },
+  { id: 'recent', label: 'New this week' },
+];
 
 interface NewContactDraft {
   name: string;
@@ -105,9 +112,16 @@ const SORT_LABELS: Record<SortKey, string> = {
 export default function ContactsPage() {
   const supabase = useMemo(() => createClient(), []);
   const [contacts, setContacts] = useState<ContactRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [viewCounts, setViewCounts] = useState<Record<ViewId, number>>({
+    all: 0,
+    mine: 0,
+    clients: 0,
+    flagged: 0,
+    recent: 0,
+  });
   const [statuses, setStatuses] = useState<(StatusOption & { is_client_status?: boolean })[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [meId, setMeId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [view, setView] = useState<ViewId>('all');
   const [statusFilter, setStatusFilter] = useState<string>('');
@@ -124,6 +138,7 @@ export default function ContactsPage() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [newContact, setNewContact] = useState<NewContactDraft | null>(null);
   const [creating, setCreating] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -203,39 +218,31 @@ export default function ContactsPage() {
   /* ── data ── */
   const load = useCallback(async () => {
     setLoading(true);
-    let query = supabase
-      .from('contacts')
-      .select(
-        'id, name, city, state, email, phone, status_id, owner_id, reputation_score, link_score, search_flag, created_at, statuses ( id, name, color, is_client_status ), contact_links ( id, url, status )'
-      )
-      .limit(1000);
-
-    if (search.trim()) {
-      const q = search.trim().replace(/[%,]/g, '');
-      query = query.or(`name.ilike.%${q}%,email.ilike.%${q}%,phone.ilike.%${q}%`);
-    }
-
-    // Engagement totals come pre-aggregated from a view (migration 0010) so the
-    // grid never pulls every email_messages row just to count them. If the view
-    // is missing the counts read as 0 rather than failing the whole page.
-    const [contactRes, statsRes] = await Promise.all([
-      query,
-      supabase.from('contact_email_stats').select('contact_id, sent, opens, clicks'),
+    setLoadError('');
+    const [pageResult, countsResult] = await Promise.all([
+      supabase.rpc('contacts_grid_page', {
+        p_search: search.trim(),
+        p_view: view,
+        p_status: statusFilter || null,
+        p_sort: sortKey,
+        p_ascending: sortAsc,
+        p_page: page,
+        p_page_size: PAGE_SIZE,
+      }),
+      supabase.rpc('contact_view_counts'),
     ]);
-
-    const stats = new Map(
-      (statsRes.data ?? []).map((s: any) => [s.contact_id, s])
-    );
-    setContacts(
-      ((contactRes.data as any[]) ?? []).map((c) => ({
-        ...c,
-        email_sent: stats.get(c.id)?.sent ?? 0,
-        email_opens: stats.get(c.id)?.opens ?? 0,
-        email_clicks: stats.get(c.id)?.clicks ?? 0,
-      }))
-    );
+    if (!pageResult.error) {
+      const payload = (pageResult.data ?? {}) as any;
+      setContacts(payload.rows ?? []);
+      setTotal(Number(payload.total) || 0);
+    } else {
+      setLoadError(pageResult.error.message);
+    }
+    if (!countsResult.error && countsResult.data) {
+      setViewCounts(countsResult.data as Record<ViewId, number>);
+    }
     setLoading(false);
-  }, [supabase, search]);
+  }, [supabase, search, view, statusFilter, sortKey, sortAsc, page]);
 
   useEffect(() => {
     const t = setTimeout(load, search ? 250 : 0); // debounce typing
@@ -253,7 +260,6 @@ export default function ContactsPage() {
       .select('id, full_name, email')
       .order('full_name')
       .then(({ data }) => setProfiles(data ?? []));
-    supabase.auth.getUser().then(({ data }) => setMeId(data.user?.id ?? null));
   }, [supabase]);
 
   const ownerName = useCallback(
@@ -266,60 +272,10 @@ export default function ContactsPage() {
   );
 
   /* ── views / filters / sort / pages ── */
-  const weekAgo = useMemo(() => Date.now() - 7 * 24 * 3600 * 1000, []);
-  const viewDefs: { id: ViewId; label: string; test: (c: ContactRow) => boolean }[] = useMemo(
-    () => [
-      { id: 'all', label: 'All', test: () => true },
-      { id: 'mine', label: 'My contacts', test: (c) => !!meId && c.owner_id === meId },
-      { id: 'clients', label: 'Clients', test: (c) => !!c.statuses?.is_client_status },
-      { id: 'flagged', label: '⚑ Flagged', test: (c) => !!c.search_flag },
-      {
-        id: 'recent',
-        label: 'New this week',
-        test: (c) => new Date(c.created_at).getTime() >= weekAgo,
-      },
-    ],
-    [meId, weekAgo]
-  );
-
-  const viewCounts = useMemo(() => {
-    const counts = {} as Record<ViewId, number>;
-    for (const v of viewDefs) counts[v.id] = contacts.filter(v.test).length;
-    return counts;
-  }, [contacts, viewDefs]);
-
-  const filtered = useMemo(() => {
-    const def = viewDefs.find((v) => v.id === view) ?? viewDefs[0];
-    let rows = contacts.filter(def.test);
-    if (statusFilter) rows = rows.filter((c) => c.status_id === statusFilter);
-    return rows;
-  }, [contacts, view, statusFilter, viewDefs]);
-
-  const sorted = useMemo(() => {
-    const rows = [...filtered];
-    rows.sort((a, b) => {
-      let va: any;
-      let vb: any;
-      switch (sortKey) {
-        case 'status':
-          va = a.statuses?.name ?? '';
-          vb = b.statuses?.name ?? '';
-          break;
-        default:
-          va = a[sortKey] ?? '';
-          vb = b[sortKey] ?? '';
-      }
-      if (typeof va === 'number' || typeof vb === 'number') {
-        return (Number(va) - Number(vb)) * (sortAsc ? 1 : -1);
-      }
-      return String(va).localeCompare(String(vb)) * (sortAsc ? 1 : -1);
-    });
-    return rows;
-  }, [filtered, sortKey, sortAsc]);
-
-  const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  const sorted = contacts;
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const safePage = Math.min(page, pageCount - 1);
-  const pageRows = sorted.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
+  const pageRows = sorted;
   useEffect(() => setPage(0), [view, statusFilter, search, sortKey, sortAsc]);
 
   const filtersDirty = view !== 'all' || statusFilter !== '' || !!search.trim();
@@ -338,7 +294,7 @@ export default function ContactsPage() {
   }
 
   /* ── selection + bulk actions ── */
-  const visibleIds = sorted.map((c) => c.id);
+  const visibleIds = pageRows.map((c) => c.id);
   const allOn = visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
   function toggleAll() {
     setSelected(allOn ? new Set() : new Set(visibleIds));
@@ -748,9 +704,15 @@ export default function ContactsPage() {
       </div>
 
       {/* ── Views + status dot filters ── */}
+      {loadError && (
+        <div className="mx-6 mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">
+          Could not load contacts: {loadError}
+        </div>
+      )}
+
       <div className="flex flex-none flex-wrap items-center gap-4 px-6 pb-3 pt-3.5">
         <div className="flex flex-wrap items-center gap-4">
-          {viewDefs.map((v) => (
+          {VIEW_DEFS.map((v) => (
             <button
               key={v.id}
               className={`inline-flex items-baseline gap-1.5 whitespace-nowrap text-xs transition ${
@@ -963,12 +925,12 @@ export default function ContactsPage() {
         {/* footer */}
         <div className="flex h-9 flex-none items-center justify-between border-t border-gray-200 px-6 text-[11px] font-light text-gray-400">
           <span className="tabular-nums">
-            {sorted.length === 0
+            {total === 0
               ? 'No contacts'
               : `Showing ${safePage * PAGE_SIZE + 1}–${Math.min(
                   (safePage + 1) * PAGE_SIZE,
-                  sorted.length
-                )} of ${sorted.length}`}
+                  total
+                )} of ${total}`}
           </span>
           <div className="flex items-center gap-4">
             <button

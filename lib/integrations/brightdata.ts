@@ -1,6 +1,7 @@
 import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
 import { finishUsage, reserveUsage } from '@/lib/usage';
+import { readResponseText } from '@/lib/request-limits';
 
 /**
  * BrightData integration.
@@ -44,7 +45,14 @@ function buildSerpTarget(
 
 export async function runSerpSearch(
   query: string,
-  opts?: { engine?: SearchEngine; numResults?: number; country?: string; timeoutMs?: number }
+  opts?: {
+    engine?: SearchEngine;
+    numResults?: number;
+    country?: string;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    requestKey?: string;
+  }
 ): Promise<SerpResult[]> {
   const engine = opts?.engine ?? 'google';
 
@@ -69,6 +77,7 @@ export async function runSerpSearch(
   const usage = await reserveUsage({
     provider: 'brightdata',
     operation: 'serp',
+    requestKey: opts?.requestKey,
     monthlyLimit:
       Number.isInteger(configuredLimit) &&
       configuredLimit > 0 &&
@@ -78,21 +87,29 @@ export async function runSerpSearch(
     metadata: { engine, zone: cfg.serp_zone },
   });
 
-  const res = await fetch('https://api.brightdata.com/request', {
-    method: 'POST',
-    signal: AbortSignal.timeout(opts?.timeoutMs ?? 60_000),
-    headers: {
-      Authorization: `Bearer ${cfg.api_key}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ zone: cfg.serp_zone, url: target, format: 'raw' }),
-  });
+  let res: Response;
+  let bodyText: string;
+  try {
+    const timeoutSignal = AbortSignal.timeout(opts?.timeoutMs ?? 60_000);
+    res = await fetch('https://api.brightdata.com/request', {
+      method: 'POST',
+      signal: opts?.signal ? AbortSignal.any([opts.signal, timeoutSignal]) : timeoutSignal,
+      headers: {
+        Authorization: `Bearer ${cfg.api_key}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ zone: cfg.serp_zone, url: target, format: 'raw' }),
+    });
+    bodyText = await readResponseText(res, 2 * 1024 * 1024);
+  } catch (requestError: any) {
+    await finishUsage(usage.id, 'failed', requestError?.message ?? 'Provider request failed');
+    throw requestError;
+  }
 
   // Read as text first. A 200 with an empty or non-JSON body is a real
   // BrightData failure mode (wrong zone type, zone disabled, upstream block),
   // and res.json() would only report "Unexpected end of JSON input" — which
   // says nothing about the cause.
-  const bodyText = await res.text();
   const snippet = bodyText.slice(0, 300);
 
   if (!res.ok) {

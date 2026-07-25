@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { enrollContact } from '@/lib/sequence-runner';
+import { MAX_BULK_RECIPIENTS } from '@/lib/bulk-delivery';
+import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -14,7 +16,19 @@ export async function POST(request: Request, { params }: Params) {
   const auth = await requireUser();
   if ('error' in auth) return auth.error;
   const { id } = await params;
-  const body = await request.json().catch(() => ({}));
+  let body: any;
+  try {
+    body = await readJsonBody(request, 256 * 1024);
+  } catch (error) {
+    const response = requestErrorResponse(error);
+    return NextResponse.json({ error: response.message }, { status: response.status });
+  }
+  if (body.contactIds != null && !Array.isArray(body.contactIds)) {
+    return NextResponse.json({ error: 'contactIds must be an array' }, { status: 400 });
+  }
+  if ((body.contactIds?.length ?? 0) > MAX_BULK_RECIPIENTS) {
+    return NextResponse.json({ error: `Maximum ${MAX_BULK_RECIPIENTS} contacts` }, { status: 413 });
+  }
 
   const admin = createAdminClient();
   const { data: sequence } = await admin
@@ -26,10 +40,18 @@ export async function POST(request: Request, { params }: Params) {
 
   let contactIds: string[] = body.contactIds ?? [];
   if (body.wholeList && sequence.list_id) {
-    const { data: members } = await admin
+    const { data: members, count, error } = await admin
       .from('email_list_members')
-      .select('contact_id')
-      .eq('list_id', sequence.list_id);
+      .select('contact_id', { count: 'exact' })
+      .eq('list_id', sequence.list_id)
+      .range(0, MAX_BULK_RECIPIENTS);
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if ((count ?? 0) > MAX_BULK_RECIPIENTS) {
+      return NextResponse.json(
+        { error: `Sequence enrollments are limited to ${MAX_BULK_RECIPIENTS} contacts` },
+        { status: 413 }
+      );
+    }
     contactIds = [...new Set([...contactIds, ...(members ?? []).map((m) => m.contact_id)])];
   }
 

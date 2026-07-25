@@ -5,6 +5,8 @@ import { createClient } from '@/lib/supabase/client';
 import ContactPanel from '@/components/ContactPanel';
 import { useMyRole } from '@/lib/use-my-role';
 
+const PAGE_SIZE = 100;
+
 /** Clients view: stages, service countdown, revenue projection, quick panel access. */
 export default function ClientsPage() {
   const supabase = useMemo(() => createClient(), []);
@@ -12,12 +14,20 @@ export default function ClientsPage() {
   const [clients, setClients] = useState<any[]>([]);
   const [stages, setStages] = useState<any[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
+  const [summary, setSummary] = useState({ count: 0, projection_total: 0 });
+  const [loadError, setLoadError] = useState('');
 
   const load = useCallback(async () => {
-    const { data: clientStatuses } = await supabase
+    setLoadError('');
+    const { data: clientStatuses, error: statusesError } = await supabase
       .from('statuses')
       .select('id')
       .eq('is_client_status', true);
+    if (statusesError) {
+      setLoadError(statusesError.message);
+      return;
+    }
     const ids = (clientStatuses ?? []).map((s) => s.id);
 
     const cols =
@@ -25,14 +35,23 @@ export default function ClientsPage() {
     let query = supabase
       .from('contacts')
       .select(isAdmin ? `${cols}, revenue_projection` : cols)
-      .order('client_since', { ascending: true });
+      .order('client_since', { ascending: true })
+      .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
     // Anyone with a client status OR an active service period counts as a client.
     if (ids.length) query = query.or(`status_id.in.(${ids.join(',')}),client_since.not.is.null`);
     else query = query.not('client_since', 'is', null);
 
-    const { data } = await query;
+    const [{ data, error }, { data: totals, error: totalsError }] = await Promise.all([
+      query,
+      supabase.rpc('client_summary'),
+    ]);
+    if (error || totalsError) {
+      setLoadError(error?.message ?? totalsError?.message ?? 'Could not load clients');
+      return;
+    }
     setClients(data ?? []);
-  }, [supabase, isAdmin]);
+    if (totals) setSummary(totals as any);
+  }, [supabase, isAdmin, page]);
 
   useEffect(() => {
     load();
@@ -57,26 +76,36 @@ export default function ClientsPage() {
           : r
       )
     );
-    await fetch(`/api/contacts/${clientId}`, {
+    const response = await fetch(`/api/contacts/${clientId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ stage_id: stageId || null }),
     });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      setLoadError(body.error ?? 'Could not update client stage');
+      await load();
+    }
   }
 
-  const totalProjection = clients.reduce((s, c) => s + Number(c.revenue_projection ?? 0), 0);
+  const pageCount = Math.max(1, Math.ceil(summary.count / PAGE_SIZE));
 
   return (
     <div className="p-6">
+      {loadError && (
+        <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">
+          {loadError}
+        </div>
+      )}
       <div className="mb-5 flex items-center justify-between">
         <h1 className="text-2xl font-light tracking-tight">Clients</h1>
         <div className="text-sm text-gray-500">
-          {clients.length} client{clients.length === 1 ? '' : 's'}
+          {summary.count} client{summary.count === 1 ? '' : 's'}
           {isAdmin && (
             <>
               {' · projected '}
               <span className="font-mono font-semibold text-green-700">
-                ${totalProjection.toLocaleString()}
+                ${Number(summary.projection_total ?? 0).toLocaleString()}
               </span>
             </>
           )}
@@ -156,6 +185,22 @@ export default function ClientsPage() {
             )}
           </tbody>
         </table>
+      </div>
+
+      <div className="mt-3 flex items-center justify-end gap-4 text-xs text-gray-500">
+        <button className="btn py-1" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>
+          Previous
+        </button>
+        <span>
+          Page {page + 1} of {pageCount}
+        </span>
+        <button
+          className="btn py-1"
+          disabled={page >= pageCount - 1}
+          onClick={() => setPage((p) => p + 1)}
+        >
+          Next
+        </button>
       </div>
 
       {selectedId && (

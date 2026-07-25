@@ -399,7 +399,7 @@ test('unlocker retries transient errors but never a policy refusal', async () =>
   const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
   assert.match(source, /err_http2_protocol_error/);
   assert.match(source, /before_session_error/);
-  assert.match(source, /POLICY_ERROR\.test\(signal\)\) break/);
+  assert.match(source, /POLICY_ERROR\.test\(failureSignal\)\) break/);
   // A policy refusal must say what to do, since no retry or zone change fixes it.
   assert.match(source, /compliance team/);
 });
@@ -585,7 +585,7 @@ test('the proxy tier sits between the free fetch and the paid unlocker', async (
   // search results through an ISP-classified exit. Direct still runs first
   // because it is free and routes through nobody else.
   const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
-  const direct = source.indexOf("browserFetch(url, 'direct')");
+  const direct = source.indexOf("browserFetch(url, 'direct'");
   const proxy = source.indexOf("browserFetch(url, 'proxy'");
   const unlocker = source.indexOf('reserveUsage({');
   assert.ok(direct > -1 && proxy > -1 && unlocker > -1, 'all three tiers present');
@@ -621,7 +621,7 @@ test('the browser tier runs before the billable unlocker', async () => {
   // Chrome costs CPU and memory, not money, so it goes ahead of the unlocker —
   // and it is the only tier that reaches a host blocking on TLS fingerprint.
   const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
-  const browser = source.indexOf('fetchWithBrowser(url)');
+  const browser = source.indexOf('fetchWithBrowser(url');
   const unlocker = source.indexOf('reserveUsage({');
   assert.ok(browser > -1 && unlocker > -1);
   assert.ok(browser < unlocker, 'browser is tried before the billable unlocker');

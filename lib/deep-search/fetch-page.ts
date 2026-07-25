@@ -105,8 +105,95 @@ const DIRECT_ATTEMPTS = 2;
  * certificate checks to work, it is reading the traffic — do not use it.
  */
 let proxyAgentCache: { key: string; agent: ProxyAgent } | null = null;
+let proxyIdleTimer: NodeJS.Timeout | null = null;
+
+const MAX_PAGE_BYTES = 2 * 1024 * 1024;
+
+function combinedSignal(timeoutMs: number, external?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return external ? AbortSignal.any([external, timeout]) : timeout;
+}
+
+async function readBoundedText(res: any, maxBytes = MAX_PAGE_BYTES): Promise<string> {
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error(`Response exceeded ${maxBytes} bytes`);
+  }
+  if (!res.body) return '';
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let out = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error(`Response exceeded ${maxBytes} bytes`);
+      }
+      out += decoder.decode(value, { stream: true });
+    }
+    return out + decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function validateProxyEndpoint(hostValue: string, portValue: string | number) {
+  const host = hostValue.trim().toLowerCase();
+  const port = Number(portValue);
+  if (
+    !host ||
+    host.includes('://') ||
+    host.includes(':') ||
+    /[\/\\@\s]/.test(host) ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65_535
+  ) {
+    throw new Error('Proxy host or port is invalid');
+  }
+  if (
+    host === 'localhost' ||
+    host === '0.0.0.0' ||
+    host === '::1' ||
+    host === '169.254.169.254' ||
+    /^127\./.test(host) ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    /^169\.254\./.test(host)
+  ) {
+    throw new Error('Private, loopback, and link-local proxy endpoints are not allowed');
+  }
+  return { host, port };
+}
+
+function touchProxyIdleTimer() {
+  if (proxyIdleTimer) clearTimeout(proxyIdleTimer);
+  proxyIdleTimer = setTimeout(() => {
+    const cached = proxyAgentCache;
+    proxyAgentCache = null;
+    proxyIdleTimer = null;
+    void cached?.agent.close().catch((error) =>
+      logDebug({
+        level: 'warn',
+        source: 'deep-search:proxy',
+        message: `Could not close idle proxy agent: ${error?.message ?? String(error)}`,
+      }).catch(() => {})
+    );
+  }, 60_000);
+  proxyIdleTimer.unref?.();
+}
 
 async function getProxyAgent(): Promise<{ agent: ProxyAgent; label: string } | null> {
+  if (proxyIdleTimer) {
+    clearTimeout(proxyIdleTimer);
+    proxyIdleTimer = null;
+  }
   const cfg = await getSetting<{
     host?: string;
     port?: string | number;
@@ -114,18 +201,25 @@ async function getProxyAgent(): Promise<{ agent: ProxyAgent; label: string } | n
     password?: string;
   }>('probe_proxy');
   if (!cfg.host || !cfg.port) return null;
+  const endpoint = validateProxyEndpoint(cfg.host, cfg.port);
 
   const auth = cfg.username
     ? `${encodeURIComponent(cfg.username)}:${encodeURIComponent(cfg.password ?? '')}@`
     : '';
-  const url = `http://${auth}${cfg.host}:${cfg.port}`;
+  const url = `http://${auth}${endpoint.host}:${endpoint.port}`;
   // Agents pool connections, so rebuilding one per fetch would throw away every
   // established tunnel. Rebuild only when the configured endpoint changes.
   if (proxyAgentCache?.key !== url) {
-    await proxyAgentCache?.agent.close().catch(() => {});
+    await proxyAgentCache?.agent.close().catch((error) =>
+      logDebug({
+        level: 'warn',
+        source: 'deep-search:proxy',
+        message: `Could not close replaced proxy agent: ${error?.message ?? String(error)}`,
+      }).catch(() => {})
+    );
     proxyAgentCache = { key: url, agent: new ProxyAgent(url) };
   }
-  return { agent: proxyAgentCache.agent, label: `${cfg.host}:${cfg.port}` };
+  return { agent: proxyAgentCache.agent, label: `${endpoint.host}:${endpoint.port}` };
 }
 
 export type FetchOutcome =
@@ -176,10 +270,13 @@ async function unlockerRequest(
   zone: string,
   url: string,
   render: boolean,
-  maxAttempts = 3
+  maxAttempts = 3,
+  signal?: AbortSignal
 ): Promise<{ res: Response; body: string; attempts: number; debug: string | null }> {
   let last: { res: Response; body: string; debug: string | null } | null = null;
+  let attempts = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    attempts = attempt;
     // No custom headers or cookies are ever sent to the target — BrightData's
     // troubleshooting asks for default behaviour first, and this already is it.
     // debug is switched on from the second attempt so a failure that survives a
@@ -187,7 +284,7 @@ async function unlockerRequest(
     // billed) instead of an opaque code.
     const res = await fetch('https://api.brightdata.com/request', {
       method: 'POST',
-      signal: AbortSignal.timeout(60_000),
+      signal: combinedSignal(60_000, signal),
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
@@ -200,13 +297,13 @@ async function unlockerRequest(
         ...(attempt > 1 ? { debug: true } : {}),
       }),
     });
-    const body = await res.text();
+    const body = await readBoundedText(res);
     const debug = res.headers.get('x-brd-debug');
     last = { res, body, debug };
 
     if (res.ok && body.trim()) return { res, body, attempts: attempt, debug };
 
-    const signal = [
+    const failureSignal = [
       res.headers.get('x-brd-err-code'),
       res.headers.get('x-brd-err-msg'),
       body.slice(0, 300),
@@ -215,12 +312,13 @@ async function unlockerRequest(
       .join(' ')
       .toLowerCase();
 
-    if (POLICY_ERROR.test(signal)) break; // settled, not retryable
-    const transient = TRANSIENT_UNLOCKER_ERRORS.some((e) => signal.includes(e));
+    if (POLICY_ERROR.test(failureSignal)) break; // settled, not retryable
+    const transient = TRANSIENT_UNLOCKER_ERRORS.some((e) => failureSignal.includes(e));
     if (!transient || attempt === maxAttempts) break;
     await new Promise((r) => setTimeout(r, 1200 * attempt));
   }
-  return { ...last!, attempts: maxAttempts };
+  if (!last) throw new Error('Unlocker request did not start');
+  return { ...last, attempts };
 }
 
 /**
@@ -231,7 +329,8 @@ async function unlockerRequest(
 async function browserFetch(
   url: string,
   via: 'direct' | 'proxy',
-  dispatcher?: ProxyAgent
+  dispatcher?: ProxyAgent,
+  signal?: AbortSignal
 ): Promise<{ ok: true; html: string; via: 'direct' | 'proxy' } | { ok: false; note: string }> {
   let note = '';
   for (let attempt = 1; attempt <= DIRECT_ATTEMPTS; attempt++) {
@@ -239,16 +338,16 @@ async function browserFetch(
       const res = dispatcher
         ? await undiciFetch(url, {
             redirect: 'follow',
-            signal: AbortSignal.timeout(20_000),
+            signal: combinedSignal(20_000, signal),
             headers: BROWSER_HEADERS,
             dispatcher,
           })
         : await fetch(url, {
             redirect: 'follow',
-            signal: AbortSignal.timeout(20_000),
+            signal: combinedSignal(20_000, signal),
             headers: BROWSER_HEADERS,
           });
-      const html = await res.text();
+      const html = await readBoundedText(res);
       if (res.ok && !looksBlocked(res.status, html)) return { ok: true, html, via };
       note = `${via} HTTP ${res.status}${looksBlocked(res.status, html) ? ' (challenge page)' : ''}`;
     } catch (e: any) {
@@ -268,7 +367,7 @@ async function browserFetch(
 
 export async function fetchProbePage(
   url: string,
-  opts?: { render?: boolean; needsBrowser?: boolean }
+  opts?: { render?: boolean; needsBrowser?: boolean; signal?: AbortSignal }
 ): Promise<FetchOutcome> {
   const notes: string[] = [];
 
@@ -276,7 +375,8 @@ export async function fetchProbePage(
   // and each one costs two attempts on a 20s timeout. Skip straight to Chrome.
   if (!opts?.needsBrowser) {
     // Tier 1: plain fetch. Free, and nothing leaves our own connection.
-    const direct = await browserFetch(url, 'direct');
+    if (opts?.signal?.aborted) throw opts.signal.reason;
+    const direct = await browserFetch(url, 'direct', undefined, opts?.signal);
     if (direct.ok) return direct;
     notes.push(direct.note);
 
@@ -286,7 +386,8 @@ export async function fetchProbePage(
     try {
       const proxy = await getProxyAgent();
       if (proxy) {
-        const viaProxy = await browserFetch(url, 'proxy', proxy.agent);
+        const viaProxy = await browserFetch(url, 'proxy', proxy.agent, opts?.signal);
+        touchProxyIdleTimer();
         if (viaProxy.ok) return viaProxy;
         notes.push(`${viaProxy.note} via ${proxy.label}`);
       }
@@ -299,7 +400,7 @@ export async function fetchProbePage(
   // Tier 3: real Chrome. Costs CPU and memory rather than money, so it comes
   // before the billable unlocker — and it is the only tier that reaches a host
   // blocking us on the TLS fingerprint.
-  const viaBrowser = await fetchWithBrowser(url);
+  const viaBrowser = await fetchWithBrowser(url, opts?.signal);
   if (viaBrowser.ok && !looksBlocked(viaBrowser.status, viaBrowser.html)) {
     return { ok: true, html: viaBrowser.html, via: 'browser' };
   }
@@ -351,7 +452,9 @@ export async function fetchProbePage(
       cfg.api_key,
       cfg.unlocker_zone,
       url,
-      !!opts?.render
+      !!opts?.render,
+      3,
+      opts?.signal
     );
     if (attempts > 1) {
       await logDebug({

@@ -13,62 +13,52 @@ import { useMyRole } from '@/lib/use-my-role';
 export default function DashboardPage() {
   const supabase = useMemo(() => createClient(), []);
   const { isAdmin } = useMyRole();
-  const [contacts, setContacts] = useState<any[]>([]);
-  const [statuses, setStatuses] = useState<any[]>([]);
+  const [metrics, setMetrics] = useState<any>({
+    contacts: 0,
+    average_reputation: null,
+    clients: 0,
+    live_links: 0,
+    removed_links: 0,
+    by_status: [],
+  });
   const [activity, setActivity] = useState<any[]>([]);
   const [revenue, setRevenue] = useState<any>(null);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
-    // revenue_projection is only requested for admins, so it isn't in a
-    // worker's response payload at all.
-    const contactCols =
-      'id, name, status_id, reputation_score, link_score, client_since, contact_links ( status, url )';
     supabase
-      .from('contacts')
-      .select(isAdmin ? `${contactCols}, revenue_projection` : contactCols)
-      .limit(2000)
-      .then(({ data }) => setContacts(data ?? []));
-    supabase
-      .from('statuses')
-      .select('*')
-      .order('sort_order')
-      .then(({ data }) => setStatuses(data ?? []));
+      .rpc('dashboard_metrics')
+      .then(({ data, error }) => {
+        if (error) setLoadError(error.message);
+        else if (data) setMetrics(data);
+      });
     supabase
       .from('activity_log')
       .select('*, contacts ( name )')
       .order('created_at', { ascending: false })
       .limit(12)
-      .then(({ data }) => setActivity(data ?? []));
+      .then(({ data, error }) => {
+        if (error) setLoadError(error.message);
+        else setActivity(data ?? []);
+      });
     if (isAdmin) {
       fetch('/api/revenue')
         .then((r) => (r.ok ? r.json() : null))
         .then(setRevenue)
-        .catch(() => {});
+        .catch(() => setLoadError('Could not load revenue metrics'));
     }
   }, [supabase, isAdmin]);
 
-  const scored = contacts.filter((c) => c.reputation_score != null);
-  const avgReputation = scored.length
-    ? Math.round((scored.reduce((s, c) => s + Number(c.reputation_score), 0) / scored.length) * 10) / 10
-    : null;
-  const clientStatusIds = new Set(statuses.filter((s) => s.is_client_status).map((s) => s.id));
-  const clientCount = contacts.filter((c) => clientStatusIds.has(c.status_id)).length;
-  const allLinks = contacts.flatMap((c) => c.contact_links ?? []).filter((l: any) => l.url);
-  const liveLinks = allLinks.filter((l: any) => l.status === 'live').length;
-  const removedLinks = allLinks.filter((l: any) => l.status === 'removed').length;
-
-  const byStatus = statuses.map((s) => ({
-    ...s,
-    count: contacts.filter((c) => c.status_id === s.id).length,
-  }));
+  const byStatus: { id: string; name: string; color: string; count: number }[] =
+    metrics.by_status ?? [];
   const maxCount = Math.max(1, ...byStatus.map((s) => s.count));
 
   const stats: { label: string; value: any; accent?: boolean }[] = [
-    { label: 'Contacts', value: contacts.length },
-    { label: 'Avg Reputation Score', value: avgReputation ?? '—', accent: true },
-    { label: 'Clients', value: clientCount },
-    { label: 'Live links', value: liveLinks },
-    { label: 'Links removed', value: removedLinks },
+    { label: 'Contacts', value: metrics.contacts },
+    { label: 'Avg Reputation Score', value: metrics.average_reputation ?? '—', accent: true },
+    { label: 'Clients', value: metrics.clients },
+    { label: 'Live links', value: metrics.live_links },
+    { label: 'Links removed', value: metrics.removed_links },
   ];
   if (isAdmin) {
     stats.push({
@@ -79,10 +69,15 @@ export default function DashboardPage() {
 
   return (
     <div className="p-6">
+      {loadError && (
+        <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">
+          {loadError}
+        </div>
+      )}
       <div className="mb-5 flex items-baseline gap-2.5">
         <h1 className="text-2xl font-light tracking-tight">Dashboard</h1>
         <span className="text-xs tabular-nums text-gray-400">
-          {contacts.length ? `${contacts.length} contacts` : ''}
+          {metrics.contacts ? `${metrics.contacts} contacts` : ''}
         </span>
       </div>
 

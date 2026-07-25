@@ -5,11 +5,20 @@ import { sendCrmEmail } from '@/lib/email-send';
 import { renderTemplate } from '@/lib/sequence-runner';
 import { deliveryKey, MAX_BULK_RECIPIENTS, validIdempotencyKey } from '@/lib/bulk-delivery';
 import { enqueueJob } from '@/lib/job-queue';
+import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
 
 export async function POST(request: Request) {
   const auth = await requireUser();
   if ('error' in auth) return auth.error;
-  const body = await request.json();
+  let body: any;
+  try {
+    body = await readJsonBody(request, 512 * 1024);
+  } catch (error) {
+    const response = requestErrorResponse(error);
+    return NextResponse.json({ error: response.message }, { status: response.status });
+  }
+  body.subject = String(body.subject ?? '').trim().slice(0, 500);
+  body.html = String(body.html ?? '').slice(0, 250_000);
 
   if (!body.subject || !body.html) {
     return NextResponse.json({ error: 'subject and html required' }, { status: 400 });

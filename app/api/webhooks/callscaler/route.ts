@@ -4,6 +4,7 @@ import { verifyBearerSecret } from '@/lib/webhook-auth';
 import { processCallScalerCall } from '@/lib/integrations/callscaler';
 import { logDebug, errorMessage } from '@/lib/debug-log';
 import { enqueueJob } from '@/lib/job-queue';
+import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
 
 /**
  * CallScaler post-call webhook. In each call flow: AUTOMATIONS → webhook →
@@ -35,9 +36,10 @@ export async function POST(request: Request) {
 
   let payload: Record<string, any>;
   try {
-    payload = await request.json();
-  } catch {
-    return NextResponse.json({ error: 'Unparseable payload' }, { status: 400 });
+    payload = await readJsonBody(request, 1024 * 1024);
+  } catch (error) {
+    const response = requestErrorResponse(error);
+    return NextResponse.json({ error: response.message }, { status: response.status });
   }
 
   try {

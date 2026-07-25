@@ -2,7 +2,12 @@ import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { randomUUID } from 'crypto';
-import { storageSafeName, validateVoicemailFile, VOICEMAIL_MAX_BYTES } from '@/lib/uploads';
+import {
+  storageSafeName,
+  validateVoicemailFileContent,
+  VOICEMAIL_MAX_BYTES,
+} from '@/lib/uploads';
+import { enforceDeclaredLength, requestErrorResponse } from '@/lib/request-limits';
 
 const BUCKET = 'voicemail-audio';
 
@@ -11,16 +16,18 @@ export async function POST(request: Request) {
   const auth = await requireUser();
   if ('error' in auth) return auth.error;
 
-  const contentLength = Number(request.headers.get('content-length'));
-  if (Number.isFinite(contentLength) && contentLength > VOICEMAIL_MAX_BYTES + 1024 * 1024) {
-    return NextResponse.json({ error: 'Upload is too large' }, { status: 413 });
+  try {
+    enforceDeclaredLength(request, VOICEMAIL_MAX_BYTES + 1024 * 1024, { required: true });
+  } catch (error) {
+    const response = requestErrorResponse(error);
+    return NextResponse.json({ error: response.message }, { status: response.status });
   }
 
   const form = await request.formData();
   const file = form.get('file') as File | null;
   const name = String(form.get('name') ?? '') || file?.name || 'Voicemail';
   if (!file) return NextResponse.json({ error: 'file required' }, { status: 400 });
-  const validationError = validateVoicemailFile(file);
+  const validationError = await validateVoicemailFileContent(file);
   if (validationError) {
     return NextResponse.json({ error: validationError }, { status: 400 });
   }
@@ -31,8 +38,9 @@ export async function POST(request: Request) {
 
   const { error: uploadErr } = await admin.storage
     .from(BUCKET)
-    .upload(path, Buffer.from(await file.arrayBuffer()), {
+    .upload(path, file, {
       contentType: file.type || 'audio/mpeg',
+      cacheControl: '0',
     });
   if (uploadErr) return NextResponse.json({ error: uploadErr.message }, { status: 400 });
 

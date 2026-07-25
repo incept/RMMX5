@@ -36,6 +36,8 @@ const BROWSER_UA =
 
 const IDLE_SHUTDOWN_MS = 60_000;
 const MAX_CONCURRENT_PAGES = 2;
+const MAX_QUEUED_PAGES = 8;
+const SLOT_WAIT_MS = 60_000;
 const PAGE_TIMEOUT_MS = 45_000;
 /** Chrome is only worth launching for pages we cannot get any cheaper way. */
 const LAUNCH_TIMEOUT_MS = 30_000;
@@ -55,7 +57,11 @@ const DEFAULT_PATHS = [
 let browserPromise: Promise<Browser> | null = null;
 let idleTimer: NodeJS.Timeout | null = null;
 let activePages = 0;
-const waiters: (() => void)[] = [];
+const waiters: {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}[] = [];
 
 async function resolveExecutable(): Promise<string | null> {
   const cfg = await getSetting<{ executable_path?: string; enabled?: string | boolean }>(
@@ -88,6 +94,7 @@ function touchIdleTimer() {
 }
 
 export async function closeBrowser(reason: string): Promise<void> {
+  if (reason === 'idle' && activePages > 0) return;
   const pending = browserPromise;
   browserPromise = null;
   if (idleTimer) {
@@ -95,19 +102,26 @@ export async function closeBrowser(reason: string): Promise<void> {
     idleTimer = null;
   }
   if (!pending) return;
+  let b: Browser | null = null;
   try {
-    const b = await pending;
+    b = await pending;
     await b.close();
     await logDebug({ source: 'deep-search:browser', message: `browser closed (${reason})` });
-  } catch {
-    // Already gone, or never started cleanly. Either way there is nothing left
-    // to close and nothing useful to report.
+  } catch (error: any) {
+    // close() occasionally fails while a renderer is wedged. Kill the owned
+    // child as a last resort instead of leaving an orphaned Chromium tree.
+    b?.process()?.kill('SIGKILL');
+    await logDebug({
+      level: 'warn',
+      source: 'deep-search:browser',
+      message: `Browser close failed (${reason}): ${error?.message ?? 'unknown error'}`,
+    });
   }
 }
 
 async function getBrowser(executablePath: string): Promise<Browser> {
   if (!browserPromise) {
-    browserPromise = puppeteer
+    const launching = puppeteer
       .launch({
         executablePath,
         headless: true,
@@ -130,23 +144,54 @@ async function getBrowser(executablePath: string): Promise<Browser> {
         browserPromise = null;
         throw e;
       });
+    browserPromise = launching;
+    void launching.then((browser) => {
+      browser.once('disconnected', () => {
+        if (browserPromise === launching) browserPromise = null;
+      });
+    });
   }
   return browserPromise;
 }
 
 /** Waits for a page slot so a burst of probes cannot open a tab each. */
 async function acquireSlot(): Promise<void> {
+  if (idleTimer) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
   if (activePages < MAX_CONCURRENT_PAGES) {
     activePages += 1;
     return;
   }
-  await new Promise<void>((resolve) => waiters.push(resolve));
+  if (waiters.length >= MAX_QUEUED_PAGES) {
+    throw new Error('Browser page queue is full; retry after the current search finishes');
+  }
+  await new Promise<void>((resolve, reject) => {
+    const waiter = {
+      resolve,
+      reject,
+      timer: setTimeout(() => {
+        const index = waiters.indexOf(waiter);
+        if (index >= 0) waiters.splice(index, 1);
+        reject(new Error('Timed out waiting for a browser page slot'));
+      }, SLOT_WAIT_MS),
+    };
+    waiter.timer.unref?.();
+    waiters.push(waiter);
+  });
   activePages += 1;
 }
 
 function releaseSlot(): void {
-  activePages -= 1;
-  waiters.shift()?.();
+  activePages = Math.max(0, activePages - 1);
+  const next = waiters.shift();
+  if (next) {
+    clearTimeout(next.timer);
+    next.resolve();
+    return;
+  }
+  if (activePages === 0) touchIdleTimer();
 }
 
 export type BrowserFetchResult =
@@ -158,7 +203,11 @@ export type BrowserFetchResult =
  * not set up" from "the tier ran and the page was blocked" — the caller needs
  * that difference to decide whether falling through to the unlocker is sensible.
  */
-export async function fetchWithBrowser(url: string): Promise<BrowserFetchResult> {
+export async function fetchWithBrowser(
+  url: string,
+  signal?: AbortSignal
+): Promise<BrowserFetchResult> {
+  if (signal?.aborted) return { ok: false, reason: 'browser fetch cancelled' };
   const executablePath = await resolveExecutable();
   if (!executablePath) {
     return { ok: false, unavailable: true, reason: 'no Chrome executable configured or found' };
@@ -180,9 +229,15 @@ export async function fetchWithBrowser(url: string): Promise<BrowserFetchResult>
   // contacts, so one lead's session can never colour another's results.
   let context: Awaited<ReturnType<Browser['createBrowserContext']>> | null = null;
   let page: Page | null = null;
+  const abortPage = () => {
+    void page?.close().catch(() => {});
+  };
   try {
+    if (signal?.aborted) throw signal.reason ?? new Error('browser fetch cancelled');
     context = await browser.createBrowserContext();
     page = await context.newPage();
+    if (signal?.aborted) throw signal.reason ?? new Error('browser fetch cancelled');
+    signal?.addEventListener('abort', abortPage, { once: true });
     await page.setUserAgent(BROWSER_UA);
     await page.setViewport({ width: 1366, height: 768 });
 
@@ -204,11 +259,11 @@ export async function fetchWithBrowser(url: string): Promise<BrowserFetchResult>
   } catch (e: any) {
     return { ok: false, reason: `browser fetch failed: ${e?.message ?? 'unknown error'}` };
   } finally {
+    signal?.removeEventListener('abort', abortPage);
     // Close the context, not just the page: an orphaned context keeps its own
     // renderer process alive, which is exactly the leak this tier must not add.
     await page?.close().catch(() => {});
     await context?.close().catch(() => {});
     releaseSlot();
-    touchIdleTimer();
   }
 }

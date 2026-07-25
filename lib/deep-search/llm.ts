@@ -2,6 +2,8 @@ import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
 import type { NameParts } from './facts.ts';
 import { normalizeLlmRow, type LlmRow } from './extract.ts';
+import { finishUsage, reserveUsage } from '@/lib/usage';
+import { readResponseText } from '@/lib/request-limits';
 
 /**
  * Optional LLM extraction, kept apart from extract.ts so the deterministic
@@ -25,10 +27,21 @@ const MAX_PAGE_CHARS = 14_000;
 export async function extractRowsWithLlm(
   pageText: string,
   name: NameParts,
-  contactId: string
+  contactId: string,
+  opts?: { signal?: AbortSignal; requestKey?: string }
 ): Promise<LlmRow[] | null> {
-  const cfg = await getSetting<{ api_key?: string }>('anthropic');
+  const cfg = await getSetting<{ api_key?: string; monthly_limit?: number | string }>('anthropic');
   if (!cfg.api_key) return null;
+  const configuredLimit = Number(cfg.monthly_limit);
+  const usage = await reserveUsage({
+    provider: 'anthropic',
+    operation: 'messages',
+    requestKey: opts?.requestKey,
+    monthlyLimit:
+      Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : null,
+    metadata: { kind: 'extract', contact_id: contactId, input_chars: pageText.length },
+  });
+  let finished = false;
 
   const prompt = [
     `You are extracting arrest-record listings from one web page's text.`,
@@ -52,7 +65,9 @@ export async function extractRowsWithLlm(
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      signal: AbortSignal.timeout(45_000),
+      signal: opts?.signal
+        ? AbortSignal.any([opts.signal, AbortSignal.timeout(45_000)])
+        : AbortSignal.timeout(45_000),
       headers: {
         'x-api-key': cfg.api_key,
         'anthropic-version': '2023-06-01',
@@ -64,8 +79,10 @@ export async function extractRowsWithLlm(
         messages: [{ role: 'user', content: prompt }],
       }),
     });
-    const body = await res.text();
+    const body = await readResponseText(res, 1024 * 1024);
     if (!res.ok) {
+      await finishUsage(usage.id, 'failed', `HTTP ${res.status}`);
+      finished = true;
       await logDebug({
         level: 'warn',
         source: 'deep-search:llm',
@@ -75,6 +92,11 @@ export async function extractRowsWithLlm(
       return null;
     }
     const data = JSON.parse(body);
+    await finishUsage(usage.id, 'succeeded', undefined, {
+      input_tokens: Number(data.usage?.input_tokens) || 0,
+      output_tokens: Number(data.usage?.output_tokens) || 0,
+    });
+    finished = true;
     const text: string = (data.content ?? [])
       .filter((b: any) => b.type === 'text')
       .map((b: any) => b.text)
@@ -86,6 +108,9 @@ export async function extractRowsWithLlm(
     // the shape of model output.
     return Array.isArray(rows) ? rows.slice(0, 25).map(normalizeLlmRow) : [];
   } catch (e: any) {
+    if (!finished) {
+      await finishUsage(usage.id, 'failed', e?.message ?? 'unknown error');
+    }
     await logDebug({
       level: 'warn',
       source: 'deep-search:llm',
@@ -124,10 +149,21 @@ export async function classifySerpResults(
   items: SerpItem[],
   name: NameParts,
   hints: { middle: string[]; county: string[]; state: string[]; booking_dates: string[] },
-  contactId: string
+  contactId: string,
+  opts?: { signal?: AbortSignal; requestKey?: string }
 ): Promise<SerpVerdict[] | null> {
-  const cfg = await getSetting<{ api_key?: string }>('anthropic');
+  const cfg = await getSetting<{ api_key?: string; monthly_limit?: number | string }>('anthropic');
   if (!cfg.api_key || !items.length) return null;
+  const configuredLimit = Number(cfg.monthly_limit);
+  const usage = await reserveUsage({
+    provider: 'anthropic',
+    operation: 'messages',
+    requestKey: opts?.requestKey,
+    monthlyLimit:
+      Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : null,
+    metadata: { kind: 'classify', contact_id: contactId, item_count: items.length },
+  });
+  let finished = false;
 
   const known = [
     hints.middle.length ? `middle name(s): ${hints.middle.join(', ')}` : '',
@@ -172,7 +208,9 @@ export async function classifySerpResults(
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      signal: AbortSignal.timeout(45_000),
+      signal: opts?.signal
+        ? AbortSignal.any([opts.signal, AbortSignal.timeout(45_000)])
+        : AbortSignal.timeout(45_000),
       headers: {
         'x-api-key': cfg.api_key,
         'anthropic-version': '2023-06-01',
@@ -184,8 +222,10 @@ export async function classifySerpResults(
         messages: [{ role: 'user', content: prompt }],
       }),
     });
-    const body = await res.text();
+    const body = await readResponseText(res, 1024 * 1024);
     if (!res.ok) {
+      await finishUsage(usage.id, 'failed', `HTTP ${res.status}`);
+      finished = true;
       await logDebug({
         level: 'warn',
         source: 'deep-search:classify',
@@ -195,6 +235,11 @@ export async function classifySerpResults(
       return null;
     }
     const data = JSON.parse(body);
+    await finishUsage(usage.id, 'succeeded', undefined, {
+      input_tokens: Number(data.usage?.input_tokens) || 0,
+      output_tokens: Number(data.usage?.output_tokens) || 0,
+    });
+    finished = true;
     const text: string = (data.content ?? [])
       .filter((b: any) => b.type === 'text')
       .map((b: any) => b.text)
@@ -214,6 +259,9 @@ export async function classifySerpResults(
       .slice(0, 25)
       .map((r: any) => ({ i: r.i, kind: r.kind, reason: String(r.reason ?? '').slice(0, 120) }));
   } catch (e: any) {
+    if (!finished) {
+      await finishUsage(usage.id, 'failed', e?.message ?? 'unknown error');
+    }
     await logDebug({
       level: 'warn',
       source: 'deep-search:classify',

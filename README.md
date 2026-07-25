@@ -36,7 +36,7 @@ voicemail drops, vendor management, revenue projection, and a full admin panel.
 
 1. Create a project at [supabase.com](https://supabase.com).
 2. Apply **every** migration in `supabase/migrations` in filename order
-   (`0001_init.sql` through `0009_operational_resilience.sql`). With the
+   (`0001_init.sql` through `0020_runtime_hardening.sql`). With the
    Supabase CLI, run `supabase db push`; otherwise run each unapplied file in
    the SQL Editor. The later migrations contain required security, queue,
    usage-metering, and concurrency controls and are not optional.
@@ -62,6 +62,12 @@ voicemail drops, vendor management, revenue projection, and a full admin panel.
    Sign in with that account, then create all later users under Admin → Users.
    Keep public Supabase signups disabled; even if they are accidentally enabled,
    the database will not activate or promote those identities.
+5. Add `https://yourdomain.com/auth/reset-password` (and the localhost
+   equivalent for development) to Authentication → URL Configuration →
+   Redirect URLs. Password-reset requests deliberately return the same message
+   for known and unknown addresses.
+6. For production, enable MFA for administrator accounts in Supabase Auth and
+   enforce it through your organization or identity-provider policy.
 
 ## 2. Run locally
 
@@ -90,8 +96,16 @@ curl -H "Authorization: Bearer $CRON_SECRET" \
 On Hostinger/hPanel, keep the Next.js app running as the managed Node
 application and configure cron to run only the `curl` command above. Do not
 start `npm run start` from cron: every invocation would create another idle
-Node process. The endpoint uses an atomic database lease, claims at most two
-provider jobs per tick, and safely retries interrupted jobs.
+Node process. The endpoint uses an atomic database lease, claims one provider
+job per tick, renews the job lease while it runs, and safely retries interrupted
+jobs. Manual and deep searches are admin-only and enqueue durable work instead
+of holding an HTTP worker open.
+
+If Hostinger reports many idle processes, first verify hPanel has only one
+managed Node application and only one cron entry. Then inspect `job_queue` for
+stale `processing` rows and `debug_log` for `job:*` lease warnings. Do not add
+more cron invocations to make a backlog drain faster; shorten the schedule
+within the recommended range or move workers to a dedicated process tier.
 
 ## 4. Webhooks
 
@@ -145,8 +159,17 @@ fills link slots 1–14, and computes the Reputation Score.
 - General authenticated API routes should still sit behind a platform/WAF
   request limit. Cost-bearing list email, SMS, and voicemail sends are
   admin-only, capped at 100 recipients, require idempotency keys, and are
-  drained through the bounded queue. Upload endpoints enforce file size and
-  active-content restrictions.
-- **Password reset** flow isn't wired into a page (Supabase supports it).
+  drained through the bounded queue. JSON, webhook, and upload bodies are
+  bounded in the application even when a client omits `Content-Length`.
+- Upload endpoints enforce size, extension, MIME, and magic-byte checks. For
+  defense in depth, keep the storage buckets private and attach Supabase's
+  malware-scanning/quarantine workflow (or an equivalent scanner) before files
+  are made available to staff.
+- Configure the probe proxy only with a public hostname or IP. Loopback,
+  link-local, and private-network destinations are rejected to prevent the
+  setting from becoming an SSRF path.
+- Usage accounting covers BrightData SERP/unlocker requests and Anthropic
+  tokens. Reconcile the estimates against provider invoices; the dashboard is
+  operational metering, not the billing system of record.
 - `xlsx` (SheetJS 0.20.3 via the official CDN tarball) parses admin-uploaded
   files only.

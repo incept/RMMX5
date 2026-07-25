@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { logActivity } from '@/lib/activity';
 import { fireNotification } from '@/lib/notifications';
 import { startSequencesForStatus, stopEnrollmentsFor } from '@/lib/sequence-runner';
+import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -18,7 +19,16 @@ export async function PATCH(request: Request, { params }: Params) {
   const auth = await requireUser();
   if ('error' in auth) return auth.error;
   const { id } = await params;
-  const patch = await request.json();
+  let patch: Record<string, any>;
+  try {
+    patch = await readJsonBody(request, 256 * 1024);
+  } catch (error) {
+    const response = requestErrorResponse(error);
+    return NextResponse.json({ error: response.message }, { status: response.status });
+  }
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    return NextResponse.json({ error: 'A contact patch object is required' }, { status: 400 });
+  }
 
   const admin = createAdminClient();
   const { data: before } = await admin.from('contacts').select('*').eq('id', id).single();
@@ -31,6 +41,45 @@ export async function PATCH(request: Request, { params }: Params) {
   ];
   const updates: Record<string, any> = {};
   for (const key of allowed) if (key in patch) updates[key] = patch[key];
+  const stringLimits: Record<string, number> = {
+    name: 200,
+    city: 120,
+    state: 100,
+    email: 320,
+    phone: 50,
+    browser: 200,
+    ppc_kw: 500,
+    source: 200,
+    ip: 64,
+    utm: 2000,
+    device: 200,
+    source_url: 2048,
+    wp_user: 200,
+    gclid: 500,
+  };
+  for (const [key, max] of Object.entries(stringLimits)) {
+    if (key in updates && updates[key] != null) {
+      updates[key] = String(updates[key]).trim().slice(0, max);
+    }
+  }
+  if ('service_days' in updates) {
+    const value = Number(updates.service_days);
+    if (!Number.isInteger(value) || value < 0 || value > 3650) {
+      return NextResponse.json({ error: 'service_days must be an integer from 0 to 3650' }, { status: 400 });
+    }
+    updates.service_days = value;
+  }
+  if ('custom' in updates && (updates.custom == null || typeof updates.custom !== 'object' || Array.isArray(updates.custom))) {
+    return NextResponse.json({ error: 'custom must be an object' }, { status: 400 });
+  }
+  if (updates.source_url) {
+    try {
+      const sourceUrl = new URL(updates.source_url);
+      if (!['http:', 'https:'].includes(sourceUrl.protocol)) throw new Error();
+    } catch {
+      return NextResponse.json({ error: 'source_url must be an HTTP(S) URL' }, { status: 400 });
+    }
+  }
   if (!Object.keys(updates).length) {
     return NextResponse.json({ error: 'Nothing to update' }, { status: 400 });
   }

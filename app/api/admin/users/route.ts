@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
+import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
 
 /** GET — list all profiles (admin). */
 export async function GET() {
@@ -19,10 +20,27 @@ export async function GET() {
 export async function POST(request: Request) {
   const auth = await requireAdmin();
   if ('error' in auth) return auth.error;
-  const body = await request.json();
+  let body: any;
+  try {
+    body = await readJsonBody(request, 64 * 1024);
+  } catch (error) {
+    const response = requestErrorResponse(error);
+    return NextResponse.json({ error: response.message }, { status: response.status });
+  }
+  body.email = String(body.email ?? '').trim().toLowerCase().slice(0, 320);
+  body.fullName = String(body.fullName ?? '').trim().slice(0, 200);
 
   if (!body.email || !body.password) {
     return NextResponse.json({ error: 'email and password required' }, { status: 400 });
+  }
+  if (typeof body.password !== 'string' || body.password.length < 8 || body.password.length > 128) {
+    return NextResponse.json(
+      { error: 'password must be between 8 and 128 characters' },
+      { status: 400 }
+    );
+  }
+  if (body.role != null && !['admin', 'worker'].includes(body.role)) {
+    return NextResponse.json({ error: 'Invalid role' }, { status: 400 });
   }
 
   const admin = createAdminClient();

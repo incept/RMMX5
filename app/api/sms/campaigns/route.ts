@@ -4,11 +4,20 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { renderTemplate } from '@/lib/sequence-runner';
 import { deliveryKey, MAX_BULK_RECIPIENTS, validIdempotencyKey } from '@/lib/bulk-delivery';
 import { enqueueJob } from '@/lib/job-queue';
+import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
 
 export async function POST(request: Request) {
   const auth = await requireUser();
   if ('error' in auth) return auth.error;
-  const body = await request.json();
+  let body: any;
+  try {
+    body = await readJsonBody(request, 256 * 1024);
+  } catch (error) {
+    const response = requestErrorResponse(error);
+    return NextResponse.json({ error: response.message }, { status: response.status });
+  }
+  body.name = String(body.name ?? '').trim().slice(0, 200);
+  body.body = String(body.body ?? '').slice(0, 20_000);
   if (!body.name || !body.body || !body.listId) {
     return NextResponse.json({ error: 'name, body and listId required' }, { status: 400 });
   }

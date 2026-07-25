@@ -49,7 +49,11 @@ async function setSearchFlag(
   }
 }
 
-export async function runAutoSearchForContact(contactId: string, actorId?: string | null) {
+export async function runAutoSearchForContact(
+  contactId: string,
+  actorId?: string | null,
+  requestKey?: string
+) {
   const supabase = createAdminClient();
 
   const { data: contact } = await supabase.from('contacts').select('*').eq('id', contactId).single();
@@ -126,7 +130,14 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
   // failing (empty zone response, upstream block) still returns the other's
   // results rather than losing the whole search.
   const engines: SearchEngine[] = ['google', 'bing'];
-  const settled = await Promise.allSettled(engines.map((engine) => runSerpSearch(query, { engine })));
+  const settled = await Promise.allSettled(
+    engines.map((engine) =>
+      runSerpSearch(query, {
+        engine,
+        requestKey: requestKey ? `${requestKey}:${engine}` : undefined,
+      })
+    )
+  );
 
   const lists: SerpResult[][] = [];
   const succeeded: SearchEngine[] = [];
@@ -178,7 +189,8 @@ export async function runAutoSearchForContact(contactId: string, actorId?: strin
       contact.name,
       results,
       ruleRows,
-      query
+      query,
+      { requestKey: requestKey ? `${requestKey}:classify` : undefined }
     );
   } catch (e) {
     await logDebug({

@@ -198,31 +198,11 @@ export default function ContactPanel({
     const data = await res.json();
     setBusy(null);
     if (res.ok) {
-      const learned = [
-        data.facts?.middle?.length ? `middle name ${data.facts.middle.join(' / ')}` : '',
-        data.facts?.county?.length ? `county ${data.facts.county.join(' / ')}` : '',
-      ]
-        .filter(Boolean)
-        .join(', ');
       alert(
-        `Probed ${data.probed} site search page(s)` +
-          `${data.blocked ? ` (${data.blocked} unreadable — see Debug Log)` : ''}.
-` +
-          `${data.serpFallbacks ? `${data.serpFallbacks} blocked site(s) searched via Google instead.
-` : ''}` +
-          `${data.pivots ? `${data.pivots} sibling record(s) derived from shared record ids.
-` : ''}` +
-          `${data.derived ? `${data.derived} page(s) built from the county + booking date.
-` : ''}` +
-          `${data.siteSearches ? `${data.siteSearches} site search link(s) added — open them to check for further arrests.
-` : ''}` +
-          `${data.candidates} new candidate(s) to review.` +
-          (learned ? `
-Learned: ${learned}` : '')
+        data.duplicate
+          ? 'Deep search is already queued.'
+          : 'Deep search queued. Results will appear after the next worker tick.'
       );
-      await loadCandidates();
-      await load();
-      onChanged();
     } else {
       alert(data.error ?? 'Deep search failed');
     }

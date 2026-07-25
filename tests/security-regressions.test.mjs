@@ -12,6 +12,7 @@ import {
 import { verifyBearerSecret, verifyEmailitWebhook } from '../lib/webhook-auth.ts';
 import { parseCallScalerPage } from '../lib/callscaler-page.ts';
 import { deliveryKey, validIdempotencyKey } from '../lib/bulk-delivery.ts';
+import { readJsonBody, RequestSizeError } from '../lib/request-limits.ts';
 
 test('the public landing page has no signup call', async () => {
   const source = await readFile(new URL('../app/page.tsx', import.meta.url), 'utf8');
@@ -60,7 +61,7 @@ test('Emailit HMAC verification binds the raw body and rejects stale requests', 
 test('upload validation enforces size and active-content restrictions', () => {
   assert.equal(
     validateContactFile({ name: 'payload.html', size: 10, type: 'text/html' }),
-    'HTML, SVG, and JavaScript files are not allowed'
+    'HTML, SVG, XML, and JavaScript files are not allowed'
   );
   assert.equal(
     validateContactFile({
@@ -78,6 +79,14 @@ test('upload validation enforces size and active-content restrictions', () => {
     validateVoicemailFile({ name: 'not-audio.pdf', size: 10, type: 'application/pdf' }),
     'An audio file is required'
   );
+});
+
+test('JSON request bodies are bounded even without Content-Length', async () => {
+  const request = new Request('https://example.test/api', {
+    method: 'POST',
+    body: JSON.stringify({ value: 'x'.repeat(100) }),
+  });
+  await assert.rejects(() => readJsonBody(request, 40), RequestSizeError);
 });
 
 test('the forward migration contains the database-level concurrency controls', async () => {
@@ -145,4 +154,66 @@ test('webhooks persist searches instead of retaining response workers', async ()
   assert.doesNotMatch(calls, /\bafter\s*\(/);
   assert.match(fluent, /enqueueJob/);
   assert.match(calls, /enqueueJob/);
+});
+
+test('runtime hardening migration wires atomic search, aggregate reads, and indexes', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/0020_runtime_hardening.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /kind in \([\s\S]*?'deep_search'/i);
+  assert.match(migration, /create or replace function public\.accept_search_candidate/i);
+  assert.match(migration, /for update/i);
+  assert.match(migration, /create or replace function public\.finish_usage_event/i);
+  assert.match(migration, /create or replace function public\.usage_summary_since/i);
+  assert.match(migration, /create or replace function public\.dashboard_metrics/i);
+  assert.match(migration, /create or replace function public\.contacts_grid_page/i);
+  assert.match(migration, /gin_trgm_ops/i);
+});
+
+test('manual searches are admin-only durable jobs', async () => {
+  for (const path of [
+    '../app/api/contacts/[id]/search/route.ts',
+    '../app/api/contacts/[id]/deep-search/route.ts',
+  ]) {
+    const source = await readFile(new URL(path, import.meta.url), 'utf8');
+    assert.match(source, /requireAdmin/);
+    assert.match(source, /enqueueJob/);
+    assert.doesNotMatch(source, /runDeepSearch\s*\(/);
+    assert.doesNotMatch(source, /runAutoSearchForContact\s*\(/);
+  }
+});
+
+test('provider metering uses database aggregation and bounded response streams', async () => {
+  const usage = await readFile(new URL('../lib/usage.ts', import.meta.url), 'utf8');
+  const brightdata = await readFile(
+    new URL('../lib/integrations/brightdata.ts', import.meta.url),
+    'utf8'
+  );
+  const llm = await readFile(new URL('../lib/deep-search/llm.ts', import.meta.url), 'utf8');
+  assert.match(usage, /\.rpc\('usage_summary_since'/);
+  assert.match(usage, /\.rpc\('finish_usage_event'/);
+  assert.doesNotMatch(usage, /\.from\('usage_events'\)\s*\.select/);
+  assert.match(brightdata, /readResponseText\(res, 2 \* 1024 \* 1024\)/);
+  assert.match(llm, /readResponseText\(res, 1024 \* 1024\)/);
+});
+
+test('browser capacity is bounded and idle shutdown cannot kill active work', async () => {
+  const browser = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  assert.match(browser, /MAX_QUEUED_PAGES/);
+  assert.match(browser, /SLOT_WAIT_MS/);
+  assert.match(browser, /reason === 'idle' && activePages > 0/);
+  assert.match(browser, /waiters\.length >= MAX_QUEUED_PAGES/);
+});
+
+test('password reset is non-enumerating and has a recovery page', async () => {
+  const landing = await readFile(new URL('../app/page.tsx', import.meta.url), 'utf8');
+  const reset = await readFile(
+    new URL('../app/auth/reset-password/page.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(landing, /resetPasswordForEmail/);
+  assert.match(landing, /If that account exists/);
+  assert.match(reset, /exchangeCodeForSession/);
+  assert.match(reset, /updateUser\(\{ password \}\)/);
 });

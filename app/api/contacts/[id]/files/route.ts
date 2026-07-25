@@ -3,7 +3,12 @@ import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { logActivity } from '@/lib/activity';
 import { randomUUID } from 'crypto';
-import { CONTACT_FILE_MAX_BYTES, storageSafeName, validateContactFile } from '@/lib/uploads';
+import {
+  CONTACT_FILE_MAX_BYTES,
+  storageSafeName,
+  validateContactFileContent,
+} from '@/lib/uploads';
+import { enforceDeclaredLength, requestErrorResponse } from '@/lib/request-limits';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -16,18 +21,19 @@ export async function GET(_request: Request, { params }: Params) {
   const { id } = await params;
 
   const admin = createAdminClient();
-  const { data: files } = await admin
+  const { data: files, error: listError } = await admin
     .from('contact_files')
     .select('*')
     .eq('contact_id', id)
     .order('created_at', { ascending: false });
+  if (listError) return NextResponse.json({ error: listError.message }, { status: 400 });
 
   const withUrls = await Promise.all(
     (files ?? []).map(async (f) => {
-      const { data } = await admin.storage
+      const { data, error } = await admin.storage
         .from(BUCKET)
         .createSignedUrl(f.storage_path, 3600, { download: f.name });
-      return { ...f, url: data?.signedUrl ?? null };
+      return { ...f, url: error ? null : data?.signedUrl ?? null };
     })
   );
 
@@ -44,15 +50,17 @@ export async function POST(request: Request, { params }: Params) {
   const { data: contact } = await admin.from('contacts').select('id').eq('id', id).maybeSingle();
   if (!contact) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
 
-  const contentLength = Number(request.headers.get('content-length'));
-  if (Number.isFinite(contentLength) && contentLength > CONTACT_FILE_MAX_BYTES + 1024 * 1024) {
-    return NextResponse.json({ error: 'Upload is too large' }, { status: 413 });
+  try {
+    enforceDeclaredLength(request, CONTACT_FILE_MAX_BYTES + 1024 * 1024, { required: true });
+  } catch (error) {
+    const response = requestErrorResponse(error);
+    return NextResponse.json({ error: response.message }, { status: response.status });
   }
 
   const form = await request.formData();
   const file = form.get('file') as File | null;
   if (!file) return NextResponse.json({ error: 'file required' }, { status: 400 });
-  const validationError = validateContactFile(file);
+  const validationError = await validateContactFileContent(file);
   if (validationError) {
     return NextResponse.json({ error: validationError }, { status: 400 });
   }
@@ -62,8 +70,9 @@ export async function POST(request: Request, { params }: Params) {
 
   const { error: uploadErr } = await admin.storage
     .from(BUCKET)
-    .upload(path, Buffer.from(await file.arrayBuffer()), {
+    .upload(path, file, {
       contentType: file.type || 'application/octet-stream',
+      cacheControl: '0',
     });
   if (uploadErr) return NextResponse.json({ error: uploadErr.message }, { status: 400 });
 
@@ -111,8 +120,14 @@ export async function DELETE(request: Request, { params }: Params) {
     .single();
   if (!file) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
-  await admin.storage.from(BUCKET).remove([file.storage_path]);
-  await admin.from('contact_files').delete().eq('id', fileId);
+  const { error: storageError } = await admin.storage.from(BUCKET).remove([file.storage_path]);
+  if (storageError) {
+    return NextResponse.json({ error: storageError.message }, { status: 400 });
+  }
+  const { error: deleteError } = await admin.from('contact_files').delete().eq('id', fileId);
+  if (deleteError) {
+    return NextResponse.json({ error: deleteError.message }, { status: 400 });
+  }
 
   await logActivity({
     contactId: id,

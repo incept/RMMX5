@@ -10,6 +10,11 @@ import { verifyBearerSecret } from '@/lib/webhook-auth';
 import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receipts';
 import { logDebug, errorMessage } from '@/lib/debug-log';
 import { enqueueJob } from '@/lib/job-queue';
+import {
+  enforceDeclaredLength,
+  readJsonBody,
+  requestErrorResponse,
+} from '@/lib/request-limits';
 
 /**
  * Fluent Forms webhook — point the form's webhook feed at:
@@ -45,12 +50,14 @@ export async function POST(request: Request) {
   try {
     const contentType = request.headers.get('content-type') ?? '';
     if (contentType.includes('application/json')) {
-      payload = await request.json();
+      payload = await readJsonBody(request, 1024 * 1024);
     } else {
+      enforceDeclaredLength(request, 1024 * 1024, { required: true });
       payload = Object.fromEntries((await request.formData()).entries()) as Record<string, any>;
     }
-  } catch {
-    return NextResponse.json({ error: 'Unparseable payload' }, { status: 400 });
+  } catch (error) {
+    const response = requestErrorResponse(error);
+    return NextResponse.json({ error: response.message }, { status: response.status });
   }
 
   const admin = createAdminClient();
