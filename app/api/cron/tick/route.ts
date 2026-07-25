@@ -44,7 +44,7 @@ export async function GET(request: Request) {
       processDueEnrollments(2),
       processCountdownNotifications(),
       syncMissedCalls(),
-      processQueuedJobs(2),
+      processQueuedJobs(1),
     ]);
     const outcome: Record<string, any> = {};
     await Promise.all(
@@ -64,14 +64,27 @@ export async function GET(request: Request) {
     let webhookPruned: any = null;
     let operationalPruned: any = null;
     try {
-      const { data } = await admin.rpc('prune_debug_log', { p_keep_days: 14 });
+      const { data, error: debugPruneError } = await admin.rpc('prune_debug_log', {
+        p_keep_days: 14,
+      });
+      if (debugPruneError) throw debugPruneError;
       pruned = typeof data === 'number' ? data : null;
-      const { data: wh } = await admin.rpc('prune_webhook_tables').maybeSingle();
+      const { data: wh, error: webhookPruneError } = await admin
+        .rpc('prune_webhook_tables')
+        .maybeSingle();
+      if (webhookPruneError) throw webhookPruneError;
       webhookPruned = wh ?? null;
-      const { data: operational } = await admin.rpc('prune_operational_tables').maybeSingle();
+      const { data: operational, error: operationalPruneError } = await admin
+        .rpc('prune_operational_tables')
+        .maybeSingle();
+      if (operationalPruneError) throw operationalPruneError;
       operationalPruned = operational ?? null;
-    } catch {
-      // Retention is best effort and must not fail the worker.
+    } catch (error) {
+      await logDebug({
+        level: 'warn',
+        source: 'cron:retention',
+        message: `Retention failed: ${errorMessage(error)}`,
+      });
     }
 
     return NextResponse.json({
@@ -83,6 +96,17 @@ export async function GET(request: Request) {
       at: new Date().toISOString(),
     });
   } finally {
-    await admin.from('app_leases').delete().eq('name', 'cron_tick').eq('holder', holder);
+    const { error: releaseError } = await admin
+      .from('app_leases')
+      .delete()
+      .eq('name', 'cron_tick')
+      .eq('holder', holder);
+    if (releaseError) {
+      await logDebug({
+        level: 'warn',
+        source: 'cron:lease',
+        message: `Could not release cron lease: ${releaseError.message}`,
+      }).catch(() => {});
+    }
   }
 }

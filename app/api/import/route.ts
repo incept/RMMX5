@@ -3,6 +3,11 @@ import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { applyScores } from '@/lib/scoring';
 import { logActivity } from '@/lib/activity';
+import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
+
+const MAX_IMPORT_ROWS = 1000;
+const IMPORT_BODY_BYTES = 5 * 1024 * 1024;
+const text = (value: unknown, max: number) => String(value ?? '').trim().slice(0, max);
 
 /**
  * POST { filename, source, mapping, rows } — rows already parsed client-side
@@ -14,18 +19,36 @@ export async function POST(request: Request) {
   const auth = await requireUser();
   if ('error' in auth) return auth.error;
 
-  const body = await request.json();
+  let body: any;
+  try {
+    body = await readJsonBody(request, IMPORT_BODY_BYTES);
+  } catch (error) {
+    const response = requestErrorResponse(error);
+    return NextResponse.json({ error: response.message }, { status: response.status });
+  }
   const rows: Record<string, string>[] = body.rows ?? [];
   if (!rows.length) return NextResponse.json({ error: 'No rows to import' }, { status: 400 });
+  if (!Array.isArray(rows) || rows.length > MAX_IMPORT_ROWS) {
+    return NextResponse.json(
+      { error: `Imports are limited to ${MAX_IMPORT_ROWS} rows per request` },
+      { status: 413 }
+    );
+  }
 
   const admin = createAdminClient();
-  const { data: statuses } = await admin.from('statuses').select('id, name');
+  const { data: statuses, error: statusesError } = await admin.from('statuses').select('id, name');
+  if (statusesError) {
+    return NextResponse.json({ error: statusesError.message }, { status: 500 });
+  }
   const statusByName = new Map((statuses ?? []).map((s) => [s.name.toLowerCase(), s.id]));
-  const { data: defaultStatus } = await admin
+  const { data: defaultStatus, error: defaultStatusError } = await admin
     .from('statuses')
     .select('id')
     .eq('name', 'New')
     .maybeSingle();
+  if (defaultStatusError) {
+    return NextResponse.json({ error: defaultStatusError.message }, { status: 500 });
+  }
 
   let imported = 0;
   const errors: string[] = [];
@@ -41,20 +64,20 @@ export async function POST(request: Request) {
     const chunk = usable.slice(offset, offset + CHUNK);
     try {
       const contactRows = chunk.map((row) => ({
-        name: row.name || row.email || '(no name)',
-        email: row.email || null,
-        phone: row.phone || null,
-        city: row.city || null,
-        state: row.state || null,
+        name: text(row.name || row.email || '(no name)', 300),
+        email: text(row.email, 320) || null,
+        phone: text(row.phone, 40) || null,
+        city: text(row.city, 120) || null,
+        state: text(row.state, 80) || null,
         status_id:
           (row.status
             ? (statusByName.get(row.status.toLowerCase().trim()) ?? defaultStatus?.id)
             : defaultStatus?.id) ?? null,
-        browser: row.browser || null,
-        ppc_kw: row.ppc_kw || null,
-        source: row.source || 'import',
-        ip: row.ip || null,
-        utm: row.utm || null,
+        browser: text(row.browser, 500) || null,
+        ppc_kw: text(row.ppc_kw, 500) || null,
+        source: text(row.source || 'import', 120),
+        ip: text(row.ip, 64) || null,
+        utm: text(row.utm, 1000) || null,
       }));
 
       const { data: contacts, error } = await admin
@@ -76,8 +99,12 @@ export async function POST(request: Request) {
           : 'live';
         let hasLinks = false;
         for (let n = 1; n <= 14; n++) {
-          const url = (row[`link${n}`] ?? '').trim();
+          const url = text(row[`link${n}`], 2048);
           if (!url) continue;
+          if (!/^https?:\/\//i.test(url)) {
+            errors.push(`row ${offset + i + 1}, link ${n}: only http(s) URLs are allowed`);
+            continue;
+          }
           hasLinks = true;
           linkRows.push({ contact_id: contacts[i].id, position: n, url, status: linkStatus });
         }
@@ -88,7 +115,11 @@ export async function POST(request: Request) {
         const { error: linkError } = await admin.from('contact_links').insert(linkRows);
         if (linkError) errors.push(`links (rows ${offset + 1}–${offset + chunk.length}): ${linkError.message}`);
       }
-      for (const id of scoreIds) await applyScores(id);
+      // Small parallel batches avoid one scoring round-trip chain per row while
+      // keeping database pressure bounded on shared hosting.
+      for (let scoreOffset = 0; scoreOffset < scoreIds.length; scoreOffset += 5) {
+        await Promise.all(scoreIds.slice(scoreOffset, scoreOffset + 5).map((id) => applyScores(id)));
+      }
 
       imported += chunk.length;
     } catch (e: any) {
@@ -96,25 +127,28 @@ export async function POST(request: Request) {
     }
   }
 
-  const { data: importRow } = await admin
+  const { data: importRow, error: importLogError } = await admin
     .from('imports')
     .insert({
-      filename: body.filename ?? 'import',
+      filename: text(body.filename ?? 'import', 255),
       source: body.source === 'csv' ? 'csv' : 'monday',
       mapping: body.mapping ?? {},
       total_rows: rows.length,
       imported_rows: imported,
-      status: errors.length === rows.length ? 'failed' : 'done',
+      status: imported === 0 ? 'failed' : 'done',
       error: errors.length ? errors.slice(0, 5).join(' | ') : null,
       created_by: auth.profile.id,
     })
     .select('id')
     .single();
+  if (importLogError) {
+    errors.push(`import audit row: ${importLogError.message}`);
+  }
 
   await logActivity({
     actorId: auth.profile.id,
     type: 'import',
-    description: `Imported ${imported}/${rows.length} contacts from ${body.filename ?? 'file'}`,
+    description: `Imported ${imported}/${rows.length} contacts from ${text(body.filename ?? 'file', 255)}`,
     meta: { import_id: importRow?.id },
   });
 

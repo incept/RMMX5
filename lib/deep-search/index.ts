@@ -215,9 +215,10 @@ async function rowsFromPage(
   pageUrl: string,
   domain: string,
   name: NameParts,
-  contactId: string
+  contactId: string,
+  opts?: { signal?: AbortSignal; requestKey?: string }
 ): Promise<{ rows: RawRow[]; llmFacts: SearchFacts | null }> {
-  const llmRows = await extractRowsWithLlm(pageText, name, contactId);
+  const llmRows = await extractRowsWithLlm(pageText, name, contactId, opts);
   if (llmRows && llmRows.length) {
     const rows = llmRows
       .filter((r) => r.url && /^https?:\/\//i.test(r.url))
@@ -247,9 +248,14 @@ async function rowsFromPage(
 
 export async function runDeepSearchForContact(
   contactId: string,
-  actorId?: string | null
+  actorId?: string | null,
+  opts?: { deadlineMs?: number; requestKey?: string }
 ): Promise<DeepSearchResult> {
   const supabase = createAdminClient();
+  const signal = AbortSignal.timeout(Math.min(Math.max(opts?.deadlineMs ?? 95_000, 10_000), 110_000));
+  const ensureTime = () => {
+    if (signal.aborted) throw new Error('Deep search reached its execution deadline');
+  };
 
   const { data: contact } = await supabase
     .from('contacts')
@@ -330,6 +336,7 @@ export async function runDeepSearchForContact(
     rounds += 1;
 
     for (const { site, url } of targets) {
+      ensureTime();
       if (probed >= MAX_PROBES_PER_RUN) break;
       probed += 1;
       await sleep(PER_DOMAIN_DELAY_MS);
@@ -337,6 +344,7 @@ export async function runDeepSearchForContact(
       const outcome = await fetchProbePage(url, {
         render: site.needs_render,
         needsBrowser: site.needs_browser,
+        signal,
       });
       if (!outcome.ok) {
         blocked += 1;
@@ -371,7 +379,10 @@ export async function runDeepSearchForContact(
       let rows: RawRow[] = [];
       try {
         const pageText = stripToText(outcome.html, url);
-        const parsed = await rowsFromPage(pageText, url, site.domain, name, contactId);
+        const parsed = await rowsFromPage(pageText, url, site.domain, name, contactId, {
+          signal,
+          requestKey: opts?.requestKey ? `${opts.requestKey}:extract:${probed}` : undefined,
+        });
         rows = parsed.rows;
         if (parsed.llmFacts) facts = mergeFacts(facts, parsed.llmFacts);
       } catch (e) {
@@ -473,6 +484,7 @@ export async function runDeepSearchForContact(
   }
 
   for (const domain of fallbackDomains) {
+    ensureTime();
     // Unquoted on purpose. These sites render "BEACHAK GENE MICHAEL" or
     // "Beachak, Gene", so an exact-phrase "Gene Beachak" can return nothing at
     // all. site: already narrows hard, and scoreCorroboration supplies the
@@ -486,7 +498,13 @@ export async function runDeepSearchForContact(
     const engines: SearchEngine[] = ['google', 'bing'];
     const settled = await Promise.allSettled(
       engines.map((engine) =>
-        runSerpSearch(query, { engine, numResults: 20, timeoutMs: FALLBACK_TIMEOUT_MS })
+        runSerpSearch(query, {
+          engine,
+          numResults: 20,
+          timeoutMs: FALLBACK_TIMEOUT_MS,
+          signal,
+          requestKey: opts?.requestKey ? `${opts.requestKey}:fallback:${domain}:${engine}` : undefined,
+        })
       )
     );
     serpFallbacks += engines.length;
@@ -802,7 +820,8 @@ export async function captureUnruledSerpCandidates(
   contactName: string,
   results: { link: string; title: string; snippet: string; engine: string }[],
   rules: UrlRule[],
-  query: string
+  query: string,
+  opts?: { signal?: AbortSignal; requestKey?: string }
 ): Promise<number> {
   const name = splitName(contactName);
   if (!name.last || !results.length) return 0;
@@ -824,7 +843,8 @@ export async function captureUnruledSerpCandidates(
     unruled.map((r) => ({ url: r.link, title: r.title, snippet: r.snippet })),
     name,
     facts,
-    contactId
+    contactId,
+    opts
   );
   if (!verdicts?.length) return 0;
 

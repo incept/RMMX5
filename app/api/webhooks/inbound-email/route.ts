@@ -5,6 +5,7 @@ import { stopEnrollmentsFor } from '@/lib/sequence-runner';
 import { logActivity } from '@/lib/activity';
 import { verifyBearerSecret } from '@/lib/webhook-auth';
 import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receipts';
+import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
 
 /**
  * Generic inbound-email webhook → unified inbox.
@@ -21,7 +22,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid webhook authorization' }, { status: 401 });
   }
 
-  const body = await request.json().catch(() => null);
+  let body: any;
+  try {
+    body = await readJsonBody(request, 1024 * 1024);
+  } catch (error) {
+    const response = requestErrorResponse(error);
+    return NextResponse.json({ error: response.message }, { status: response.status });
+  }
   if (!body?.from) return NextResponse.json({ error: 'from required' }, { status: 400 });
 
   const eventId = body.message_id ?? request.headers.get('x-rmmx-idempotency-key');

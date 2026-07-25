@@ -1,19 +1,31 @@
 import { NextResponse } from 'next/server';
-import { requireUser } from '@/lib/api-auth';
-import { runAutoSearchForContact } from '@/lib/lead-intake';
+import { requireAdmin } from '@/lib/api-auth';
+import { enqueueJob } from '@/lib/job-queue';
 
 type Params = { params: Promise<{ id: string }> };
 
-/** POST runs the automatic Google search (BrightData) for one contact on demand. */
+/** Enqueues a metered Google/Bing search instead of retaining an HTTP worker. */
 export async function POST(_request: Request, { params }: Params) {
-  const auth = await requireUser();
+  const auth = await requireAdmin();
   if ('error' in auth) return auth.error;
   const { id } = await params;
 
-  try {
-    const result = await runAutoSearchForContact(id, auth.profile.id);
-    return NextResponse.json(result);
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 400 });
-  }
+  const { data: contact } = await auth.supabase
+    .from('contacts')
+    .select('id')
+    .eq('id', id)
+    .maybeSingle();
+  if (!contact) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+
+  const window = Math.floor(Date.now() / (5 * 60_000));
+  const result = await enqueueJob(
+    'auto_search',
+    { contactId: id, actorId: auth.profile.id },
+    `manual-auto-search:${id}:${window}`,
+    2
+  );
+  return NextResponse.json(
+    { ...result, status: result.duplicate ? 'already queued' : 'queued' },
+    { status: result.duplicate ? 200 : 202 }
+  );
 }

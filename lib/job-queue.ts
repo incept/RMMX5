@@ -64,12 +64,23 @@ async function handleJob(job: any) {
   const supabase = createAdminClient();
 
   if (job.kind === 'auto_search') {
-    await runAutoSearchForContact(String(payload.contactId));
+    await runAutoSearchForContact(
+      String(payload.contactId),
+      (payload.actorId as string | null) ?? null,
+      `job:${job.id}:attempt:${job.attempt_count}`
+    );
     return;
   }
 
   if (job.kind === 'deep_search') {
-    await runDeepSearchForContact(String(payload.contactId));
+    await runDeepSearchForContact(
+      String(payload.contactId),
+      (payload.actorId as string | null) ?? null,
+      {
+        deadlineMs: 95_000,
+        requestKey: `job:${job.id}:attempt:${job.attempt_count}`,
+      }
+    );
     return;
   }
 
@@ -177,10 +188,10 @@ async function handleJob(job: any) {
   throw new Error(`Unsupported job kind: ${job.kind}`);
 }
 
-async function finishJob(job: any, failure?: unknown) {
+async function finishJob(job: any, worker: string, failure?: unknown) {
   const supabase = createAdminClient();
   if (!failure) {
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from('job_queue')
       .update({
         status: 'completed',
@@ -190,15 +201,20 @@ async function finishJob(job: any, failure?: unknown) {
         completed_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
-      .eq('id', job.id);
+      .eq('id', job.id)
+      .eq('status', 'processing')
+      .eq('locked_by', worker)
+      .select('id')
+      .maybeSingle();
     if (error) throw new Error(error.message);
+    if (!data) throw new Error(`Lost lease before completing job ${job.id}`);
     return;
   }
 
   const terminal = job.attempt_count >= job.max_attempts;
   const backoffMinutes = Math.min(60, 2 ** Math.max(0, job.attempt_count - 1));
   const message = errorMessage(failure).slice(0, 2000);
-  await supabase
+  const { data, error } = await supabase
     .from('job_queue')
     .update({
       status: terminal ? 'failed' : 'pending',
@@ -210,7 +226,21 @@ async function finishJob(job: any, failure?: unknown) {
       last_error: message,
       updated_at: new Date().toISOString(),
     })
-    .eq('id', job.id);
+    .eq('id', job.id)
+    .eq('status', 'processing')
+    .eq('locked_by', worker)
+    .select('id')
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!data) {
+    await logDebug({
+      level: 'warn',
+      source: `job:${job.kind}`,
+      message: `Lost lease before recording job failure: ${message}`,
+      context: { job_id: job.id, worker },
+    });
+    return;
+  }
   await logDebug({
     source: `job:${job.kind}`,
     message,
@@ -218,30 +248,75 @@ async function finishJob(job: any, failure?: unknown) {
   });
 }
 
+async function withJobHeartbeat<T>(job: any, worker: string, run: () => Promise<T>): Promise<T> {
+  const supabase = createAdminClient();
+  let stopped = false;
+  let heartbeatRunning = false;
+  const timer = setInterval(() => {
+    if (stopped || heartbeatRunning) return;
+    heartbeatRunning = true;
+    void (async () => {
+      try {
+        const { error } = await supabase
+          .from('job_queue')
+          .update({ locked_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+          .eq('id', job.id)
+          .eq('status', 'processing')
+          .eq('locked_by', worker);
+        if (error) {
+          await logDebug({
+            level: 'warn',
+            source: `job:${job.kind}`,
+            message: `Could not renew job lease: ${error.message}`,
+            context: { job_id: job.id, worker },
+          });
+        }
+      } catch (heartbeatError) {
+        await logDebug({
+          level: 'warn',
+          source: `job:${job.kind}`,
+          message: `Could not renew job lease: ${errorMessage(heartbeatError)}`,
+          context: { job_id: job.id, worker },
+        }).catch(() => {});
+      } finally {
+        heartbeatRunning = false;
+      }
+    })();
+  }, 30_000);
+  timer.unref?.();
+  try {
+    return await run();
+  } finally {
+    stopped = true;
+    clearInterval(timer);
+  }
+}
+
 /** Claims a deliberately small batch so one cron invocation has a hard ceiling. */
-export async function processQueuedJobs(limit = 2) {
+export async function processQueuedJobs(limit = 1) {
   const worker = randomUUID();
   const supabase = createAdminClient();
   const { data: jobs, error } = await supabase.rpc('claim_jobs', {
     p_worker: worker,
-    p_limit: Math.min(Math.max(limit, 1), 4),
+    p_limit: Math.min(Math.max(limit, 1), 2),
     p_lease_seconds: 150,
   });
   if (error) throw new Error(error.message);
 
   let completed = 0;
   let failed = 0;
-  await Promise.all(
-    (jobs ?? []).map(async (job: any) => {
-      try {
-        await handleJob(job);
-        await finishJob(job);
-        completed += 1;
-      } catch (failure) {
-        await finishJob(job, failure);
-        failed += 1;
-      }
-    })
-  );
+  // Sequential execution is intentional: a deep-search job may own Chrome and
+  // several provider sockets. Database claiming already distributes work across
+  // ticks; parallel work here only creates RAM and latency spikes.
+  for (const job of jobs ?? []) {
+    try {
+      await withJobHeartbeat(job, worker, () => handleJob(job));
+      await finishJob(job, worker);
+      completed += 1;
+    } catch (failure) {
+      await finishJob(job, worker, failure);
+      failed += 1;
+    }
+  }
   return { claimed: jobs?.length ?? 0, completed, failed };
 }

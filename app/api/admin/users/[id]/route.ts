@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
+import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -9,7 +10,13 @@ export async function PATCH(request: Request, { params }: Params) {
   const auth = await requireAdmin();
   if ('error' in auth) return auth.error;
   const { id } = await params;
-  const body = await request.json();
+  let body: any;
+  try {
+    body = await readJsonBody(request, 64 * 1024);
+  } catch (error) {
+    const response = requestErrorResponse(error);
+    return NextResponse.json({ error: response.message }, { status: response.status });
+  }
 
   if (id === auth.profile.id && (body.role === 'worker' || body.status === 'disabled')) {
     return NextResponse.json(
@@ -30,8 +37,11 @@ export async function PATCH(request: Request, { params }: Params) {
   const updates: Record<string, any> = {};
   if (body.role) updates.role = body.role;
   if (body.status) updates.status = body.status;
-  if ('fullName' in body) updates.full_name = body.fullName;
-  if ('phone' in body) updates.phone = body.phone;
+  if ('fullName' in body) updates.full_name = String(body.fullName ?? '').trim().slice(0, 200);
+  if ('phone' in body) updates.phone = String(body.phone ?? '').trim().slice(0, 50);
+  if (!Object.keys(updates).length) {
+    return NextResponse.json({ error: 'Nothing to update' }, { status: 400 });
+  }
 
   const { error } = await createAdminClient().from('profiles').update(updates).eq('id', id);
   if (error) return NextResponse.json({ error: error.message }, { status: 400 });

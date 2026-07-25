@@ -2,9 +2,12 @@ import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { getSetting, setSetting } from '@/lib/settings';
 import { getUsageSummary } from '@/lib/usage';
+import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
 
 const KNOWN_KEYS = [
   'brightdata',
+  'probe_proxy',
+  'probe_browser',
   'emailit',
   'textlink',
   'stripe',
@@ -30,6 +33,7 @@ const READONLY_KEYS = ['usage'] as const;
  */
 const SECRET_FIELDS: Record<string, string[]> = {
   brightdata: ['api_key', 'proxy_password'],
+  probe_proxy: ['password'],
   emailit: ['api_key', 'webhook_signing_secret'],
   textlink: ['api_key'],
   stripe: ['secret_key'],
@@ -76,7 +80,13 @@ export async function GET() {
 export async function PUT(request: Request) {
   const auth = await requireAdmin();
   if ('error' in auth) return auth.error;
-  const body = await request.json();
+  let body: any;
+  try {
+    body = await readJsonBody(request, 128 * 1024);
+  } catch (error) {
+    const response = requestErrorResponse(error);
+    return NextResponse.json({ error: response.message }, { status: response.status });
+  }
 
   if (!KNOWN_KEYS.includes(body.key)) {
     return NextResponse.json({ error: `Unknown settings key: ${body.key}` }, { status: 400 });
@@ -117,6 +127,71 @@ export async function PUT(request: Request) {
         );
       }
       value[field] = cost;
+    }
+  }
+  if (body.key === 'anthropic') {
+    for (const [field, label] of [
+      ['monthly_limit', 'Monthly Anthropic request limit'],
+      ['input_cost_per_million', 'Input-token cost per million'],
+      ['output_cost_per_million', 'Output-token cost per million'],
+    ] as const) {
+      if (value[field] === '' || value[field] == null) continue;
+      const amount = Number(value[field]);
+      const valid =
+        field === 'monthly_limit'
+          ? Number.isInteger(amount) && amount >= 1 && amount <= 2_147_483_647
+          : Number.isFinite(amount) && amount >= 0 && amount <= 1000;
+      if (!valid) {
+        return NextResponse.json({ error: `${label} is invalid` }, { status: 400 });
+      }
+      value[field] = amount;
+    }
+  }
+  if (body.key === 'probe_proxy') {
+    if (value.host) {
+      const host = typeof value.host === 'string' ? value.host.trim().toLowerCase() : '';
+      if (
+        !host ||
+        host.length > 253 ||
+        host.includes('://') ||
+        host.includes(':') ||
+        /[\/\\@\s]/.test(host) ||
+        host === 'localhost' ||
+        host === '0.0.0.0' ||
+        host === '::1' ||
+        /^127\./.test(host) ||
+        /^10\./.test(host) ||
+        /^192\.168\./.test(host) ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+        /^169\.254\./.test(host)
+      ) {
+        return NextResponse.json(
+          { error: 'Proxy host must be a public hostname or IP address' },
+          { status: 400 }
+        );
+      }
+      value.host = host;
+    }
+    if (value.port !== '' && value.port != null) {
+      const port = Number(value.port);
+      if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+        return NextResponse.json({ error: 'Proxy port must be between 1 and 65535' }, { status: 400 });
+      }
+      value.port = port;
+    }
+  }
+  if (body.key === 'probe_browser') {
+    if (
+      value.executable_path &&
+      (typeof value.executable_path !== 'string' || value.executable_path.length > 500)
+    ) {
+      return NextResponse.json({ error: 'Browser executable path is invalid' }, { status: 400 });
+    }
+    if (value.enabled !== '' && value.enabled != null) {
+      if (![true, false, 'true', 'false'].includes(value.enabled)) {
+        return NextResponse.json({ error: 'Browser enabled must be true or false' }, { status: 400 });
+      }
+      value.enabled = value.enabled === true || value.enabled === 'true';
     }
   }
   const secretFields = SECRET_FIELDS[body.key] ?? [];

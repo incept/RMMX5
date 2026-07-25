@@ -120,7 +120,12 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
     key: 'anthropic',
     title: 'Anthropic (deep search extraction)',
     hint: 'Optional. Lets deep search read a mugshot site’s search-results page with Haiku instead of per-site parsers, which survives site redesigns. Without a key, deep search falls back to URL/title pattern extraction.',
-    fields: [{ key: 'api_key', label: 'API key', secret: true, placeholder: 'sk-ant-…' }],
+    fields: [
+      { key: 'api_key', label: 'API key', secret: true, placeholder: 'sk-ant-…' },
+      { key: 'monthly_limit', label: 'Monthly request limit', placeholder: '500' },
+      { key: 'input_cost_per_million', label: 'Input cost / 1M tokens (USD)', placeholder: '1' },
+      { key: 'output_cost_per_million', label: 'Output cost / 1M tokens (USD)', placeholder: '5' },
+    ],
   },
   {
     key: 'search',
@@ -293,7 +298,10 @@ export default function IntegrationsPage() {
                     <td className="pt-1 font-semibold">Estimated spend</td>
                     <td />
                     <td className="pt-1 pl-3 text-right font-mono font-semibold tabular-nums">
-                      ${Number(settings.usage?._cost?.total?.[thisMonth] ?? 0).toFixed(2)}
+                      ${(
+                        Number(settings.usage?._cost?.serp?.[thisMonth] ?? 0) +
+                        Number(settings.usage?._cost?.brightdata_unlocker?.[thisMonth] ?? 0)
+                      ).toFixed(2)}
                     </td>
                     <td />
                   </tr>
@@ -303,6 +311,39 @@ export default function IntegrationsPage() {
                 Counts come from the usage_events log. BrightData charges only for successful
                 requests, so spend prices the successful ones and failures are shown as a health
                 signal rather than a cost. Still an estimate for orientation, not a bill.
+              </div>
+            </div>
+          )}
+
+          {section.key === 'anthropic' && (
+            <div className="mt-3 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
+              <div className="font-semibold">This month&rsquo;s Anthropic usage</div>
+              <div className="mt-1 flex justify-between">
+                <span>Messages</span>
+                <span className="font-mono">
+                  {settings.usage?.anthropic_messages?.[thisMonth] ?? 0}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Tokens</span>
+                <span className="font-mono">
+                  {Number(
+                    settings.usage?._tokens?.anthropic_messages?.[thisMonth]?.input ?? 0
+                  ).toLocaleString()}{' '}
+                  in /{' '}
+                  {Number(
+                    settings.usage?._tokens?.anthropic_messages?.[thisMonth]?.output ?? 0
+                  ).toLocaleString()}{' '}
+                  out
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Estimated spend</span>
+                <span className="font-mono">
+                  ${Number(
+                    settings.usage?._cost?.anthropic_messages?.[thisMonth] ?? 0
+                  ).toFixed(4)}
+                </span>
               </div>
             </div>
           )}

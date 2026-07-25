@@ -41,6 +41,21 @@ export default function LandingPage() {
     }
   }
 
+  async function requestPasswordReset() {
+    if (!email) {
+      setMessage('Enter your email address first.');
+      return;
+    }
+    setBusy(true);
+    setMessage(null);
+    await createClient().auth.resetPasswordForEmail(email, {
+      redirectTo: `${window.location.origin}/auth/reset-password`,
+    });
+    setBusy(false);
+    // Do not reveal whether an address exists in the workspace.
+    setMessage('If that account exists, a password-reset link has been sent.');
+  }
+
   return (
     <main className="flex min-h-screen">
       {/* Brand side */}
@@ -92,6 +107,14 @@ export default function LandingPage() {
 
           <button className="btn btn-primary w-full justify-center" disabled={busy}>
             {busy ? 'Working…' : 'Sign in'}
+          </button>
+          <button
+            type="button"
+            className="mt-2 w-full text-center text-xs text-gray-500 hover:text-gray-900"
+            disabled={busy}
+            onClick={requestPasswordReset}
+          >
+            Forgot password?
           </button>
 
           {message && (
