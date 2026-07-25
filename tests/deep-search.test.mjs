@@ -531,3 +531,35 @@ test('arrests.org indexes BOTH a per-person record and a daily roster', () => {
   // county + date instead of scored like a search hit.
   assert.equal(roster.middle, undefined);
 });
+
+test('a site that had a hit also yields its "all arrests" search link', async () => {
+  // A record page proves ONE booking; the site's own search shows whether the
+  // person has more. Derivable from the name alone, so it works even on a host
+  // we cannot fetch — the operator's browser has no policy problem.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /sitesWithHits/);
+  assert.match(source, /kind: 'site_search'/);
+  // Only for sites that actually produced evidence, so it is not noise.
+  assert.match(source, /!sitesWithHits\.has\(site\.domain\)\) continue/);
+  // Zero confidence: a tool link, not a scored finding, so it sorts last.
+  assert.match(source, /confidence: 0,/);
+});
+
+test('a search view cannot be accepted into a removal link slot', async () => {
+  // Link slots hold pages to be REMOVED. A search URL is not removable content,
+  // so those rows offer Done instead of Add.
+  const source = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(source, /c\.matched_facts\?\.kind === 'site_search'/);
+  assert.match(source, /search view/);
+});
+
+test('the arrests.org search link is the short human-facing form', async () => {
+  const sql = await readFile(
+    new URL('../supabase/migrations/0017_site_search_links.sql', import.meta.url),
+    'utf8'
+  );
+  // The TEMPLATE must be the short form. The surrounding comment mentions
+  // fpartial deliberately, to record why it was dropped.
+  const template = /set search_template = '([^']+)'/.exec(sql)?.[1];
+  assert.equal(template, 'https://{state_name}.arrests.org/search.php?fname={first}&lname={last}');
+});

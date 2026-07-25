@@ -212,6 +212,10 @@ export default function ContactPanel({
 ` : ''}` +
           `${data.pivots ? `${data.pivots} sibling record(s) derived from shared record ids.
 ` : ''}` +
+          `${data.derived ? `${data.derived} page(s) built from the county + booking date.
+` : ''}` +
+          `${data.siteSearches ? `${data.siteSearches} site search link(s) added — open them to check for further arrests.
+` : ''}` +
           `${data.candidates} new candidate(s) to review.` +
           (learned ? `
 Learned: ${learned}` : '')
@@ -734,7 +738,20 @@ Learned: ${learned}` : '')
                               )}
                             </div>
                           </div>
-                          {c.status === 'new' ? (
+                          {c.status === 'new' && c.matched_facts?.kind === 'site_search' ? (
+                            <div className="flex flex-none items-center gap-1">
+                              <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600 dark:text-gray-900">
+                                search view
+                              </span>
+                              <button
+                                className="btn px-2 py-0.5 text-xs text-gray-500"
+                                disabled={busy === `cand-${c.id}`}
+                                onClick={() => reviewCandidate(c.id, 'reject')}
+                              >
+                                Done
+                              </button>
+                            </div>
+                          ) : c.status === 'new' ? (
                             <div className="flex flex-none gap-1">
                               <button
                                 className="btn px-2 py-0.5 text-xs"

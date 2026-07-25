@@ -146,6 +146,7 @@ export interface DeepSearchResult {
   serpFallbacks: number;
   pivots: number;
   derived: number;
+  siteSearches: number;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -276,6 +277,10 @@ export async function runDeepSearchForContact(
   const familyIds = new Map<string, Set<string>>();
   const unindexedPrioritySites: string[] = [];
   let derived = 0;
+  let siteSearches = 0;
+  // Domains that produced at least one hit, so we know which sites are worth
+  // handing the operator a 'see everything on this site' link for.
+  const sitesWithHits = new Set<string>();
 
   for (const round of [0, 1] as const) {
     // Round 0: nothing needed, or the lead's own state. Round 1: county-scoped
@@ -409,6 +414,7 @@ export async function runDeepSearchForContact(
         seen.add(canonical);
         if (!error) {
           candidates += 1;
+          sitesWithHits.add(site.domain);
           // A record's own page teaches us more than the listing row did.
           facts = mergeFacts(facts, rowFacts);
           rememberFamilyIds(familyIds, site.family, rowFacts.record_ids);
@@ -537,6 +543,7 @@ export async function runDeepSearchForContact(
       if (!error) {
         seen.add(canonical);
         candidates += 1;
+        sitesWithHits.add(domain);
         facts = mergeFacts(facts, rowFacts);
         rememberFamilyIds(familyIds, site?.family ?? null, rowFacts.record_ids);
       }
@@ -582,6 +589,7 @@ export async function runDeepSearchForContact(
           seen.add(canonical);
           candidates += 1;
           derived += 1;
+          sitesWithHits.add(site.domain);
         }
       }
     }
@@ -620,8 +628,52 @@ export async function runDeepSearchForContact(
           seen.add(canonical);
           candidates += 1;
           pivots += 1;
+          sitesWithHits.add(site.domain);
         }
       }
+    }
+  }
+
+  /* -- One "all arrests on this site" link per site that had a hit -----------
+     A record page proves one booking; the site's own search page shows whether
+     the person has MORE. That is the view worth opening by hand, and it is
+     derivable from the name alone, so it works even on a host we cannot fetch:
+     the operator's browser has no policy problem.
+
+     Emitted only for sites that actually produced evidence, and marked as a
+     search VIEW rather than a finding — a search URL is not removable content,
+     so it must never land in a link slot. */
+  for (const site of sitesAll) {
+    if (!site.search_template || !sitesWithHits.has(site.domain)) continue;
+    const url = buildProbeUrl(
+      site.search_template,
+      name,
+      facts.county[0] ?? null,
+      facts.state[0] ?? seedState ?? null,
+      dateWindow(facts.booking_dates)
+    );
+    if (!url) continue;
+    const canonical = canonicalUrl(url);
+    if (!canonical || seen.has(canonical)) continue;
+
+    const { error } = await supabase.from('search_candidates').insert({
+      contact_id: contactId,
+      url,
+      canonical_url: canonical,
+      title: `${site.name ?? site.domain} - every arrest listed for this person`,
+      snippet:
+        'search view, not a page to remove: open it to see whether this person has more than one arrest on this site',
+      source: 'probe',
+      source_detail: `${site.domain} (site search)`,
+      round: 4,
+      // Zero on purpose: this is a tool link, not a scored finding, so it sorts
+      // below real candidates and cannot be mistaken for one.
+      confidence: 0,
+      matched_facts: { kind: 'site_search' },
+    });
+    if (!error) {
+      seen.add(canonical);
+      siteSearches += 1;
     }
   }
 
@@ -677,11 +729,32 @@ export async function runDeepSearchForContact(
       `${serpFallbacks ? `, searched ${serpFallbacks} blocked site(s) via Google` : ''}` +
       `${pivots ? `, derived ${pivots} sibling record(s) from shared ids` : ''}` +
       `${derived ? `, built ${derived} date-addressed page(s) from county + booking date` : ''}` +
+      `${siteSearches ? `, ${siteSearches} site search link(s) to check for further arrests` : ''}` +
       `: ${candidates} new candidate(s) for review${learned ? `. Learned: ${learned}` : ''}`,
-    meta: { probed, blocked, candidates, rounds, serpFallbacks, pivots, derived, facts: merged },
+    meta: {
+      probed,
+      blocked,
+      candidates,
+      rounds,
+      serpFallbacks,
+      pivots,
+      derived,
+      siteSearches,
+      facts: merged,
+    },
   });
 
-  return { probed, blocked, candidates, facts: merged, rounds, serpFallbacks, pivots, derived };
+  return {
+    probed,
+    blocked,
+    candidates,
+    facts: merged,
+    rounds,
+    serpFallbacks,
+    pivots,
+    derived,
+    siteSearches,
+  };
 }
 
 /** Never lets a probe failure bubble into a webhook or a job retry storm. */
