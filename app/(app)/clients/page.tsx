@@ -67,7 +67,7 @@ export default function ClientsPage() {
   return (
     <div className="p-6">
       <div className="mb-5 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Clients</h1>
+        <h1 className="text-2xl font-light tracking-tight">Clients</h1>
         <div className="text-sm text-gray-500">
           {clients.length} client{clients.length === 1 ? '' : 's'} · projected{' '}
           <span className="font-mono font-semibold text-green-700">

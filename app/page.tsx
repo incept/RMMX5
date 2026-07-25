@@ -45,9 +45,9 @@ export default function LandingPage() {
     <main className="flex min-h-screen">
       {/* Brand side */}
       <div className="hidden flex-1 flex-col justify-between bg-gray-950 p-10 text-white lg:flex">
-        <div className="text-sm font-bold tracking-widest text-brand-500">RMMX5</div>
+        <div className="text-sm font-light tracking-[0.14em] text-brand-500">RMM-R1S</div>
         <div>
-          <h1 className="max-w-md text-4xl leading-tight font-semibold">
+          <h1 className="max-w-md text-4xl leading-tight font-light tracking-tight">
             Crisis Management CRM
           </h1>
         </div>
@@ -59,7 +59,7 @@ export default function LandingPage() {
       <div className="flex flex-1 items-center justify-center p-6">
         <form onSubmit={submit} className="w-full max-w-sm">
           <div className="mb-6 lg:hidden">
-            <span className="text-sm font-bold tracking-widest text-brand-600">RMMX5</span>
+            <span className="text-sm font-light tracking-[0.14em] text-brand-600">RMM-R1S</span>
           </div>
           <h2 className="text-xl font-semibold">Sign in</h2>
           <p className="mt-1 mb-6 text-sm text-gray-500">

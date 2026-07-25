@@ -57,7 +57,7 @@ export default function ImportPage() {
 
   return (
     <div className="mx-auto max-w-4xl p-6">
-      <h1 className="text-lg font-semibold">Import contacts</h1>
+      <h1 className="text-2xl font-light tracking-tight">Import contacts</h1>
       <p className="mt-1 mb-5 text-sm text-gray-500">
         Upload a <strong>Monday.com board export</strong> (.xlsx) or any CSV. Group rows and
         repeated headers in Monday exports are handled automatically.
