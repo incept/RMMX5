@@ -169,7 +169,7 @@ export async function runSerpSearch(
  * mugshot or complaint site each record is a distinct URL that differs only in
  * its path, and collapsing those would drop real results.
  */
-function canonicalUrl(url: string): string {
+export function canonicalUrl(url: string): string {
   return url
     .trim()
     .toLowerCase()

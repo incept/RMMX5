@@ -57,6 +57,7 @@ export default function ContactPanel({
   const [files, setFiles] = useState<any[]>([]);
   const [messages, setMessages] = useState<any[]>([]);
   const [calls, setCalls] = useState<any[]>([]);
+  const [candidates, setCandidates] = useState<any[]>([]);
   const [enrollments, setEnrollments] = useState<any[]>([]);
   const [listMemberships, setListMemberships] = useState<any[]>([]);
   const [allLists, setAllLists] = useState<any[]>([]);
@@ -134,6 +135,11 @@ export default function ContactPanel({
     if (res.ok) setFiles((await res.json()).files ?? []);
   }, [contactId]);
 
+  const loadCandidates = useCallback(async () => {
+    const res = await fetch(`/api/contacts/${contactId}/candidates`);
+    if (res.ok) setCandidates((await res.json()).candidates ?? []);
+  }, [contactId]);
+
   const loadCalls = useCallback(async () => {
     const { data } = await supabase
       .from('calls')
@@ -151,7 +157,8 @@ export default function ContactPanel({
     if (tab === 'Email') loadEmailTab();
     if (tab === 'Files') loadFiles();
     if (tab === 'Calls') loadCalls();
-  }, [tab, loadEmailTab, loadFiles, loadCalls]);
+    if (tab === 'Link Data') loadCandidates();
+  }, [tab, loadEmailTab, loadFiles, loadCalls, loadCandidates]);
 
   async function patchContact(patch: Record<string, any>) {
     setBusy('save');
@@ -198,6 +205,54 @@ export default function ContactPanel({
       onChanged();
     } else {
       alert(data.error ?? 'Search failed');
+    }
+  }
+
+  async function runDeepSearch() {
+    setBusy('deep');
+    const res = await fetch(`/api/contacts/${contactId}/deep-search`, { method: 'POST' });
+    const data = await res.json();
+    setBusy(null);
+    if (res.ok) {
+      const learned = [
+        data.facts?.middle?.length ? `middle name ${data.facts.middle.join(' / ')}` : '',
+        data.facts?.county?.length ? `county ${data.facts.county.join(' / ')}` : '',
+      ]
+        .filter(Boolean)
+        .join(', ');
+      alert(
+        `Probed ${data.probed} site search page(s)` +
+          `${data.blocked ? ` (${data.blocked} unreadable — see Debug Log)` : ''}.
+` +
+          `${data.candidates} new candidate(s) to review.` +
+          (learned ? `
+Learned: ${learned}` : '')
+      );
+      await loadCandidates();
+      await load();
+      onChanged();
+    } else {
+      alert(data.error ?? 'Deep search failed');
+    }
+  }
+
+  async function reviewCandidate(candidateId: string, action: 'accept' | 'reject') {
+    setBusy(`cand-${candidateId}`);
+    const res = await fetch(`/api/contacts/${contactId}/candidates`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ candidateId, action }),
+    });
+    const data = await res.json();
+    setBusy(null);
+    if (!res.ok) {
+      alert(data.error ?? 'Could not update candidate');
+      return;
+    }
+    await loadCandidates();
+    if (action === 'accept') {
+      await load();
+      onChanged();
     }
   }
 
@@ -616,7 +671,109 @@ export default function ContactPanel({
                 <button className="btn" disabled={busy === 'search'} onClick={runSearch}>
                   {busy === 'search' ? 'Searching…' : '🔎 Run web search'}
                 </button>
+                <button
+                  className="btn"
+                  disabled={busy === 'deep'}
+                  title="Search the mugshot sites' own search pages, then chain what they reveal (middle name, county) into deeper probes. Uses no SERP requests."
+                  onClick={runDeepSearch}
+                >
+                  {busy === 'deep' ? 'Probing…' : '🕵 Deep search'}
+                </button>
               </div>
+
+              {/* What deep search learned. Shown because these facts are what
+                  make the later queries good, and because a wrong county is
+                  the thing most worth catching by eye. */}
+              {(() => {
+                const f = contact.search_facts ?? {};
+                const bits: string[] = [];
+                if (f.middle?.length) bits.push(`Middle: ${f.middle.join(' / ')}`);
+                if (f.county?.length) bits.push(`County: ${f.county.join(' / ')}`);
+                if (f.state?.length) bits.push(`State: ${f.state.join(' / ')}`);
+                if (f.booking_dates?.length) bits.push(`Booked: ${f.booking_dates.join(' / ')}`);
+                if (f.record_ids?.length) bits.push(`Record IDs: ${f.record_ids.join(' / ')}`);
+                return bits.length ? (
+                  <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">
+                    <span className="font-semibold">Facts found: </span>
+                    {bits.join(' · ')}
+                  </div>
+                ) : null;
+              })()}
+
+              {/* Candidate review. Deep search never fills a slot on its own —
+                  someone confirms each URL, and provenance makes the chaining
+                  logic auditable while it earns trust. */}
+              {candidates.length > 0 && (
+                <div>
+                  <div className="mb-2 text-[10px] font-medium tracking-widest text-gray-400 uppercase">
+                    Candidates found ({candidates.filter((c) => c.status === 'new').length} to review)
+                  </div>
+                  <div className="space-y-1.5">
+                    {candidates.map((c) => (
+                      <div
+                        key={c.id}
+                        className={`rounded-lg border px-3 py-2 ${
+                          c.status === 'new'
+                            ? 'border-gray-200'
+                            : 'border-gray-100 bg-gray-50 opacity-60'
+                        }`}
+                      >
+                        <div className="flex items-start gap-2">
+                          <span
+                            className={`mt-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                              Number(c.confidence) >= 0.8
+                                ? 'bg-green-100 text-green-700'
+                                : Number(c.confidence) >= 0.65
+                                  ? 'bg-amber-100 text-amber-700'
+                                  : 'bg-gray-100 text-gray-600'
+                            }`}
+                            title="Corroboration: surname plus how many known facts agree"
+                          >
+                            {Math.round(Number(c.confidence) * 100)}%
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <a
+                              href={c.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="block break-all text-[11px] leading-snug text-brand-600 hover:underline"
+                            >
+                              {c.url} ↗
+                            </a>
+                            <div className="mt-0.5 text-[10px] text-gray-400">
+                              {c.source === 'probe' ? 'Probed' : c.source} {c.source_detail} · round{' '}
+                              {c.round + 1}
+                              {Object.keys(c.matched_facts ?? {}).length > 0 && (
+                                <> · matched {Object.keys(c.matched_facts).join(', ')}</>
+                              )}
+                            </div>
+                          </div>
+                          {c.status === 'new' ? (
+                            <div className="flex flex-none gap-1">
+                              <button
+                                className="btn px-2 py-0.5 text-xs"
+                                disabled={busy === `cand-${c.id}`}
+                                onClick={() => reviewCandidate(c.id, 'accept')}
+                              >
+                                Add
+                              </button>
+                              <button
+                                className="btn px-2 py-0.5 text-xs text-gray-500"
+                                disabled={busy === `cand-${c.id}`}
+                                onClick={() => reviewCandidate(c.id, 'reject')}
+                              >
+                                Dismiss
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="flex-none text-[10px] text-gray-400">{c.status}</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

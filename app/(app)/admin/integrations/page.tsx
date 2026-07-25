@@ -18,6 +18,7 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
       { key: 'api_key', label: 'API key', secret: true },
       { key: 'serp_zone', label: 'SERP zone name', placeholder: 'serp_api1' },
       { key: 'monthly_limit', label: 'Monthly SERP request limit', placeholder: '5000' },
+      { key: 'unlocker_zone', label: 'Unlocker zone (for deep-search page fetches)', placeholder: 'unblocker1' },
       { key: 'proxy_zone', label: 'Proxy zone name (rotating/backconnect)', placeholder: 'residential_proxy1' },
       { key: 'proxy_username', label: 'Proxy username', placeholder: 'brd-customer-XXXX-zone-YYYY' },
       { key: 'proxy_password', label: 'Proxy password', secret: true },
@@ -85,6 +86,12 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
     title: 'ip-api.com geolocation',
     hint: 'Resolves a lead’s IP to a city/state so the automatic Google search can narrow by location when the form did not collect one. Works with no key on the free tier (HTTP, ~45 lookups/minute); a paid key switches to the HTTPS pro endpoint with no rate limit.',
     fields: [{ key: 'api_key', label: 'API key (optional — blank uses the free tier)', secret: true }],
+  },
+  {
+    key: 'anthropic',
+    title: 'Anthropic (deep search extraction)',
+    hint: 'Optional. Lets deep search read a mugshot site’s search-results page with Haiku instead of per-site parsers, which survives site redesigns. Without a key, deep search falls back to URL/title pattern extraction.',
+    fields: [{ key: 'api_key', label: 'API key', secret: true, placeholder: 'sk-ant-…' }],
   },
   {
     key: 'search',

@@ -12,6 +12,7 @@ const KNOWN_KEYS = [
   'callscaler',
   'inbound_email',
   'ipapi',
+  'anthropic',
   'voicemail',
   'search',
   'defaults',
@@ -36,6 +37,7 @@ const SECRET_FIELDS: Record<string, string[]> = {
   callscaler: ['api_key', 'webhook_secret'],
   inbound_email: ['webhook_secret'],
   ipapi: ['api_key'],
+  anthropic: ['api_key'],
   voicemail: ['api_key'],
 };
 
