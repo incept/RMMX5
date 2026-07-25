@@ -55,6 +55,7 @@ interface ProbeSite {
   serp_fallback: boolean;
   record_url_template: string | null;
   needs_render: boolean;
+  priority: number;
 }
 
 /** Records which record ids came from which operator network. */
@@ -224,6 +225,7 @@ export async function runDeepSearchForContact(
   let pivots = 0;
   const blockedDomains = new Set<string>();
   const familyIds = new Map<string, Set<string>>();
+  const unindexedPrioritySites: string[] = [];
 
   for (const round of [0, 1] as const) {
     // Round 0: nothing needed, or the lead's own state. Round 1: county-scoped
@@ -371,12 +373,32 @@ export async function runDeepSearchForContact(
      so a site:-restricted query reaches the same records without touching the
      host. Costs one SERP request per site, so it is capped and only runs for
      sites that were blocked this run or are flagged as never readable. */
-  const fallbackDomains = [
+  // Slots are scarce, so they go by priority (how often a site actually carries
+  // client records), not by the order rows happen to arrive in. Ordering by
+  // scope previously let arre.st — a 19-link mirror — crowd out arrests.org,
+  // which is a fifth of all historical links.
+  //
+  // One query per NETWORK: mirrors of the same operator return the same records,
+  // so querying siblings separately spends two requests for one set of results.
+  const fallbackCandidates = [
     ...new Set([
       ...blockedDomains,
       ...sitesAll.filter((s) => s.serp_fallback).map((s) => s.domain),
     ]),
-  ].slice(0, MAX_SERP_FALLBACKS);
+  ]
+    .map((domain) => ({ domain, site: sitesAll.find((s) => s.domain === domain) }))
+    .sort((a, b) => (a.site?.priority ?? 100) - (b.site?.priority ?? 100));
+
+  const usedFamilies = new Set<string>();
+  const fallbackDomains: string[] = [];
+  for (const { domain, site } of fallbackCandidates) {
+    if (fallbackDomains.length >= MAX_SERP_FALLBACKS) break;
+    if (site?.family) {
+      if (usedFamilies.has(site.family)) continue;
+      usedFamilies.add(site.family);
+    }
+    fallbackDomains.push(domain);
+  }
 
   for (const domain of fallbackDomains) {
     // Unquoted on purpose. These sites render "BEACHAK GENE MICHAEL" or
@@ -400,6 +422,30 @@ export async function runDeepSearchForContact(
     }
 
     const site = sitesAll.find((s) => s.domain === domain);
+
+    // Google index lag is the real limitation of the SERP route: a page that
+    // exists but has not been crawled is invisible. Bing crawls these sites on
+    // its own schedule and sometimes has a record Google does not, so a
+    // high-value site with no Google hits gets one second look. Only for high
+    // priority, and only when the first query found nothing — otherwise this
+    // would double the cost of every fallback.
+    if (!results.length && (site?.priority ?? 100) <= 20) {
+      try {
+        results = await runSerpSearch(query, { engine: 'bing', numResults: 20 });
+        serpFallbacks += 1;
+      } catch {
+        // The Google attempt already reported; a Bing failure adds nothing.
+      }
+    }
+
+    // A priority site with nothing on either index usually means the page is
+    // published but not yet crawled. Flagging the contact puts it in the grid's
+    // Flagged view so it can be re-run in a few days, which is the only real
+    // answer to index lag on a host we are not allowed to fetch directly.
+    if (!results.length && (site?.priority ?? 100) <= 20) {
+      unindexedPrioritySites.push(domain);
+    }
+
     for (const r of results) {
       if (!r.link) continue;
       const canonical = canonicalUrl(r.link);
@@ -473,6 +519,25 @@ export async function runDeepSearchForContact(
           pivots += 1;
         }
       }
+    }
+  }
+
+  // Reuses the existing search_flag, so these land in the contacts grid's
+  // Flagged view with the reason on hover — no new surface to learn.
+  if (unindexedPrioritySites.length) {
+    const { error } = await supabase
+      .from('contacts')
+      .update({
+        search_flag: `Not yet indexed on ${unindexedPrioritySites.join(', ')} — re-run deep search in a few days`,
+        search_flagged_at: new Date().toISOString(),
+      })
+      .eq('id', contactId);
+    if (error) {
+      await logDebug({
+        source: 'deep-search:facts',
+        message: `Could not flag unindexed sites: ${error.message}`,
+        contactId,
+      });
     }
   }
 
