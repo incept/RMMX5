@@ -22,6 +22,10 @@ interface ContactRow {
   created_at: string;
   statuses: (StatusOption & { is_client_status?: boolean }) | null;
   contact_links: { id: string; url: string; status: string }[];
+  // Merged in from the contact_email_stats view.
+  email_sent: number;
+  email_opens: number;
+  email_clicks: number;
 }
 
 interface Profile {
@@ -30,7 +34,15 @@ interface Profile {
   email: string | null;
 }
 
-type SortKey = 'name' | 'created_at' | 'reputation_score' | 'link_score' | 'status';
+type SortKey =
+  | 'name'
+  | 'created_at'
+  | 'reputation_score'
+  | 'link_score'
+  | 'status'
+  | 'email_sent'
+  | 'email_opens'
+  | 'email_clicks';
 type ViewId = 'all' | 'mine' | 'clients' | 'flagged' | 'recent';
 
 interface NewContactDraft {
@@ -42,32 +54,53 @@ interface NewContactDraft {
   status_id: string;
 }
 
-/** Columns the ⚙ menu can show/hide. Name is always on. */
-const COL_DEFS = [
-  ['email', 'Email'],
-  ['phone', 'Phone'],
-  ['location', 'Location'],
-  ['status', 'Status'],
-  ['rep', 'Rep Score'],
-  ['link', 'Link Score'],
-  ['links', 'Live Links'],
-  ['owner', 'Owner'],
-  ['created', 'Created'],
-] as const;
-type ColKey = (typeof COL_DEFS)[number][0];
-const DEFAULT_COLS: Record<ColKey, boolean> = {
-  email: true, phone: true, location: true, status: true, rep: true,
-  link: true, links: true, owner: false, created: true,
-};
+/** Every optional column, in factory order. Name is pinned and not listed. */
+type ColKey =
+  | 'email'
+  | 'phone'
+  | 'location'
+  | 'status'
+  | 'rep'
+  | 'link'
+  | 'links'
+  | 'sent'
+  | 'opens'
+  | 'clicks'
+  | 'owner'
+  | 'created';
+
+const DEFAULT_ORDER: ColKey[] = [
+  'email', 'phone', 'location', 'status', 'rep', 'link', 'links',
+  'sent', 'opens', 'clicks', 'owner', 'created',
+];
+// Location is off by default because the Contact column already shows city and
+// state beside the name; turn it on for a sortable, reorderable column of its own.
+const DEFAULT_HIDDEN: ColKey[] = ['owner', 'location'];
 
 const PAGE_SIZE = 50;
-const COLS_LS = 'rmmx5-contact-cols';
+// v2: the shape changed from a visibility map to { order, hidden } when columns
+// became reorderable. A fresh key means old prefs are ignored, not misread.
+const COLS_LS = 'rmmx5-contact-columns-v2';
+
+const SORT_LABELS: Record<SortKey, string> = {
+  name: 'name',
+  created_at: 'created',
+  reputation_score: 'rep score',
+  link_score: 'link score',
+  status: 'status',
+  email_sent: 'emails sent',
+  email_opens: 'opens',
+  email_clicks: 'clicks',
+};
 
 /**
  * The main CRM view, relaid out after the iCRM design study: saved views with
- * counts, status dot-filters, a column picker, inline email editing, and bulk
- * actions on a floating bar — all on the app's existing light/dark token
- * palette. Selecting a contact opens the slide-over detail panel.
+ * counts, status dot-filters, inline email editing, bulk actions on a floating
+ * bar, and a slide-over detail panel — all on the app's existing light/dark
+ * token palette.
+ *
+ * Columns are user-owned: drag any header to reorder, toggle visibility from
+ * the Columns menu, and both stick in localStorage until changed again.
  */
 export default function ContactsPage() {
   const supabase = useMemo(() => createClient(), []);
@@ -80,7 +113,8 @@ export default function ContactsPage() {
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [sortKey, setSortKey] = useState<SortKey>('created_at');
   const [sortAsc, setSortAsc] = useState(false);
-  const [cols, setCols] = useState<Record<ColKey, boolean>>(DEFAULT_COLS);
+  const [order, setOrder] = useState<ColKey[]>(DEFAULT_ORDER);
+  const [hidden, setHidden] = useState<Set<ColKey>>(new Set(DEFAULT_HIDDEN));
   const [colMenu, setColMenu] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
@@ -95,22 +129,71 @@ export default function ContactsPage() {
   const [bulkBusy, setBulkBusy] = useState(false);
   const { isAdmin } = useMyRole();
 
-  /* ── persisted prefs ── */
+  /* ── column prefs ── */
   useEffect(() => {
     try {
-      const c = localStorage.getItem(COLS_LS);
-      if (c) setCols({ ...DEFAULT_COLS, ...JSON.parse(c) });
+      const raw = localStorage.getItem(COLS_LS);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      const kept = (saved.order ?? []).filter((k: any) => DEFAULT_ORDER.includes(k));
+      // Append any column added to the app since these prefs were written, so
+      // a new column is never stranded outside the user's saved order.
+      setOrder([...kept, ...DEFAULT_ORDER.filter((k) => !kept.includes(k))]);
+      setHidden(new Set((saved.hidden ?? []).filter((k: any) => DEFAULT_ORDER.includes(k))));
     } catch {
       /* corrupted prefs — defaults are fine */
     }
   }, []);
-  function setCol(key: ColKey, on: boolean) {
-    setCols((c) => {
-      const next = { ...c, [key]: on };
-      localStorage.setItem(COLS_LS, JSON.stringify(next));
+
+  function persistCols(nextOrder: ColKey[], nextHidden: Set<ColKey>) {
+    try {
+      localStorage.setItem(
+        COLS_LS,
+        JSON.stringify({ order: nextOrder, hidden: [...nextHidden] })
+      );
+    } catch {
+      /* private mode / quota — ordering still works for this session */
+    }
+  }
+
+  function toggleCol(key: ColKey) {
+    setHidden((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      persistCols(order, next);
       return next;
     });
   }
+
+  /** Moves `from` to sit where `to` currently is, within the full order. */
+  function moveCol(from: ColKey, to: ColKey) {
+    if (from === to) return;
+    setOrder((prev) => {
+      const next = prev.filter((k) => k !== from);
+      const at = next.indexOf(to);
+      next.splice(at < 0 ? next.length : at, 0, from);
+      persistCols(next, hidden);
+      return next;
+    });
+  }
+
+  /** Keyboard-accessible nudge for the Columns menu (drag needs a mouse). */
+  function nudgeCol(key: ColKey, delta: -1 | 1) {
+    setOrder((prev) => {
+      const i = prev.indexOf(key);
+      const j = i + delta;
+      if (i < 0 || j < 0 || j >= prev.length) return prev;
+      const next = [...prev];
+      [next[i], next[j]] = [next[j], next[i]];
+      persistCols(next, hidden);
+      return next;
+    });
+  }
+
+  const dragCol = useRef<ColKey | null>(null);
+  const [dragOverCol, setDragOverCol] = useState<ColKey | null>(null);
+
   function flash(msg: string) {
     setToast(msg);
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -132,8 +215,25 @@ export default function ContactsPage() {
       query = query.or(`name.ilike.%${q}%,email.ilike.%${q}%,phone.ilike.%${q}%`);
     }
 
-    const { data } = await query;
-    setContacts((data as any) ?? []);
+    // Engagement totals come pre-aggregated from a view (migration 0010) so the
+    // grid never pulls every email_messages row just to count them. If the view
+    // is missing the counts read as 0 rather than failing the whole page.
+    const [contactRes, statsRes] = await Promise.all([
+      query,
+      supabase.from('contact_email_stats').select('contact_id, sent, opens, clicks'),
+    ]);
+
+    const stats = new Map(
+      (statsRes.data ?? []).map((s: any) => [s.contact_id, s])
+    );
+    setContacts(
+      ((contactRes.data as any[]) ?? []).map((c) => ({
+        ...c,
+        email_sent: stats.get(c.id)?.sent ?? 0,
+        email_opens: stats.get(c.id)?.opens ?? 0,
+        email_clicks: stats.get(c.id)?.clicks ?? 0,
+      }))
+    );
     setLoading(false);
   }, [supabase, search]);
 
@@ -173,7 +273,11 @@ export default function ContactsPage() {
       { id: 'mine', label: 'My contacts', test: (c) => !!meId && c.owner_id === meId },
       { id: 'clients', label: 'Clients', test: (c) => !!c.statuses?.is_client_status },
       { id: 'flagged', label: '⚑ Flagged', test: (c) => !!c.search_flag },
-      { id: 'recent', label: 'New this week', test: (c) => new Date(c.created_at).getTime() >= weekAgo },
+      {
+        id: 'recent',
+        label: 'New this week',
+        test: (c) => new Date(c.created_at).getTime() >= weekAgo,
+      },
     ],
     [meId, weekAgo]
   );
@@ -232,10 +336,6 @@ export default function ContactsPage() {
       setSortAsc(key === 'name');
     }
   }
-  const SORT_LABELS: Record<SortKey, string> = {
-    name: 'name', created_at: 'created', reputation_score: 'rep score',
-    link_score: 'link score', status: 'status',
-  };
 
   /* ── selection + bulk actions ── */
   const visibleIds = sorted.map((c) => c.id);
@@ -345,7 +445,7 @@ export default function ContactsPage() {
     });
   }
 
-  /* ── new contact modal (unchanged behavior) ── */
+  /* ── new contact modal ── */
   function openNewContact() {
     setNewContact({
       name: '', email: '', phone: '', city: '', state: '',
@@ -382,18 +482,178 @@ export default function ContactsPage() {
     if (data) setSelectedId(data.id);
   }
 
-  /* ── header cell helper ── */
-  const th = (label: string, key?: SortKey, extra = '') => (
-    <div
-      className={`flex items-center gap-1.5 ${extra} ${key ? 'cursor-pointer hover:text-gray-700' : ''}`}
-      onClick={key ? () => toggleSort(key) : undefined}
-    >
-      {label}
-      {key && sortKey === key && <span className="text-gray-900">{sortAsc ? '↑' : '↓'}</span>}
-    </div>
-  );
+  /* ── column definitions ─────────────────────────────────────────────────
+     One entry per optional column: the same `width` drives the header and the
+     cell so they can't drift apart, and `render` keeps each cell's markup with
+     its heading. */
+  const COLUMNS: Record<
+    ColKey,
+    {
+      label: string;
+      width: string;
+      sortKey?: SortKey;
+      align?: string;
+      render: (c: ContactRow) => React.ReactNode;
+    }
+  > = {
+    email: {
+      label: 'Email',
+      width: 'w-52',
+      render: (contact) =>
+        editEmailId === contact.id ? (
+          <input
+            autoFocus
+            className="h-6 w-44 rounded-md border border-gray-300 bg-white px-2 text-xs outline-none focus:border-brand-500"
+            value={emailDraft}
+            onChange={(e) => setEmailDraft(e.target.value)}
+            onBlur={() => commitEmailEdit(contact)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitEmailEdit(contact);
+              if (e.key === 'Escape') setEditEmailId(null);
+            }}
+          />
+        ) : (
+          <span
+            className="block cursor-text truncate text-xs font-light text-gray-500 hover:text-gray-900"
+            title="Click to edit"
+            onClick={(e) => {
+              e.stopPropagation();
+              startEmailEdit(contact);
+            }}
+          >
+            {contact.email || <span className="text-gray-300">—</span>}
+          </span>
+        ),
+    },
+    phone: {
+      label: 'Phone',
+      width: 'w-32',
+      render: (c) => <span className="truncate text-xs font-light text-gray-500">{c.phone}</span>,
+    },
+    location: {
+      label: 'Location',
+      width: 'w-36',
+      render: (c) => (
+        <span className="truncate text-xs font-light text-gray-500">
+          {[c.city, c.state].filter(Boolean).join(', ')}
+        </span>
+      ),
+    },
+    status: {
+      label: 'Status',
+      width: 'w-36',
+      sortKey: 'status',
+      render: (c) => (
+        <div onClick={(e) => e.stopPropagation()}>
+          <StatusPill
+            status={c.statuses}
+            options={statuses}
+            onChange={(statusId) => setStatus(c.id, statusId)}
+          />
+        </div>
+      ),
+    },
+    rep: {
+      label: 'Rep',
+      width: 'w-20',
+      sortKey: 'reputation_score',
+      render: (c) =>
+        c.reputation_score == null ? null : (
+          <span
+            className={`text-xs font-medium tabular-nums ${
+              Number(c.reputation_score) >= 70
+                ? 'text-green-600'
+                : Number(c.reputation_score) >= 40
+                  ? 'text-amber-600'
+                  : 'text-red-600'
+            }`}
+          >
+            {c.reputation_score}
+          </span>
+        ),
+    },
+    link: {
+      label: 'Links',
+      width: 'w-20',
+      sortKey: 'link_score',
+      render: (c) => <span className="text-xs tabular-nums text-gray-500">{c.link_score}</span>,
+    },
+    links: {
+      label: 'Live',
+      width: 'w-16',
+      render: (c) => {
+        const live = c.contact_links.filter((l) => l.url && l.status === 'live').length;
+        return <span className="text-xs tabular-nums text-gray-500">{live || ''}</span>;
+      },
+    },
+    sent: {
+      label: 'Sent',
+      width: 'w-16',
+      sortKey: 'email_sent',
+      render: (c) => (
+        <span className="text-xs tabular-nums text-gray-500">{c.email_sent || ''}</span>
+      ),
+    },
+    opens: {
+      label: 'Opens',
+      width: 'w-16',
+      sortKey: 'email_opens',
+      render: (c) => (
+        <span
+          className={`text-xs tabular-nums ${c.email_opens ? 'text-gray-700' : 'text-gray-400'}`}
+        >
+          {c.email_opens || ''}
+        </span>
+      ),
+    },
+    clicks: {
+      label: 'Clicks',
+      width: 'w-16',
+      sortKey: 'email_clicks',
+      render: (c) => (
+        <span
+          className={`text-xs font-medium tabular-nums ${
+            c.email_clicks ? 'text-green-600' : 'text-gray-400'
+          }`}
+        >
+          {c.email_clicks || ''}
+        </span>
+      ),
+    },
+    owner: {
+      label: 'Owner',
+      width: 'w-28',
+      render: (c) => (
+        <span className="truncate text-xs font-light text-gray-500">{ownerName(c.owner_id)}</span>
+      ),
+    },
+    created: {
+      label: 'Created',
+      width: 'w-24',
+      sortKey: 'created_at',
+      render: (c) => (
+        <span className="text-xs font-light text-gray-400">
+          {new Date(c.created_at).toLocaleDateString()}
+        </span>
+      ),
+    },
+  };
 
+  const visibleCols = order.filter((k) => !hidden.has(k));
   const skeletonWidths = [190, 150, 210, 170, 140, 200, 160, 180];
+
+  const checkbox = (on: boolean, onClick: (e: React.MouseEvent) => void) => (
+    <button
+      className={`flex h-[13px] w-[13px] items-center justify-center rounded border text-[9px] leading-none transition hover:scale-110 ${
+        on
+          ? 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900'
+          : 'border-gray-300 bg-transparent text-transparent'
+      }`}
+      onClick={onClick}
+    >
+      ✓
+    </button>
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -427,27 +687,55 @@ export default function ContactsPage() {
             {colMenu && (
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setColMenu(false)} />
-                <div className="anim-pop-in absolute right-0 top-9 z-30 w-48 rounded-xl border border-gray-200 bg-white p-2 shadow-xl">
+                <div className="anim-pop-in absolute right-0 top-9 z-30 w-60 rounded-xl border border-gray-200 bg-white p-2 shadow-xl">
                   <div className="px-2 pb-1.5 pt-1 text-[10px] font-medium uppercase tracking-widest text-gray-400">
                     Columns
                   </div>
-                  {COL_DEFS.map(([key, label]) => (
-                    <button
+                  {order.map((key, i) => (
+                    <div
                       key={key}
-                      className={`flex h-7 w-full items-center justify-between rounded-lg px-2 text-left text-xs hover:bg-gray-50 ${
-                        cols[key] ? 'text-gray-900' : 'text-gray-400'
-                      }`}
-                      onClick={() => setCol(key, !cols[key])}
+                      className="flex h-7 items-center gap-1 rounded-lg pr-1 hover:bg-gray-50"
                     >
-                      <span>{label}</span>
-                      <span className="text-gray-500">{cols[key] ? '✓' : ''}</span>
-                    </button>
+                      <button
+                        className={`flex-1 px-2 text-left text-xs ${
+                          hidden.has(key) ? 'text-gray-400' : 'text-gray-900'
+                        }`}
+                        onClick={() => toggleCol(key)}
+                      >
+                        {COLUMNS[key].label}
+                      </button>
+                      <span className="w-3 text-center text-xs text-gray-500">
+                        {hidden.has(key) ? '' : '✓'}
+                      </span>
+                      <button
+                        className="px-1 text-xs text-gray-400 hover:text-gray-900 disabled:opacity-30"
+                        title="Move left"
+                        disabled={i === 0}
+                        onClick={() => nudgeCol(key, -1)}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        className="px-1 text-xs text-gray-400 hover:text-gray-900 disabled:opacity-30"
+                        title="Move right"
+                        disabled={i === order.length - 1}
+                        onClick={() => nudgeCol(key, 1)}
+                      >
+                        ↓
+                      </button>
+                    </div>
                   ))}
+                  <div className="mt-1 border-t border-gray-100 px-2 pt-1.5 text-[10px] leading-snug text-gray-400">
+                    Drag a column heading in the grid to reorder, or use ↑ ↓ here.
+                  </div>
                 </div>
               </>
             )}
           </div>
-          <Link href="/import" className="h-8 rounded-full px-3 text-xs leading-8 text-gray-500 hover:text-gray-900">
+          <Link
+            href="/import"
+            className="h-8 rounded-full px-3 text-xs leading-8 text-gray-500 hover:text-gray-900"
+          >
             Import
           </Link>
           <button
@@ -524,39 +812,65 @@ export default function ContactsPage() {
       <div className="relative flex min-h-0 flex-1 flex-col border-t border-gray-200">
         <div className="min-h-0 flex-1 overflow-auto">
           <div className="min-w-[1080px]">
-            {/* mini header */}
+            {/* header — each optional heading is a drag handle */}
             <div className="sticky top-0 z-10 flex h-8 items-center border-b border-gray-200 bg-canvas px-6 text-[10px] font-medium uppercase tracking-widest text-gray-400">
               <div className="w-8 flex-none">
-                <button
-                  className={`flex h-[13px] w-[13px] items-center justify-center rounded border text-[9px] leading-none transition hover:scale-110 ${
-                    allOn
-                      ? 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900'
-                      : 'border-gray-300 bg-transparent text-transparent'
-                  }`}
-                  onClick={toggleAll}
-                >
-                  ✓
-                </button>
+                {checkbox(allOn, () => toggleAll())}
               </div>
-              <div className="min-w-[220px] flex-1">{th('Contact', 'name')}</div>
-              {cols.email && <div className="w-52 flex-none">Email</div>}
-              {cols.phone && <div className="w-32 flex-none">Phone</div>}
-              {cols.location && <div className="w-36 flex-none">Location</div>}
-              {cols.status && <div className="w-36 flex-none">{th('Status', 'status')}</div>}
-              {cols.rep && <div className="w-20 flex-none">{th('Rep', 'reputation_score')}</div>}
-              {cols.link && <div className="w-20 flex-none">{th('Links', 'link_score')}</div>}
-              {cols.links && <div className="w-16 flex-none">Live</div>}
-              {cols.owner && <div className="w-28 flex-none">Owner</div>}
-              {cols.created && <div className="w-24 flex-none">{th('Created', 'created_at')}</div>}
+              <div
+                className="flex min-w-[220px] flex-1 cursor-pointer items-center gap-1.5 hover:text-gray-700"
+                onClick={() => toggleSort('name')}
+              >
+                Contact
+                {sortKey === 'name' && <span className="text-gray-900">{sortAsc ? '↑' : '↓'}</span>}
+              </div>
+              {visibleCols.map((key) => {
+                const col = COLUMNS[key];
+                return (
+                  <div
+                    key={key}
+                    draggable
+                    onDragStart={(e) => {
+                      dragCol.current = key;
+                      e.dataTransfer.effectAllowed = 'move';
+                    }}
+                    onDragOver={(e) => {
+                      if (!dragCol.current) return;
+                      e.preventDefault();
+                      if (dragOverCol !== key) setDragOverCol(key);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const from = dragCol.current;
+                      dragCol.current = null;
+                      setDragOverCol(null);
+                      if (from) moveCol(from, key);
+                    }}
+                    onDragEnd={() => {
+                      dragCol.current = null;
+                      setDragOverCol(null);
+                    }}
+                    title={
+                      col.sortKey ? 'Click to sort · drag to reorder' : 'Drag to reorder'
+                    }
+                    className={`${col.width} flex flex-none cursor-grab items-center gap-1.5 active:cursor-grabbing ${
+                      col.sortKey ? 'hover:text-gray-700' : ''
+                    } ${dragOverCol === key ? 'border-l-2 border-brand-500 text-gray-900' : ''}`}
+                    onClick={() => col.sortKey && toggleSort(col.sortKey)}
+                  >
+                    {col.label}
+                    {col.sortKey && sortKey === col.sortKey && (
+                      <span className="text-gray-900">{sortAsc ? '↑' : '↓'}</span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
 
             {/* rows */}
             {!loading &&
               pageRows.map((contact, i) => {
                 const isSel = selected.has(contact.id);
-                const liveLinks = contact.contact_links.filter(
-                  (l) => l.url && l.status === 'live'
-                ).length;
                 return (
                   <div
                     key={contact.id}
@@ -566,26 +880,20 @@ export default function ContactsPage() {
                     style={{ animationDelay: `${Math.min(i * 20, 320)}ms` }}
                   >
                     <div className="w-8 flex-none">
-                      <button
-                        className={`flex h-[13px] w-[13px] items-center justify-center rounded border text-[9px] leading-none transition hover:scale-110 ${
-                          isSel
-                            ? 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900'
-                            : 'border-gray-300 bg-transparent text-transparent'
-                        }`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleOne(contact.id);
-                        }}
-                      >
-                        ✓
-                      </button>
+                      {checkbox(isSel, (e) => {
+                        e.stopPropagation();
+                        toggleOne(contact.id);
+                      })}
                     </div>
                     <div
-                      className="flex min-w-[220px] flex-1 cursor-pointer items-baseline gap-2.5 pr-3"
+                      className="flex min-w-[220px] flex-1 cursor-pointer items-baseline gap-2 pr-3"
                       onClick={() => setSelectedId(contact.id)}
                     >
                       {contact.search_flag && (
-                        <span className="cursor-help text-amber-500" title={`Search needs a re-run: ${contact.search_flag}`}>
+                        <span
+                          className="cursor-help text-amber-500"
+                          title={`Search needs a re-run: ${contact.search_flag}`}
+                        >
                           ⚑
                         </span>
                       )}
@@ -594,88 +902,11 @@ export default function ContactsPage() {
                         {[contact.city, contact.state].filter(Boolean).join(', ')}
                       </span>
                     </div>
-                    {cols.email && (
-                      <div className="w-52 flex-none pr-3">
-                        {editEmailId === contact.id ? (
-                          <input
-                            autoFocus
-                            className="h-6 w-44 rounded-md border border-gray-300 bg-white px-2 text-xs outline-none focus:border-brand-500"
-                            value={emailDraft}
-                            onChange={(e) => setEmailDraft(e.target.value)}
-                            onBlur={() => commitEmailEdit(contact)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') commitEmailEdit(contact);
-                              if (e.key === 'Escape') setEditEmailId(null);
-                            }}
-                          />
-                        ) : (
-                          <span
-                            className="block cursor-text truncate text-xs font-light text-gray-500 hover:text-gray-900"
-                            title="Click to edit"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              startEmailEdit(contact);
-                            }}
-                          >
-                            {contact.email || <span className="text-gray-300">—</span>}
-                          </span>
-                        )}
+                    {visibleCols.map((key) => (
+                      <div key={key} className={`${COLUMNS[key].width} flex-none pr-3`}>
+                        {COLUMNS[key].render(contact)}
                       </div>
-                    )}
-                    {cols.phone && (
-                      <div className="w-32 flex-none truncate text-xs font-light text-gray-500">
-                        {contact.phone}
-                      </div>
-                    )}
-                    {cols.location && (
-                      <div className="w-36 flex-none truncate text-xs font-light text-gray-500">
-                        {[contact.city, contact.state].filter(Boolean).join(', ')}
-                      </div>
-                    )}
-                    {cols.status && (
-                      <div className="w-36 flex-none" onClick={(e) => e.stopPropagation()}>
-                        <StatusPill
-                          status={contact.statuses}
-                          options={statuses}
-                          onChange={(statusId) => setStatus(contact.id, statusId)}
-                        />
-                      </div>
-                    )}
-                    {cols.rep && (
-                      <div className="w-20 flex-none text-xs tabular-nums">
-                        {contact.reputation_score != null && (
-                          <span
-                            className={`font-medium ${
-                              Number(contact.reputation_score) >= 70
-                                ? 'text-green-600'
-                                : Number(contact.reputation_score) >= 40
-                                  ? 'text-amber-600'
-                                  : 'text-red-600'
-                            }`}
-                          >
-                            {contact.reputation_score}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    {cols.link && (
-                      <div className="w-20 flex-none text-xs tabular-nums text-gray-500">
-                        {contact.link_score}
-                      </div>
-                    )}
-                    {cols.links && (
-                      <div className="w-16 flex-none text-xs text-gray-500">{liveLinks || ''}</div>
-                    )}
-                    {cols.owner && (
-                      <div className="w-28 flex-none truncate text-xs font-light text-gray-500">
-                        {ownerName(contact.owner_id)}
-                      </div>
-                    )}
-                    {cols.created && (
-                      <div className="w-24 flex-none text-xs font-light text-gray-400">
-                        {new Date(contact.created_at).toLocaleDateString()}
-                      </div>
-                    )}
+                    ))}
                   </div>
                 );
               })}
@@ -706,8 +937,12 @@ export default function ContactsPage() {
                     Import a CSV from your old CRM, or add the first contact by hand.
                   </span>
                   <div className="mt-1 flex gap-2">
-                    <Link href="/import" className="btn">Import CSV</Link>
-                    <button className="btn btn-primary" onClick={openNewContact}>New contact</button>
+                    <Link href="/import" className="btn">
+                      Import CSV
+                    </Link>
+                    <button className="btn btn-primary" onClick={openNewContact}>
+                      New contact
+                    </button>
                   </div>
                 </>
               ) : (
@@ -716,10 +951,7 @@ export default function ContactsPage() {
                   <span className="max-w-xs text-xs font-light text-gray-400">
                     Remove a filter or search a different name.
                   </span>
-                  <button
-                    className="btn mt-1 rounded-full text-xs"
-                    onClick={clearFilters}
-                  >
+                  <button className="btn mt-1 rounded-full text-xs" onClick={clearFilters}>
                     Clear filters
                   </button>
                 </>
@@ -774,12 +1006,18 @@ export default function ContactsPage() {
               value=""
               disabled={bulkBusy}
               onChange={(e) => {
-                if (e.target.value) bulkPatch({ status_id: e.target.value }, `Status updated for ${selected.size} contacts`);
+                if (e.target.value)
+                  bulkPatch(
+                    { status_id: e.target.value },
+                    `Status updated for ${selected.size} contacts`
+                  );
               }}
             >
               <option value="">—</option>
               {statuses.map((s) => (
-                <option key={s.id} value={s.id}>{s.name}</option>
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
               ))}
             </select>
           </label>
@@ -790,12 +1028,18 @@ export default function ContactsPage() {
               value=""
               disabled={bulkBusy}
               onChange={(e) => {
-                if (e.target.value) bulkPatch({ owner_id: e.target.value }, `Owner set for ${selected.size} contacts`);
+                if (e.target.value)
+                  bulkPatch(
+                    { owner_id: e.target.value },
+                    `Owner set for ${selected.size} contacts`
+                  );
               }}
             >
               <option value="">—</option>
               {profiles.map((p) => (
-                <option key={p.id} value={p.id}>{p.full_name || p.email}</option>
+                <option key={p.id} value={p.id}>
+                  {p.full_name || p.email}
+                </option>
               ))}
             </select>
           </label>
@@ -829,7 +1073,7 @@ export default function ContactsPage() {
         </div>
       )}
 
-      {/* ── new contact modal (unchanged) ── */}
+      {/* ── new contact modal ── */}
       {newContact && (
         <div
           className="anim-fade-in fixed inset-0 z-40 flex items-center justify-center bg-black/20"
@@ -841,8 +1085,8 @@ export default function ContactsPage() {
           >
             <h2 className="mb-1 text-sm font-semibold">New contact</h2>
             <p className="mb-3 text-xs text-gray-400">
-              Add the links on the Link Data tab after saving — manually, or with the automatic
-              web search.
+              Add the links on the Link Data tab after saving — manually, or with the automatic web
+              search.
             </p>
             <div className="space-y-2">
               <div>
@@ -899,12 +1143,16 @@ export default function ContactsPage() {
                 >
                   <option value="">— none —</option>
                   {statuses.map((s) => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
                   ))}
                 </select>
               </div>
               <div className="flex justify-end gap-2 pt-1">
-                <button className="btn" onClick={() => setNewContact(null)}>Cancel</button>
+                <button className="btn" onClick={() => setNewContact(null)}>
+                  Cancel
+                </button>
                 <button className="btn btn-primary" disabled={creating} onClick={saveNewContact}>
                   {creating ? 'Creating…' : 'Create contact'}
                 </button>

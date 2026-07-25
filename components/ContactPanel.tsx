@@ -5,7 +5,7 @@ import { createClient } from '@/lib/supabase/client';
 import StatusPill, { type StatusOption } from '@/components/StatusPill';
 import { useMyRole } from '@/lib/use-my-role';
 
-const TABS = ['Contact Info', 'Link Data', 'Email', 'Calls', 'Data', 'Activity', 'Files'] as const;
+const TABS = ['Contact Info', 'Link Data', 'Email', 'Calls', 'Activity', 'Files'] as const;
 type Tab = (typeof TABS)[number];
 
 interface LinkSlot {
@@ -34,7 +34,8 @@ function callDuration(seconds: number | null): string {
   return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
 }
 
-/** Slide-over panel with the Contact Info / Link Data / Email / Data tabs (+ Activity & Files). */
+/** Slide-over panel: Contact Info (details + tracking data), Link Data, Email,
+ * Calls, Activity, and Files. */
 export default function ContactPanel({
   contactId,
   onClose,
@@ -430,8 +431,65 @@ export default function ContactPanel({
                 )}
                 {customInputs('contact')}
               </div>
+
+              {/* Tracking data — where the lead came from. Was its own "Data"
+                  tab; folded in here so one save covers the whole record. */}
+              <div className="border-t border-gray-200 pt-4">
+                <div className="mb-3 text-[10px] font-medium tracking-widest text-gray-400 uppercase">
+                  Tracking data
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  {input('IP', 'ip')}
+                  {input('Browser', 'browser')}
+                  {input('Device', 'device')}
+                  {input('Source', 'source')}
+                  <div className="col-span-2">
+                    <label className="label">Source URL</label>
+                    <input
+                      className="input"
+                      value={contact.source_url ?? ''}
+                      onChange={(e) => setField('source_url', e.target.value)}
+                    />
+                  </div>
+                  {input('WordPress user', 'wp_user')}
+                  <div>
+                    <label className="label">Submitted on</label>
+                    <input
+                      className="input bg-gray-50"
+                      readOnly
+                      value={
+                        contact.submitted_at
+                          ? new Date(contact.submitted_at).toLocaleString()
+                          : '—'
+                      }
+                    />
+                  </div>
+                  {input('PPC KW', 'ppc_kw')}
+                  {input('UTM', 'utm')}
+                  {input('GCLID', 'gclid')}
+                  {customInputs('data')}
+                </div>
+              </div>
+
               <div className="flex justify-between">
-                {saveButton(['name', 'email', 'phone', 'city', 'state', 'stage_id', 'service_days'])}
+                {saveButton([
+                  'name',
+                  'email',
+                  'phone',
+                  'city',
+                  'state',
+                  'stage_id',
+                  'service_days',
+                  'browser',
+                  'ppc_kw',
+                  'source',
+                  'ip',
+                  'utm',
+                  'gclid',
+                  'device',
+                  'source_url',
+                  'wp_user',
+                ])}
                 <button
                   className="btn text-red-600"
                   onClick={async () => {
@@ -762,61 +820,6 @@ export default function ContactPanel({
                   (Admin → Integrations).
                 </div>
               )}
-            </div>
-          )}
-
-          {tab === 'Data' && (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                {input('IP', 'ip')}
-                {input('Browser', 'browser')}
-                {input('Device', 'device')}
-                {input('Source', 'source')}
-                <div className="col-span-2">
-                  <label className="label">Source URL</label>
-                  <input
-                    className="input"
-                    value={contact.source_url ?? ''}
-                    onChange={(e) => setField('source_url', e.target.value)}
-                  />
-                </div>
-                {input('WordPress user', 'wp_user')}
-                <div>
-                  <label className="label">Submitted on</label>
-                  <input
-                    className="input bg-gray-50"
-                    readOnly
-                    value={
-                      contact.submitted_at
-                        ? new Date(contact.submitted_at).toLocaleString()
-                        : '—'
-                    }
-                  />
-                </div>
-                {input('PPC KW', 'ppc_kw')}
-                {input('UTM', 'utm')}
-                {input('GCLID', 'gclid')}
-                <div>
-                  <label className="label">Status</label>
-                  <StatusPill
-                    status={contact.statuses}
-                    options={statuses}
-                    onChange={(statusId) => patchContact({ status_id: statusId })}
-                  />
-                </div>
-                {customInputs('data')}
-              </div>
-              {saveButton([
-                'browser',
-                'ppc_kw',
-                'source',
-                'ip',
-                'utm',
-                'gclid',
-                'device',
-                'source_url',
-                'wp_user',
-              ])}
             </div>
           )}
 
