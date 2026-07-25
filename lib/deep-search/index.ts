@@ -267,11 +267,61 @@ export async function runDeepSearchForContact(
   const name = splitName(contact.name);
   if (!name.last) throw new Error(`"${contact.name}" has no surname to corroborate matches against`);
 
-  let facts = normalizeFacts(contact.search_facts);
-  // Seed from the contact record: the state the lead's IP resolved to is the
-  // first corroborator, and it is what keeps a same-name stranger out.
+  // Facts a human has confirmed, which outrank anything a page told us.
+  //
+  // Two sources: the contact record, and the link slots. A URL only reaches a
+  // slot when somebody accepted it, so every slot link is a verified sighting of
+  // this person — and parsing one costs nothing while often supplying the county
+  // and booking date that round B would otherwise have to discover by probing.
+  //
+  // Order matters beyond neatness. Probe URLs are built from facts.county[0] and
+  // facts.state[0], and each key is capped, so merging pinned FIRST is what makes
+  // the confirmed value the one actually searched rather than merely present.
+  const { data: slotLinks } = await supabase
+    .from('contact_links')
+    .select('url')
+    .eq('contact_id', contactId);
+
+  let pinned: SearchFacts = { ...EMPTY_FACTS };
   const seedState = stateCode(contact.state);
-  if (seedState) facts = mergeFacts(facts, { state: [seedState] });
+  if (seedState) pinned = mergeFacts(pinned, { state: [seedState] });
+  let seededLinks = 0;
+  for (const row of slotLinks ?? []) {
+    // Slots exist from creation with url = '', so most rows are empty.
+    const slotUrl = typeof row?.url === 'string' ? row.url.trim() : '';
+    if (!slotUrl) continue;
+    pinned = mergeFacts(pinned, factsFromUrl(slotUrl, name));
+    seededLinks += 1;
+  }
+  let facts = mergeFacts(pinned, normalizeFacts(contact.search_facts));
+
+  /**
+   * The states we will accept records from. A same-name stranger booked in Texas
+   * is still rejected, but a client whose slots already hold a West Virginia link
+   * genuinely has WV records — and the old single-state test threw those away.
+   */
+  const pinnedStates = pinned.state;
+  const stateConflicts = (rowStates: string[]) =>
+    pinnedStates.length > 0 &&
+    rowStates.length > 0 &&
+    !rowStates.some((st) => pinnedStates.includes(st));
+
+  if (seededLinks) {
+    await logDebug({
+      source: 'deep-search:seed',
+      message: `Seeded from ${seededLinks} confirmed link(s): ${
+        [
+          pinned.county.length ? `county ${pinned.county.join('/')}` : null,
+          pinned.state.length ? `state ${pinned.state.join('/')}` : null,
+          pinned.middle.length ? `middle ${pinned.middle.join('/')}` : null,
+          pinned.booking_dates.length ? `dates ${pinned.booking_dates.join('/')}` : null,
+        ]
+          .filter(Boolean)
+          .join(', ') || 'no new facts'
+      }`,
+      contactId,
+    });
+  }
 
   const [{ data: siteRows }, { data: ruleRows }, { data: existing }] = await Promise.all([
     supabase.from('probe_sites').select('*').order('scope'),
@@ -326,7 +376,7 @@ export async function runDeepSearchForContact(
       for (const state of states) {
         for (const county of counties) {
           // A site pinned to one state is irrelevant to a lead in another.
-          if (site.scope_state && seedState && site.scope_state !== seedState) continue;
+          if (site.scope_state && stateConflicts([site.scope_state])) continue;
           const url = buildProbeUrl(site.search_template, name, county, state, window);
           if (url && !targets.some((t) => t.url === url)) targets.push({ site, url });
         }
@@ -413,7 +463,7 @@ export async function runDeepSearchForContact(
         // Hard reject on a state conflict: a Wake County NC client's record is
         // not the same-named person booked in Texas.
         const rowStates = rowFacts.state;
-        if (seedState && rowStates.length && !rowStates.includes(seedState)) continue;
+        if (stateConflicts(rowStates)) continue;
         if (scored.confidence < MIN_CONFIDENCE) continue;
 
         const rule = matchUrlRule(row.url, rules);
@@ -554,7 +604,7 @@ export async function runDeepSearchForContact(
         mergeFacts({ ...EMPTY_FACTS }, factsFromUrl(r.link, name)),
         factsFromText(`${r.title} ${r.snippet}`, name)
       );
-      if (seedState && rowFacts.state.length && !rowFacts.state.includes(seedState)) continue;
+      if (stateConflicts(rowFacts.state)) continue;
       const scored = scoreCorroboration(haystack, name, mergeFacts(facts, rowFacts));
       if (scored.confidence < MIN_CONFIDENCE) continue;
 
@@ -835,9 +885,21 @@ export async function captureUnruledSerpCandidates(
     .select('search_facts, state')
     .eq('id', contactId)
     .maybeSingle();
-  let facts = normalizeFacts(contact?.search_facts);
+  // Same precedence as a full run: confirmed links first, so the classifier
+  // judges against what a human has actually verified about this person.
+  const { data: slotLinks } = await supabase
+    .from('contact_links')
+    .select('url')
+    .eq('contact_id', contactId);
+
+  let pinned: SearchFacts = { ...EMPTY_FACTS };
   const seedState = stateCode(contact?.state);
-  if (seedState) facts = mergeFacts(facts, { state: [seedState] });
+  if (seedState) pinned = mergeFacts(pinned, { state: [seedState] });
+  for (const row of slotLinks ?? []) {
+    const slotUrl = typeof row?.url === 'string' ? row.url.trim() : '';
+    if (slotUrl) pinned = mergeFacts(pinned, factsFromUrl(slotUrl, name));
+  }
+  let facts = mergeFacts(pinned, normalizeFacts(contact?.search_facts));
 
   const verdicts = await classifySerpResults(
     unruled.map((r) => ({ url: r.link, title: r.title, snippet: r.snippet })),

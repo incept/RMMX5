@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
+  EMPTY_FACTS,
   countySlug,
   dateVariants,
   dateWindow,
@@ -690,4 +691,60 @@ test('a failed launch only clears the browser slot if it still owns it', async (
   // a newer, live browser and start a third — two Chrome processes at once.
   const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
   assert.match(source, /if \(browserPromise === launching\) browserPromise = null;\s*\n\s*throw e;/);
+});
+
+test('one confirmed link seeds the facts a run would otherwise have to discover', () => {
+  // A URL only reaches a link slot when a human accepted it, so it is a verified
+  // sighting. This one carries everything round B needs, at no cost.
+  const seeded = factsFromUrl(
+    'https://wakenc.mugshots.zone/beachak-gene-michael-mugshot-04-22-2026/',
+    GENE
+  );
+  assert.deepEqual(seeded.county, ['Wake']);
+  assert.deepEqual(seeded.state, ['NC']);
+  assert.deepEqual(seeded.middle, ['Michael']);
+  assert.deepEqual(seeded.booking_dates, ['2026-04-22']);
+});
+
+test('confirmed facts outrank scraped ones for the value actually searched', () => {
+  // Probe URLs are built from facts.county[0] / facts.state[0] and each key is
+  // capped, so precedence here IS precedence in what gets requested.
+  let pinned = mergeFacts({ ...EMPTY_FACTS }, { state: ['NC'] });
+  pinned = mergeFacts(
+    pinned,
+    factsFromUrl('https://wakenc.mugshots.zone/beachak-gene-michael-mugshot-04-22-2026/', GENE)
+  );
+  const facts = mergeFacts(pinned, normalizeFacts({ county: ['Durham'], middle: ['Micheal'] }));
+
+  assert.equal(facts.county[0], 'Wake', 'the confirmed county is the one probed');
+  assert.equal(facts.middle[0], 'Michael', 'the confirmed spelling leads');
+  // The disagreeing values survive as alternatives rather than being discarded:
+  // sites really do spell the middle name both ways.
+  assert.deepEqual(facts.county, ['Wake', 'Durham']);
+  assert.deepEqual(facts.middle, ['Michael', 'Micheal']);
+});
+
+test('a confirmed out-of-state link legitimises records from that state', () => {
+  // The old check compared against one seed state, so a client with a real West
+  // Virginia link had their WV records thrown away as a same-name stranger.
+  let pinned = mergeFacts({ ...EMPTY_FACTS }, { state: ['NC'] });
+  pinned = mergeFacts(
+    pinned,
+    factsFromUrl('https://westvirginia.arrests.org/Kanawha/2025/June/03/', GENE)
+  );
+  const pinnedStates = pinned.state;
+  const conflicts = (rows) =>
+    pinnedStates.length > 0 && rows.length > 0 && !rows.some((s) => pinnedStates.includes(s));
+
+  assert.deepEqual(pinnedStates, ['NC', 'WV']);
+  assert.equal(conflicts(['WV']), false, 'a state we have a confirmed link in is accepted');
+  assert.equal(conflicts(['TX']), true, 'an unrelated state is still rejected');
+  assert.equal(conflicts([]), false, 'no state on the row is not a conflict');
+});
+
+test('empty link slots contribute nothing', async () => {
+  // contact_links rows exist from creation with url = '', so most are blank.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /if \(!slotUrl\) continue;/);
+  assert.match(source, /mergeFacts\(pinned, normalizeFacts\(contact\.search_facts\)\)/);
 });
