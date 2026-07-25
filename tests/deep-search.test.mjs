@@ -613,5 +613,50 @@ test('the proxy is not offered as a fix for arrests.org', async () => {
   // Recording it so the proxy is not mistaken for a route to that host.
   const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
   assert.match(source, /JA3\/JA4|fingerprints the handshake/);
-  assert.match(source, /arrests\.org stays active=false/);
+  // The route to that host is real Chrome, not the proxy.
+  assert.match(source, /which is why the browser tier exists/);
+});
+
+test('the browser tier runs before the billable unlocker', async () => {
+  // Chrome costs CPU and memory, not money, so it goes ahead of the unlocker —
+  // and it is the only tier that reaches a host blocking on TLS fingerprint.
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  const browser = source.indexOf('fetchWithBrowser(url)');
+  const unlocker = source.indexOf('reserveUsage({');
+  assert.ok(browser > -1 && unlocker > -1);
+  assert.ok(browser < unlocker, 'browser is tried before the billable unlocker');
+});
+
+test('a TLS-fingerprinted host skips the two tiers that always fail it', async () => {
+  // Both HTTP tiers cost two attempts on a 20s timeout, every time, for nothing.
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  assert.match(source, /if \(!opts\?\.needsBrowser\) \{/);
+  const index = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(index, /needsBrowser: site\.needs_browser/);
+});
+
+test('the headless User-Agent is overridden, which is what makes the tier work', async () => {
+  // Chrome's own headless UA says "HeadlessChrome" and is refused on sight:
+  // measured 403 with the default UA and 200 with a real one, same browser.
+  const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  assert.match(source, /setUserAgent\(BROWSER_UA\)/);
+  assert.doesNotMatch(source, /HeadlessChrome\/\d/, 'must not ship a headless UA');
+});
+
+test('the browser tier cannot leak processes', async () => {
+  // This host was taken down once by processes that were started and never
+  // reaped, and a stray Chrome is heavier than a stray fetch.
+  const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  assert.match(source, /IDLE_SHUTDOWN_MS/, 'closes itself when idle');
+  assert.match(source, /MAX_CONCURRENT_PAGES/, 'bounds concurrent tabs');
+  assert.match(source, /} finally \{/, 'pages are closed on the failure path too');
+  assert.match(source, /await context\?\.close\(\)/, 'contexts are closed, not just pages');
+  // A single shared browser, not one per call.
+  assert.match(source, /if \(!browserPromise\)/);
+});
+
+test('subresources are refused so probe pages stay cheap', async () => {
+  // Mugshot pages are mostly photographs; we only ever read the markup.
+  const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  assert.match(source, /\['image', 'font', 'media', 'stylesheet'\]/);
 });
