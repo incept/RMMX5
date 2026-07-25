@@ -106,7 +106,7 @@ export default function PipelinePage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-6">
-      <h1 className="text-lg font-semibold">Statuses & Stages</h1>
+      <h1 className="text-2xl font-light tracking-tight">Statuses & Stages</h1>
       {editor(
         'Lead statuses',
         'Colors show up across the whole CRM. "Client" statuses start the service countdown.',

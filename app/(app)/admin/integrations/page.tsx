@@ -30,7 +30,7 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
     fields: [
       { key: 'api_key', label: 'API key', secret: true },
       { key: 'from_address', label: 'From address', placeholder: 'alerts@yourdomain.com' },
-      { key: 'from_name', label: 'From name', placeholder: 'RMMX5' },
+      { key: 'from_name', label: 'From name', placeholder: 'RMM-R1S' },
       { key: 'webhook_signing_secret', label: 'Webhook signing secret', secret: true, placeholder: 'whsec_…' },
     ],
   },
@@ -136,7 +136,7 @@ export default function IntegrationsPage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-6">
-      <h1 className="text-lg font-semibold">Integrations & APIs</h1>
+      <h1 className="text-2xl font-light tracking-tight">Integrations & APIs</h1>
       <p className="text-xs text-gray-400">
         Keys are stored in the database with admin-only access and are only ever read server-side —
         they never reach the browser of non-admin users.

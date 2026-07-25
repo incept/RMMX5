@@ -61,7 +61,7 @@ export default function VoicemailPage() {
   return (
     <div className="mx-auto max-w-4xl p-6">
       <div className="mb-5 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Voicemail Drops</h1>
+        <h1 className="text-2xl font-light tracking-tight">Voicemail Drops</h1>
         <label className="btn btn-primary cursor-pointer">
           {busy ? 'Uploading…' : '⬆ Upload recording'}
           <input

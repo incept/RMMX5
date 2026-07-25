@@ -115,11 +115,8 @@ export default function Sidebar({ role, userName }: { role: string; userName: st
 
   return (
     <aside className="flex w-56 shrink-0 flex-col border-r border-gray-200 bg-white">
-      <div className="flex items-center gap-2 px-4 py-4">
-        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand-600 text-xs font-bold text-white">
-          R5
-        </div>
-        <span className="text-sm font-bold tracking-wide">RMMX5</span>
+      <div className="flex items-center px-4 py-4">
+        <span className="text-sm font-light tracking-[0.14em]">RMM-R1S</span>
       </div>
 
       <nav className="flex-1 overflow-y-auto px-2 pb-4">
