@@ -44,7 +44,7 @@ function buildSerpTarget(
 
 export async function runSerpSearch(
   query: string,
-  opts?: { engine?: SearchEngine; numResults?: number; country?: string }
+  opts?: { engine?: SearchEngine; numResults?: number; country?: string; timeoutMs?: number }
 ): Promise<SerpResult[]> {
   const engine = opts?.engine ?? 'google';
 
@@ -80,7 +80,7 @@ export async function runSerpSearch(
 
   const res = await fetch('https://api.brightdata.com/request', {
     method: 'POST',
-    signal: AbortSignal.timeout(60_000),
+    signal: AbortSignal.timeout(opts?.timeoutMs ?? 60_000),
     headers: {
       Authorization: `Bearer ${cfg.api_key}`,
       'Content-Type': 'application/json',
