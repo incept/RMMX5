@@ -678,7 +678,7 @@ Learned: ${learned}` : '')
                 <button
                   className="btn"
                   disabled={busy === 'deep'}
-                  title="Search the mugshot sites' own search pages, then chain what they reveal (middle name, county) into deeper probes. Uses no SERP requests."
+                  title="Searches the mugshot sites' own search pages, then chains what they reveal (middle name, county) into deeper probes. Mostly free page fetches; a site that blocks us falls back to a Google site: query, up to 4 SERP requests per run."
                   onClick={runDeepSearch}
                 >
                   {busy === 'deep' ? 'Probing…' : '🕵 Deep search'}

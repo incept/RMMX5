@@ -358,7 +358,11 @@ export async function runDeepSearchForContact(
   ].slice(0, MAX_SERP_FALLBACKS);
 
   for (const domain of fallbackDomains) {
-    const query = `site:${domain} "${name.first} ${name.last}"`.trim();
+    // Unquoted on purpose. These sites render "BEACHAK GENE MICHAEL" or
+    // "Beachak, Gene", so an exact-phrase "Gene Beachak" can return nothing at
+    // all. site: already narrows hard, and scoreCorroboration supplies the
+    // precision that the quotes would have.
+    const query = `site:${domain} ${name.first} ${name.last}`.trim();
     let results: Awaited<ReturnType<typeof runSerpSearch>> = [];
     try {
       results = await runSerpSearch(query, { engine: 'google', numResults: 20 });
@@ -480,9 +484,11 @@ export async function runDeepSearchForContact(
     type: 'search',
     description:
       `Deep search probed ${probed} site search page(s)` +
-      `${blocked ? ` (${blocked} unreadable)` : ''}: ` +
-      `${candidates} new candidate(s) for review${learned ? `. Learned: ${learned}` : ''}`,
-    meta: { probed, blocked, candidates, rounds, facts: merged },
+      `${blocked ? ` (${blocked} unreadable)` : ''}` +
+      `${serpFallbacks ? `, searched ${serpFallbacks} blocked site(s) via Google` : ''}` +
+      `${pivots ? `, derived ${pivots} sibling record(s) from shared ids` : ''}` +
+      `: ${candidates} new candidate(s) for review${learned ? `. Learned: ${learned}` : ''}`,
+    meta: { probed, blocked, candidates, rounds, serpFallbacks, pivots, facts: merged },
   });
 
   return { probed, blocked, candidates, facts: merged, rounds, serpFallbacks, pivots };

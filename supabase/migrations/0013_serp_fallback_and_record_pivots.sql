@@ -39,12 +39,16 @@ set serp_fallback = true,
     notes = 'Wake County. Shares record ids with wakencbusts.com. Direct search path UNVERIFIED; found via the id pivot or SERP.'
 where domain = 'wakepublicrecords.com';
 
--- N1 is the same operator per county, so one template covers every county once
--- the county is known. Left without serp_fallback: the family pivot reaches it
--- for free, and 50 counties of SERP queries would not be worth it.
-update public.probe_sites
-set record_url_template = 'https://{county_slug}publicrecords.com/sample.php?id={record_id}'
-where domain = 'publicrecords.com';
+-- N1 deliberately gets NO record_url_template. It is a DOMAIN-derivation
+-- network (the same software per county), not an id-sharing one: each county's
+-- site keeps its own id space, so id=140252 from a Wake site does not address a
+-- record on the Palm Beach site. Giving it a template would generate confident,
+-- wrong URLs for a different county's booking. Its value stays in the derivable
+-- search domain, which the probe path already covers.
+--
+-- The id pivot is therefore limited to siblings proven to share an id space —
+-- currently wakencbusts.com and wakepublicrecords.com, confirmed by the same
+-- id=140252 resolving to one booking on both.
 
 comment on column public.probe_sites.serp_fallback is
   'Search this domain via site:-restricted SERP when a direct probe is blocked. Costs one SERP request per attempt.';

@@ -378,4 +378,15 @@ test('the migration wires arrests.org and the Wake network for fallback and pivo
   // The confirmed shared id from the client's own example.
   assert.match(sql, /wakencbusts\.com\/view-full-profile\.php\?id=\{record_id\}/);
   assert.match(sql, /wakepublicrecords\.com\/sample\.php\?id=\{record_id\}/);
+  // The per-county N1 network must NOT get a pivot template: each county site
+  // has its own id space, so a Wake id would build a confident, wrong Palm
+  // Beach URL.
+  assert.doesNotMatch(sql, /county_slug\}publicrecords\.com\/sample/);
+});
+
+test('the site: fallback query is not an exact phrase', async () => {
+  // These sites render "BEACHAK GENE MICHAEL" or "Beachak, Gene", so a quoted
+  // "Gene Beachak" can match nothing. Precision comes from corroboration.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /site:\$\{domain\} \$\{name\.first\} \$\{name\.last\}/);
 });
