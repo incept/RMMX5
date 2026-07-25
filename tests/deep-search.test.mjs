@@ -660,3 +660,34 @@ test('subresources are refused so probe pages stay cheap', async () => {
   const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
   assert.match(source, /\['image', 'font', 'media', 'stylesheet'\]/);
 });
+
+test('the page cap holds when a slot is released and taken in the same tick', async () => {
+  // Regression: releaseSlot used to decrement and then resolve a waiter, but
+  // resolve() only queues the continuation. Anything calling acquireSlot before
+  // that microtask ran saw a free slot and took it, so both proceeded and a cap
+  // of 2 was reachable at 3. The slot is now handed over without the count ever
+  // dipping. Asserted on source because the module needs Supabase settings.
+  const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  const release = source.slice(source.indexOf('function releaseSlot'));
+  const shift = release.indexOf('waiters.shift()');
+  const decrement = release.indexOf('activePages = Math.max(0, activePages - 1)');
+  assert.ok(shift > -1 && decrement > -1);
+  assert.ok(shift < decrement, 'the waiter handoff must come before any decrement');
+  // And the waiter must not re-increment on resume.
+  const acquire = source.slice(
+    source.indexOf('async function acquireSlot'),
+    source.indexOf('function releaseSlot')
+  );
+  assert.doesNotMatch(
+    acquire.slice(acquire.indexOf('waiters.push')),
+    /activePages \+= 1/,
+    'a resumed waiter must not add to the count again'
+  );
+});
+
+test('a failed launch only clears the browser slot if it still owns it', async () => {
+  // Otherwise closeBrowser during a pending launch lets a late rejection discard
+  // a newer, live browser and start a third — two Chrome processes at once.
+  const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  assert.match(source, /if \(browserPromise === launching\) browserPromise = null;\s*\n\s*throw e;/);
+});
