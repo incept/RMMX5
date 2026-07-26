@@ -1,4 +1,5 @@
 import { getSetting } from '@/lib/settings';
+import { readResponseText } from '@/lib/request-limits';
 
 /**
  * Sends a transactional email via the Emailit API (v1).
@@ -36,7 +37,8 @@ export async function sendViaEmailit(opts: {
   });
 
   if (!res.ok) {
-    return { ok: false, error: `Emailit request failed: ${res.status} ${await res.text()}` };
+    const detail = await readResponseText(res, 64 * 1024);
+    return { ok: false, error: `Emailit request failed: ${res.status} ${detail.slice(0, 500)}` };
   }
   return { ok: true };
 }

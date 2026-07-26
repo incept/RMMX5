@@ -54,35 +54,53 @@ export async function enrichContactFromPhone(
   const identity = await lookupPhoneIdentity(contact.phone, { contactId });
   if (!identity) return { ok: false, filled: [], reason: 'No result from provider' };
 
-  const patch: Record<string, string> = {};
   const filled: string[] = [];
 
   if (needsName && identity.name) {
-    patch.name = identity.name;
-    filled.push('name');
+    const { data, error: nameError } = await supabase
+      .from('contacts')
+      .update({ name: identity.name })
+      .eq('id', contactId)
+      .eq('name', contact.name)
+      .select('id')
+      .maybeSingle();
+    if (nameError) throw new Error(nameError.message);
+    if (data) filled.push('name');
   }
   // City and state move together. A city without its state cannot narrow a
   // search, and worse, can point it at the wrong state entirely.
   if (needsLocation && identity.city && identity.state) {
     if (!contact.city?.trim()) {
-      patch.city = identity.city;
-      filled.push('city');
+      let cityUpdate = supabase.from('contacts').update({ city: identity.city }).eq('id', contactId);
+      cityUpdate =
+        contact.city == null ? cityUpdate.is('city', null) : cityUpdate.eq('city', contact.city);
+      const { data, error: cityError } = await cityUpdate.select('id').maybeSingle();
+      if (cityError) throw new Error(cityError.message);
+      if (data) filled.push('city');
     }
     if (!contact.state?.trim()) {
-      patch.state = identity.state;
-      filled.push('state');
+      let stateUpdate = supabase
+        .from('contacts')
+        .update({ state: identity.state })
+        .eq('id', contactId);
+      stateUpdate =
+        contact.state == null ? stateUpdate.is('state', null) : stateUpdate.eq('state', contact.state);
+      const { data, error: stateError } = await stateUpdate.select('id').maybeSingle();
+      if (stateError) throw new Error(stateError.message);
+      if (data) filled.push('state');
     }
   }
 
   if (!filled.length) {
+    await logDebug({
+      level: 'info',
+      source: 'trestle:enrichment',
+      message: 'Enrichment made no changes; provider returned no missing data or a user edited the contact first',
+      context: { provider_has_name: !!identity.name, provider_has_location: !!(identity.city && identity.state) },
+      contactId,
+    });
     return { ok: true, filled: [], reason: 'Provider returned nothing we were missing' };
   }
-
-  const { error: updateError } = await supabase
-    .from('contacts')
-    .update(patch)
-    .eq('id', contactId);
-  if (updateError) throw new Error(updateError.message);
 
   // Logged against the contact so the origin of a name is auditable. A name
   // that arrived from a data provider should never be mistaken for one the

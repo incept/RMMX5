@@ -4,6 +4,7 @@ import { getSetting, setSetting } from '@/lib/settings';
 import { getUsageSummary } from '@/lib/usage';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
+import { parsePublicHttpsUrl } from '@/lib/public-url';
 
 const KNOWN_KEYS = [
   'brightdata',
@@ -192,6 +193,16 @@ export async function PUT(request: Request) {
         return NextResponse.json({ error: 'Browser enabled must be true or false' }, { status: 400 });
       }
       value.enabled = value.enabled === true || value.enabled === 'true';
+    }
+  }
+  if (body.key === 'voicemail' && value.provider_url) {
+    try {
+      value.provider_url = parsePublicHttpsUrl(String(value.provider_url)).toString();
+    } catch (error) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : 'Invalid provider URL' },
+        { status: 400 }
+      );
     }
   }
   const secretFields = SECRET_FIELDS[body.key] ?? [];

@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
-import { sendCrmEmail } from '@/lib/email-send';
 import { renderTemplate } from '@/lib/sequence-runner';
 import { deliveryKey, MAX_BULK_RECIPIENTS, validIdempotencyKey } from '@/lib/bulk-delivery';
 import { enqueueJob } from '@/lib/job-queue';
@@ -47,7 +46,7 @@ export async function POST(request: Request) {
   }
 
   if (body.listId) {
-    if (auth.profile.role !== 'admin') {
+    if (!['admin', 'super_admin'].includes(auth.profile.role)) {
       return NextResponse.json({ error: 'Admin access required for list sends' }, { status: 403 });
     }
     const requestKey = request.headers.get('idempotency-key');
@@ -100,15 +99,40 @@ export async function POST(request: Request) {
     to = to ?? contact?.email ?? undefined;
   }
   if (!to) return NextResponse.json({ error: 'No recipient' }, { status: 400 });
-
-  const result = await sendCrmEmail({
-    to,
-    subject: contact ? renderTemplate(body.subject, contact) : body.subject,
-    html: contact ? renderTemplate(body.html, contact, { html: true }) : body.html,
-    accountId,
-    contactId: contact?.id ?? null,
-    actorId: auth.profile.id,
-  });
-  if (!result.ok) return NextResponse.json({ error: result.error }, { status: 500 });
-  return NextResponse.json({ ok: true, messageId: result.messageRowId });
+  if (auth.profile.role === 'worker') {
+    if (!contact?.email) {
+      return NextResponse.json(
+        { error: 'Workers may only send email to an existing CRM contact' },
+        { status: 403 }
+      );
+    }
+    if (to.trim().toLowerCase() !== String(contact.email).trim().toLowerCase()) {
+      return NextResponse.json(
+        { error: 'Recipient must match the selected CRM contact' },
+        { status: 403 }
+      );
+    }
+    to = contact.email;
+  }
+  const requestKey = request.headers.get('idempotency-key');
+  if (!validIdempotencyKey(requestKey)) {
+    return NextResponse.json({ error: 'A valid Idempotency-Key header is required' }, { status: 400 });
+  }
+  const recipient = String(to);
+  const recipientKey = contact?.id ?? recipient.trim().toLowerCase();
+  const key = deliveryKey('email', requestKey, recipientKey);
+  const queued = await enqueueJob(
+    'email_delivery',
+    {
+      to: recipient,
+      subject: contact ? renderTemplate(body.subject, contact) : body.subject,
+      html: contact ? renderTemplate(body.html, contact, { html: true }) : body.html,
+      accountId,
+      contactId: contact?.id ?? null,
+      actorId: auth.profile.id,
+      deliveryKey: key,
+    },
+    `job:${key}`
+  );
+  return NextResponse.json(queued, { status: 202 });
 }

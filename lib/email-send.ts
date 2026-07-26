@@ -2,7 +2,7 @@ import nodemailer from 'nodemailer';
 import { createAdminClient } from '@/lib/supabase/server';
 import { sendViaEmailit } from '@/lib/integrations/emailit';
 import { logActivity } from '@/lib/activity';
-import { signTrackingUrl } from '@/lib/signing';
+import { signTrackingOpen, signTrackingUrl } from '@/lib/signing';
 import { appBaseUrl } from '@/lib/app-url';
 import { logDebug } from '@/lib/debug-log';
 
@@ -114,7 +114,7 @@ export async function sendCrmEmail(opts: {
   }
 
   // Open tracking pixel.
-  html += `<img src="${appUrl}/api/track/open?m=${row.id}" width="1" height="1" alt="" style="display:none"/>`;
+  html += `<img src="${appUrl}/api/track/open?m=${row.id}&s=${signTrackingOpen(row.id)}" width="1" height="1" alt="" style="display:none"/>`;
 
   let ok = false;
   let error: string | undefined;

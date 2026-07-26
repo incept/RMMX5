@@ -63,6 +63,7 @@ export async function GET(request: Request) {
     let pruned: number | null = null;
     let webhookPruned: any = null;
     let operationalPruned: any = null;
+    let growthPruned: any = null;
     try {
       const { data, error: debugPruneError } = await admin.rpc('prune_debug_log', {
         p_keep_days: 14,
@@ -79,6 +80,9 @@ export async function GET(request: Request) {
         .maybeSingle();
       if (operationalPruneError) throw operationalPruneError;
       operationalPruned = operational ?? null;
+      const { data: growth, error: growthPruneError } = await admin.rpc('prune_growth_tables');
+      if (growthPruneError) throw growthPruneError;
+      growthPruned = growth ?? null;
     } catch (error) {
       await logDebug({
         level: 'warn',
@@ -93,6 +97,7 @@ export async function GET(request: Request) {
       pruned,
       webhook_pruned: webhookPruned,
       operational_pruned: operationalPruned,
+      growth_pruned: growthPruned,
       at: new Date().toISOString(),
     });
   } finally {

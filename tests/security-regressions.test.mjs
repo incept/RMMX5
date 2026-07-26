@@ -12,7 +12,11 @@ import {
 import { verifyBearerSecret, verifyEmailitWebhook } from '../lib/webhook-auth.ts';
 import { parseCallScalerPage } from '../lib/callscaler-page.ts';
 import { deliveryKey, validIdempotencyKey } from '../lib/bulk-delivery.ts';
-import { readJsonBody, RequestSizeError } from '../lib/request-limits.ts';
+import {
+  readJsonBody,
+  requestErrorResponse,
+  RequestSizeError,
+} from '../lib/request-limits.ts';
 
 test('the public landing page has no signup call', async () => {
   const source = await readFile(new URL('../app/page.tsx', import.meta.url), 'utf8');
@@ -150,10 +154,54 @@ test('webhooks persist searches instead of retaining response workers', async ()
     new URL('../app/api/webhooks/callscaler/route.ts', import.meta.url),
     'utf8'
   );
+  const migration = await readFile(
+    new URL('../supabase/migrations/0024_comprehensive_hardening.sql', import.meta.url),
+    'utf8'
+  );
   assert.doesNotMatch(fluent, /\bafter\s*\(/);
   assert.doesNotMatch(calls, /\bafter\s*\(/);
-  assert.match(fluent, /enqueueJob/);
-  assert.match(calls, /enqueueJob/);
+  assert.match(fluent, /processFluentFormsLead\(payload, eventId\)/);
+  assert.match(calls, /processCallScalerCall/);
+  assert.match(migration, /create_fluent_lead[\s\S]*?insert into public\.job_queue/i);
+  assert.match(migration, /complete_call_processing[\s\S]*?insert into public\.job_queue/i);
+});
+
+test('unexpected server errors become generic 500 responses', () => {
+  assert.deepEqual(requestErrorResponse(new Error('relation private_table does not exist')), {
+    message: 'The server could not complete this request',
+    status: 500,
+  });
+  const validation = Object.assign(new Error('Invalid field'), { status: 400 });
+  assert.deepEqual(requestErrorResponse(validation), { message: 'Invalid field', status: 400 });
+});
+
+test('comprehensive hardening protects ownership, tracking, imports, files and retention', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/0024_comprehensive_hardening.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /role in \('super_admin', 'admin', 'worker'\)/i);
+  assert.match(migration, /primary super administrator cannot be deleted/i);
+  assert.match(migration, /import_contact_chunk/i);
+  assert.match(migration, /enforce_contact_file_quota/i);
+  assert.match(migration, /track_email_event_bounded/i);
+  assert.match(migration, /purge_admin_data/i);
+  assert.match(migration, /prune_growth_tables/i);
+});
+
+test('provider bodies, browser pages, and public destinations are bounded', async () => {
+  const trestle = await readFile(new URL('../lib/integrations/trestle.ts', import.meta.url), 'utf8');
+  const browser = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  const voicemail = await readFile(
+    new URL('../lib/integrations/voicemail.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(trestle, /readResponseText\(res, 256 \* 1024\)/);
+  assert.match(browser, /TEMPORARY HOST COMPATIBILITY/);
+  assert.match(browser, /'--no-sandbox'/);
+  assert.match(browser, /'--disable-setuid-sandbox'/);
+  assert.match(browser, /MAX_RENDERED_HTML_BYTES/);
+  assert.match(voicemail, /assertPublicHttpsUrl/);
 });
 
 test('runtime hardening migration wires atomic search, aggregate reads, and indexes', async () => {

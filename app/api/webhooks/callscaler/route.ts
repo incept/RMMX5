@@ -3,7 +3,6 @@ import { getSetting } from '@/lib/settings';
 import { verifyBearerSecret } from '@/lib/webhook-auth';
 import { processCallScalerCall } from '@/lib/integrations/callscaler';
 import { logDebug, errorMessage } from '@/lib/debug-log';
-import { enqueueJob } from '@/lib/job-queue';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 
@@ -51,23 +50,9 @@ export async function POST(request: Request) {
     // not wasted on "Caller +1919…". Queued, never inline: CallScaler retries a
     // slow delivery, and a retried webhook is how one call became several
     // contacts before.
-    if (result.createdContact && result.contactId) {
-      await enqueueJob(
-        'contact_enrichment',
-        { contactId: result.contactId },
-        `enrich:callscaler:${result.callId}`
-      );
-    }
-
-    // Already-named callers still get searched directly; enrichment only chains
-    // a search when it is the thing that supplied the name.
-    if (result.searchContactId) {
-      await enqueueJob(
-        'auto_search',
-        { contactId: result.searchContactId },
-        `auto-search:callscaler:${result.callId}`
-      );
-    }
+    // Call completion and both follow-up jobs are committed by one database
+    // function inside processCallScalerCall, so a retry cannot observe a
+    // completed call whose enrichment/search enqueue was lost.
 
     return NextResponse.json({
       ok: true,

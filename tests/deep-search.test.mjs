@@ -1096,7 +1096,16 @@ test('enrichment runs on the queue, never in the CallScaler webhook', async () =
     new URL('../app/api/webhooks/callscaler/route.ts', import.meta.url),
     'utf8'
   );
-  assert.match(route, /enqueueJob\(\s*'contact_enrichment'/);
+  const callscaler = await readFile(
+    new URL('../lib/integrations/callscaler.ts', import.meta.url),
+    'utf8'
+  );
+  const migration = await readFile(
+    new URL('../supabase/migrations/0024_comprehensive_hardening.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(callscaler, /\.rpc\('complete_call_processing'/);
+  assert.match(migration, /complete_call_processing[\s\S]*?'contact_enrichment'/);
   assert.doesNotMatch(route, /lookupPhoneIdentity|enrichContactFromPhone/);
 });
 

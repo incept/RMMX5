@@ -1,7 +1,13 @@
 'use client';
 
 import { useState } from 'react';
-import { parseImportFile, suggestMapping, IMPORT_TARGETS, type ParsedSheet } from '@/lib/monday-import';
+import {
+  parseImportFile,
+  suggestMapping,
+  IMPORT_TARGETS,
+  MAX_IMPORT_FILE_BYTES,
+  type ParsedSheet,
+} from '@/lib/monday-import';
 
 /** Import wizard: upload Monday.com export (.xlsx) or CSV → map columns → import. */
 export default function ImportPage() {
@@ -11,13 +17,16 @@ export default function ImportPage() {
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [requestKey, setRequestKey] = useState('');
 
   async function handleFile(file: File) {
     setError(null);
     setResult(null);
     try {
+      if (file.size > MAX_IMPORT_FILE_BYTES) throw new Error('Import files must be 20 MB or smaller');
       const parsed = await parseImportFile(file);
       setFilename(file.name);
+      setRequestKey(crypto.randomUUID());
       setSheet(parsed);
       setMapping(suggestMapping(parsed.headers));
     } catch (e: any) {
@@ -41,7 +50,7 @@ export default function ImportPage() {
 
     const res = await fetch('/api/import', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': requestKey },
       body: JSON.stringify({
         filename,
         source: /\.csv$/i.test(filename) ? 'csv' : 'monday',

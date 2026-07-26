@@ -17,7 +17,14 @@ export default function InboxPage() {
   const [viewer, setViewer] = useState<{ id: string; role: string } | null>(null);
   const [showAccounts, setShowAccounts] = useState(false);
   const [showCompose, setShowCompose] = useState(false);
-  const [compose, setCompose] = useState({ to: '', subject: '', html: '', accountId: '' });
+  const [compose, setCompose] = useState({
+    to: '',
+    subject: '',
+    html: '',
+    accountId: '',
+    contactId: '',
+    requestKey: '',
+  });
   const [accountForm, setAccountForm] = useState<any>(null);
   const [busy, setBusy] = useState(false);
 
@@ -66,18 +73,26 @@ export default function InboxPage() {
     setBusy(true);
     const res = await fetch('/api/email/send', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': compose.requestKey },
       body: JSON.stringify({
         to: compose.to,
         subject: compose.subject,
         html: compose.html.replace(/\n/g, '<br/>'),
         accountId: compose.accountId || null,
+        contactId: compose.contactId || null,
       }),
     });
     setBusy(false);
     if (res.ok) {
       setShowCompose(false);
-      setCompose({ to: '', subject: '', html: '', accountId: compose.accountId });
+      setCompose({
+        to: '',
+        subject: '',
+        html: '',
+        accountId: compose.accountId,
+        contactId: '',
+        requestKey: '',
+      });
       load();
     } else alert((await res.json()).error ?? 'Send failed');
   }
@@ -126,7 +141,13 @@ export default function InboxPage() {
             <option value="inbound">Received</option>
             <option value="outbound">Sent</option>
           </select>
-          <button className="btn btn-primary py-1" onClick={() => setShowCompose(true)}>
+          <button
+            className="btn btn-primary py-1"
+            onClick={() => {
+              setCompose((current) => ({ ...current, contactId: '', requestKey: crypto.randomUUID() }));
+              setShowCompose(true);
+            }}
+          >
             ✎
           </button>
           <button className="btn py-1" title="SMTP accounts" onClick={() => setShowAccounts(true)}>
@@ -195,6 +216,8 @@ export default function InboxPage() {
                     subject: `Re: ${selected.subject}`,
                     html: '',
                     accountId: '',
+                    contactId: selected.contacts?.id ?? '',
+                    requestKey: crypto.randomUUID(),
                   });
                   setShowCompose(true);
                 }}
@@ -279,7 +302,7 @@ export default function InboxPage() {
           >
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-sm font-semibold">SMTP accounts</h2>
-              {viewer?.role === 'admin' && (
+              {viewer && ['admin', 'super_admin'].includes(viewer.role) && (
                 <button
                   className="btn btn-primary py-1"
                   onClick={() =>
@@ -297,7 +320,7 @@ export default function InboxPage() {
 
             {!accountForm &&
               accounts.map((a) => {
-                const canManage = viewer?.role === 'admin';
+                const canManage = !!viewer && ['admin', 'super_admin'].includes(viewer.role);
                 return (
                   <div key={a.id} className="mb-2 flex items-center gap-3 rounded-lg border border-gray-100 px-3 py-2 text-sm">
                     <div className="flex-1">

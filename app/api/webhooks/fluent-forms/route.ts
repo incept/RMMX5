@@ -1,15 +1,12 @@
 import { NextResponse } from 'next/server';
 import { createHash } from 'crypto';
-import { createAdminClient } from '@/lib/supabase/server';
 import { getSetting } from '@/lib/settings';
 import {
   processFluentFormsLead,
   extractFluentFormsEventId,
 } from '@/lib/lead-intake';
 import { verifyBearerSecret } from '@/lib/webhook-auth';
-import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receipts';
 import { logDebug, errorMessage } from '@/lib/debug-log';
-import { enqueueJob } from '@/lib/job-queue';
 import { enforceDeclaredLength, readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 
@@ -56,8 +53,6 @@ export async function POST(request: Request) {
     return apiFailure('api:webhooks/fluent-forms', error);
   }
 
-  const admin = createAdminClient();
-
   // Fluent Forms nests its entry id under flat dotted keys, so the old
   // top-level payload.entry_id lookup always came back null — and a null key
   // disables deduping entirely. The payload hash backstops setups whose feed
@@ -66,30 +61,11 @@ export async function POST(request: Request) {
     request.headers.get('x-rmmx-idempotency-key') ??
     extractFluentFormsEventId(payload) ??
     'sha256:' + createHash('sha256').update(JSON.stringify(payload)).digest('hex');
-  const claimed = await claimWebhookReceipt('fluent_forms', eventId);
-  if (!claimed) return NextResponse.json({ ok: true, duplicate: true });
-
   try {
-    const { contact } = await processFluentFormsLead(payload);
-    await admin.from('webhook_leads').insert({
-      payload,
-      contact_id: contact.id,
-      status: 'processed',
-    });
+    const { contact } = await processFluentFormsLead(payload, eventId);
     // Two SERP engines can take 10–60s, so cron drains this durable job later.
-    await enqueueJob(
-      'auto_search',
-      { contactId: contact.id },
-      `auto-search:fluent-forms:${eventId}`
-    );
     return NextResponse.json({ ok: true, contact_id: contact.id, search: 'queued' });
   } catch (e: any) {
-    await releaseWebhookReceipt('fluent_forms', eventId);
-    await admin.from('webhook_leads').insert({
-      payload,
-      status: 'failed',
-      error: errorMessage(e),
-    });
     await logDebug({
       source: 'webhook:fluent-forms',
       message: errorMessage(e),

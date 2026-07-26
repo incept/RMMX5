@@ -1,9 +1,20 @@
 import { getSetting } from '@/lib/settings';
 import { logDebug, errorMessage } from '@/lib/debug-log';
 import { finishUsage, reserveUsage } from '@/lib/usage';
+import { readResponseText } from '@/lib/request-limits';
 import { parsePhoneIdentity, toE164, type PhoneIdentity } from './trestle-parse.ts';
 
 export { parsePhoneIdentity, toE164, type PhoneIdentity };
+
+export class TrestleLookupError extends Error {
+  constructor(
+    message: string,
+    public readonly retryable: boolean
+  ) {
+    super(message);
+    this.name = 'TrestleLookupError';
+  }
+}
 
 /**
  * Trestle Reverse Phone (https://trestleiq.com) — turns a caller's number into
@@ -58,33 +69,30 @@ export async function lookupPhoneIdentity(
       headers: { 'x-api-key': cfg.api_key },
       signal: AbortSignal.timeout(15_000),
     });
-    const bodyText = await res.text();
+    const bodyText = await readResponseText(res, 256 * 1024);
 
     if (!res.ok) {
-      await finishUsage(usage.id, 'failed', `HTTP ${res.status}`);
-      await logDebug({
-        level: 'warn',
-        source: 'trestle',
-        message: `Reverse phone lookup failed: HTTP ${res.status}`,
-        context: { response: bodyText.slice(0, 300) },
-        contactId: opts?.contactId ?? null,
-      });
-      return null;
+      if (res.status === 404) {
+        await finishUsage(usage.id, 'failed', 'HTTP 404');
+        await logDebug({
+          level: 'info',
+          source: 'trestle',
+          message: 'Reverse phone lookup returned no record',
+          contactId: opts?.contactId ?? null,
+        });
+        return null;
+      }
+      throw new TrestleLookupError(
+        `Trestle HTTP ${res.status}`,
+        res.status === 429 || res.status >= 500
+      );
     }
 
     let data: any;
     try {
       data = JSON.parse(bodyText);
     } catch {
-      await finishUsage(usage.id, 'failed', 'Non-JSON response');
-      await logDebug({
-        level: 'warn',
-        source: 'trestle',
-        message: 'Reverse phone returned a non-JSON body',
-        context: { response: bodyText.slice(0, 300) },
-        contactId: opts?.contactId ?? null,
-      });
-      return null;
+      throw new TrestleLookupError('Trestle returned invalid JSON', true);
     }
 
     const identity = parsePhoneIdentity(data);
@@ -111,6 +119,7 @@ export async function lookupPhoneIdentity(
       message: `Reverse phone lookup error: ${errorMessage(e)}`,
       contactId: opts?.contactId ?? null,
     });
-    return null;
+    if (e instanceof TrestleLookupError) throw e;
+    throw new TrestleLookupError(errorMessage(e), true);
   }
 }

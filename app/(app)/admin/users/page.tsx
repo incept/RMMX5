@@ -72,8 +72,10 @@ export default function UsersPage() {
                   <select
                     className="input w-28 py-1"
                     value={u.role}
+                    disabled={u.role === 'super_admin'}
                     onChange={(e) => patchUser(u.id, { role: e.target.value })}
                   >
+                    <option value="super_admin">Super admin</option>
                     <option value="admin">Admin</option>
                     <option value="worker">Worker</option>
                   </select>
@@ -85,6 +87,7 @@ export default function UsersPage() {
                         ? 'bg-green-100 text-green-700'
                         : 'bg-red-100 text-red-700'
                     }`}
+                    disabled={u.role === 'super_admin'}
                     onClick={() =>
                       patchUser(u.id, { status: u.status === 'active' ? 'disabled' : 'active' })
                     }
@@ -96,7 +99,7 @@ export default function UsersPage() {
                   {new Date(u.created_at).toLocaleDateString()}
                 </td>
                 <td className="grid-td">
-                  <button
+                  {u.role !== 'super_admin' && <button
                     className="text-xs text-gray-400 hover:text-red-600"
                     onClick={async () => {
                       if (!confirm(`Delete ${u.email}? This cannot be undone.`)) return;
@@ -106,7 +109,7 @@ export default function UsersPage() {
                     }}
                   >
                     Delete
-                  </button>
+                  </button>}
                 </td>
               </tr>
             ))}

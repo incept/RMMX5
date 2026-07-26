@@ -107,6 +107,19 @@ stale `processing` rows and `debug_log` for `job:*` lease warnings. Do not add
 more cron invocations to make a backlog drain faster; shorten the schedule
 within the recommended range or move workers to a dedicated process tier.
 
+The browser probe tier temporarily launches Chromium with `--no-sandbox` and
+`--disable-setuid-sandbox` for compatibility while the deployment environment
+is being verified. Treat this as a temporary high-risk configuration: isolate
+the browser worker where possible, keep it non-root, and remove both flags as
+soon as the host's Chromium sandbox has been confirmed. Never expose an
+unsandboxed browser worker to the CRM's service-role credentials.
+
+Migration `0024_comprehensive_hardening.sql` promotes the oldest active
+administrator to the protected `super_admin` installation owner. That account
+cannot be disabled, demoted, or deleted. Admin → Debug Log also contains the
+retention controls for purging bounded historical datasets and file-storage
+objects by age.
+
 ## 4. Webhooks
 
 Webhook credentials are never placed in URLs:

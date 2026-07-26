@@ -3,7 +3,7 @@ import { getSetting, setSetting } from '@/lib/settings';
 import { logActivity } from '@/lib/activity';
 import { logDebug, errorMessage } from '@/lib/debug-log';
 import { parseCallScalerPage } from '@/lib/callscaler-page';
-import { enqueueJob } from '@/lib/job-queue';
+import { readResponseText } from '@/lib/request-limits';
 
 const API_BASE = 'https://callscaler.com/api/v1';
 const SKIP_CATEGORIES = new Set(['spam', 'wrong_number']);
@@ -68,6 +68,15 @@ async function findMatchingContact(
 }
 
 function callFields(payload: Record<string, any>) {
+  const rawText = JSON.stringify(payload);
+  const boundedRaw =
+    Buffer.byteLength(rawText, 'utf8') <= 128 * 1024
+      ? payload
+      : {
+          truncated: true,
+          original_bytes: Buffer.byteLength(rawText, 'utf8'),
+          keys: Object.keys(payload).slice(0, 200),
+        };
   return {
     direction: payload.direction ?? null,
     status: payload.status ?? null,
@@ -82,7 +91,7 @@ function callFields(payload: Record<string, any>) {
     ai_category: payload.ai_category ?? null,
     qualified_ai: payload.qualified_ai ?? null,
     source: payload.source ?? payload.utm_source ?? null,
-    raw: payload,
+    raw: boundedRaw,
     started_at: payload.created_at ? new Date(payload.created_at).toISOString() : null,
   };
 }
@@ -121,14 +130,20 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
     if (refreshError) throw new Error(refreshError.message);
 
     if (SKIP_CATEGORIES.has(payload.ai_category)) {
-      await supabase
+      const { data: skipped, error: skipError } = await supabase
         .from('calls')
         .update({
           processing_status: 'completed',
           locked_at: null,
           processed_at: new Date().toISOString(),
         })
-        .eq('id', claim.id);
+        .eq('id', claim.id)
+        .eq('processing_status', 'processing')
+        .select('id')
+        .maybeSingle();
+      if (skipError || !skipped) {
+        throw new Error(skipError?.message ?? 'Call processing lease was lost');
+      }
       return { callId, duplicate: false, skipped: payload.ai_category };
     }
 
@@ -192,15 +207,14 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
       },
     });
 
-    const { error: completeError } = await supabase
-      .from('calls')
-      .update({
-        processing_status: 'completed',
-        locked_at: null,
-        last_error: null,
-        processed_at: new Date().toISOString(),
-      })
-      .eq('id', claim.id);
+    const namedNewContact = createdContact && looksLikeHumanName(payload.caller_name);
+    const { error: completeError } = await supabase.rpc('complete_call_processing', {
+      p_call_row_id: claim.id,
+      p_call_id: callId,
+      p_contact_id: contactId,
+      p_enqueue_enrichment: createdContact,
+      p_enqueue_search: namedNewContact,
+    });
     if (completeError) throw new Error(completeError.message);
 
     return {
@@ -208,11 +222,10 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
       duplicate: false,
       contactId,
       createdContact,
-      searchContactId:
-        createdContact && looksLikeHumanName(payload.caller_name) ? contactId : undefined,
+      searchContactId: namedNewContact ? contactId : undefined,
     };
   } catch (failure) {
-    await supabase
+    const { error: failureError } = await supabase
       .from('calls')
       .update({
         processing_status: 'failed',
@@ -220,6 +233,14 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
         last_error: errorMessage(failure).slice(0, 2000),
       })
       .eq('id', claim.id);
+    if (failureError) {
+      await logDebug({
+        level: 'error',
+        source: 'callscaler:processing-state',
+        message: `Could not record failed call processing: ${failureError.message}`,
+        context: { call_id: callId, original_error: errorMessage(failure) },
+      });
+    }
     throw failure;
   }
 }
@@ -254,7 +275,7 @@ export async function syncMissedCalls() {
     headers: { Authorization: `Bearer ${cfg.api_key}` },
     signal: AbortSignal.timeout(20_000),
   });
-  const bodyText = await response.text();
+  const bodyText = await readResponseText(response, 2 * 1024 * 1024);
   if (!response.ok) {
     throw new Error(`CallScaler Calls API failed: ${response.status} ${bodyText.slice(0, 300)}`);
   }
@@ -275,13 +296,6 @@ export async function syncMissedCalls() {
       if (!result.duplicate) {
         processed += 1;
         if (result.createdContact) created += 1;
-        if (result.searchContactId) {
-          await enqueueJob(
-            'auto_search',
-            { contactId: result.searchContactId },
-            `auto-search:callscaler:${result.callId}`
-          );
-        }
       }
     } catch (failure) {
       failed += 1;

@@ -7,6 +7,7 @@ import { fetchWithBrowser } from './browser.ts';
 import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
 import { finishUsage, reserveUsage } from '@/lib/usage';
+import { assertPublicWebUrl } from '@/lib/public-url';
 
 /**
  * Page fetching for probes.
@@ -337,13 +338,13 @@ async function browserFetch(
     try {
       const res = dispatcher
         ? await undiciFetch(url, {
-            redirect: 'follow',
+            redirect: 'manual',
             signal: combinedSignal(20_000, signal),
             headers: BROWSER_HEADERS,
             dispatcher,
           })
         : await fetch(url, {
-            redirect: 'follow',
+            redirect: 'manual',
             signal: combinedSignal(20_000, signal),
             headers: BROWSER_HEADERS,
           });
@@ -370,6 +371,7 @@ export async function fetchProbePage(
   opts?: { render?: boolean; needsBrowser?: boolean; signal?: AbortSignal }
 ): Promise<FetchOutcome> {
   const notes: string[] = [];
+  await assertPublicWebUrl(url);
 
   // Hosts that fingerprint the TLS handshake refuse both HTTP tiers every time,
   // and each one costs two attempts on a 20s timeout. Skip straight to Chrome.

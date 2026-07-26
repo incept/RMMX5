@@ -41,5 +41,10 @@ export function useMyRole() {
     };
   }, []);
 
-  return { role, isAdmin: role === 'admin', loading };
+  return {
+    role,
+    isAdmin: role === 'admin' || role === 'super_admin',
+    isSuperAdmin: role === 'super_admin',
+    loading,
+  };
 }

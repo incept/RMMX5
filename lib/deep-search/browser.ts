@@ -9,6 +9,7 @@
 import { type Browser, type Page } from 'puppeteer-core';
 import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
+import { assertPublicWebUrl } from '@/lib/public-url';
 
 /**
  * Headless Chrome, for the hosts that only a real browser can reach.
@@ -47,6 +48,8 @@ const MAX_CONCURRENT_PAGES = 2;
 const MAX_QUEUED_PAGES = 8;
 const SLOT_WAIT_MS = 60_000;
 const PAGE_TIMEOUT_MS = 45_000;
+const MAX_RENDERED_HTML_BYTES = 2 * 1024 * 1024;
+const MAX_DOM_NODES = 25_000;
 /** Chrome is only worth launching for pages we cannot get any cheaper way. */
 const LAUNCH_TIMEOUT_MS = 30_000;
 
@@ -144,10 +147,10 @@ async function getBrowser(executablePath: string): Promise<Browser> {
         headless: true,
         timeout: LAUNCH_TIMEOUT_MS,
         args: [
-          // Most Linux hosts run the app as a user without the namespaces
-          // Chrome's sandbox needs. Subresources are blocked and each fetch gets
-          // its own incognito context, which is what limits exposure here.
+          // TEMPORARY HOST COMPATIBILITY: remove these two flags after the
+          // deployment environment's Chromium sandbox has been confirmed.
           '--no-sandbox',
+          '--disable-setuid-sandbox',
           '--disable-dev-shm-usage', // /dev/shm is tiny on shared hosts; without this Chrome crashes
           '--disable-blink-features=AutomationControlled',
           '--disable-extensions',
@@ -274,17 +277,37 @@ export async function fetchWithBrowser(
 
     await page.setRequestInterception(true);
     page.on('request', (req) => {
-      if (['image', 'font', 'media', 'stylesheet'].includes(req.resourceType())) {
-        req.abort().catch(() => {});
-      } else {
-        req.continue().catch(() => {});
-      }
+      void (async () => {
+        try {
+          if (req.isNavigationRequest()) await assertPublicWebUrl(req.url());
+          if (['image', 'font', 'media', 'stylesheet'].includes(req.resourceType())) {
+            await req.abort();
+          } else {
+            await req.continue();
+          }
+        } catch {
+          await req.abort().catch(() => {});
+        }
+      })();
     });
 
     const res = await page.goto(url, {
       waitUntil: 'domcontentloaded',
       timeout: PAGE_TIMEOUT_MS,
     });
+    const declaredLength = Number(res?.headers()['content-length']);
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_RENDERED_HTML_BYTES) {
+      throw new Error('browser response exceeded the 2 MB safety limit');
+    }
+    const size = await page.evaluate(() => ({
+      nodes: document.getElementsByTagName('*').length,
+      htmlChars: document.documentElement?.outerHTML.length ?? 0,
+    }));
+    if (size.nodes > MAX_DOM_NODES || size.htmlChars > MAX_RENDERED_HTML_BYTES) {
+      throw new Error(
+        `rendered page exceeded safety limits (${size.nodes} nodes, ${size.htmlChars} characters)`
+      );
+    }
     const html = await page.content();
     return { ok: true, html, status: res?.status() ?? 0 };
   } catch (e: any) {

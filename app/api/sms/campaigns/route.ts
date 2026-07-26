@@ -23,7 +23,7 @@ export async function POST(request: Request) {
   }
 
   const requestKey = request.headers.get('idempotency-key');
-  if (body.sendNow && auth.profile.role !== 'admin') {
+  if (body.sendNow && !['admin', 'super_admin'].includes(auth.profile.role)) {
     return NextResponse.json({ error: 'Admin access required to send campaigns' }, { status: 403 });
   }
   if (body.sendNow && !validIdempotencyKey(requestKey)) {

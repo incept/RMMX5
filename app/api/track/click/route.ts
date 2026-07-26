@@ -31,16 +31,15 @@ export async function GET(request: Request) {
       // Atomic increment (no read-modify-write race); returns contact_id so
       // the event insert needs no second lookup. Empty result = unknown id.
       const { data } = await admin
-        .rpc('track_email_event', { p_message_id: messageId, p_event: 'click' })
-        .maybeSingle<{ message_id: string; contact_id: string | null }>();
+        .rpc('track_email_event_bounded', {
+          p_message_id: messageId,
+          p_event: 'click',
+          p_url: url,
+          p_bucket_seconds: 60,
+        })
+        .maybeSingle<{ message_id: string; contact_id: string | null; counted: boolean }>();
 
-      if (data) {
-        await admin.from('email_events').insert({
-          message_id: data.message_id,
-          contact_id: data.contact_id,
-          type: 'click',
-          url,
-        });
+      if (data?.counted) {
         if (data.contact_id) await stopEnrollmentsFor(data.contact_id, 'click');
       }
     } catch (error) {

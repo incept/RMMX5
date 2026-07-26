@@ -1,5 +1,6 @@
 import { getSetting } from '@/lib/settings';
 import { logDebug, errorMessage } from '@/lib/debug-log';
+import { readResponseText } from '@/lib/request-limits';
 
 /**
  * ip-api.com geolocation (https://ip-api.com/docs).
@@ -53,7 +54,8 @@ export async function lookupIpLocation(ip: string | null | undefined): Promise<I
       return null;
     }
 
-    const data = await res.json();
+    const bodyText = await readResponseText(res, 128 * 1024);
+    const data = JSON.parse(bodyText);
     if (data.status !== 'success') {
       await logDebug({
         level: 'warn',
