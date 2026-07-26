@@ -66,6 +66,7 @@ export default function ContactPanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState('');
   const [compose, setCompose] = useState({ subject: '', html: '', accountId: '' });
+  const [confirmUrlValue, setConfirmUrlValue] = useState('');
 
   const load = useCallback(async () => {
     const [contactRes, linksRes, statusRes, stageRes, fieldsRes, activityRes] = await Promise.all([
@@ -226,8 +227,8 @@ export default function ContactPanel({
         'Clear deep-search results for this contact?\n\n' +
           '• Removes candidates awaiting review and previously dismissed ones\n' +
           '• Resets the facts learned by searching (county, middle name, dates)\n' +
-          '• Links already accepted into slots are kept\n\n' +
-          'The next deep search then starts fresh from the contact record and its saved links.'
+          '• Links accepted into slots, and anything you confirmed (🔒), are kept\n\n' +
+          'The next deep search then starts fresh from the contact record, its saved links, and confirmed facts.'
       )
     ) {
       return;
@@ -249,23 +250,62 @@ export default function ContactPanel({
     }
   }
 
-  async function reviewCandidate(candidateId: string, action: 'accept' | 'reject') {
+  async function reviewCandidate(candidateId: string, action: 'accept' | 'reject' | 'confirm') {
     setBusy(`cand-${candidateId}`);
-    const res = await fetch(`/api/contacts/${contactId}/candidates`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ candidateId, action }),
-    });
-    const data = await res.json();
-    setBusy(null);
-    if (!res.ok) {
-      alert(data.error ?? 'Could not update candidate');
+    try {
+      const res = await fetch(`/api/contacts/${contactId}/candidates`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ candidateId, action }),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) {
+        alert(data.error ?? `Could not update candidate (HTTP ${res.status})`);
+        return;
+      }
+      await Promise.all([loadCandidates(), load()]);
+      // Accept fills a slot; confirm changes learned facts. Both alter what the
+      // rest of the panel shows, so refresh the parent list too.
+      onChanged();
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Confirm/unconfirm a single fact value, or a URL a human found. All write to
+  // the contact's confirmed_facts, so reload the contact to reflect it.
+  async function mutateConfirmed(
+    payload: Record<string, unknown>,
+    busyKey: string
+  ): Promise<boolean> {
+    setBusy(busyKey);
+    try {
+      const res = await fetch(`/api/contacts/${contactId}/candidates`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) {
+        alert(data.error ?? `Could not update (HTTP ${res.status})`);
+        return false;
+      }
+      await Promise.all([load(), loadCandidates()]);
+      onChanged();
+      return true;
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function confirmUrl() {
+    const url = (confirmUrlValue || '').trim();
+    if (!/^https?:\/\/\S+$/i.test(url)) {
+      alert('Enter a full URL starting with http:// or https://');
       return;
     }
-    await loadCandidates();
-    if (action === 'accept') {
-      await load();
-      onChanged();
+    if (await mutateConfirmed({ action: 'confirm_url', url }, 'confirm-url')) {
+      setConfirmUrlValue('');
     }
   }
 
@@ -722,24 +762,121 @@ export default function ContactPanel({
                 </button>
               </div>
 
-              {/* What deep search learned. Shown because these facts are what
-                  make the later queries good, and because a wrong county is
-                  the thing most worth catching by eye. */}
+              {/* Facts the search relies on. A confirmed value (a human vouched
+                  for it) outranks a learned one, seeds every run, and survives
+                  Clear results; a learned value can be promoted with one click,
+                  which is the fix for a wrong county steering the next run. */}
               {(() => {
-                const f = contact.search_facts ?? {};
-                const bits: string[] = [];
-                if (f.middle?.length) bits.push(`Middle: ${f.middle.join(' / ')}`);
-                if (f.county?.length) bits.push(`County: ${f.county.join(' / ')}`);
-                if (f.state?.length) bits.push(`State: ${f.state.join(' / ')}`);
-                if (f.booking_dates?.length) bits.push(`Booked: ${f.booking_dates.join(' / ')}`);
-                if (f.record_ids?.length) bits.push(`Record IDs: ${f.record_ids.join(' / ')}`);
-                return bits.length ? (
-                  <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:text-gray-900">
-                    <span className="font-semibold">Facts found: </span>
-                    {bits.join(' · ')}
+                const learned = contact.search_facts ?? {};
+                const confirmed = contact.confirmed_facts ?? {};
+                const LABELS: [string, string][] = [
+                  ['middle', 'Middle'],
+                  ['county', 'County'],
+                  ['state', 'State'],
+                  ['booking_dates', 'Booked'],
+                  ['record_ids', 'Record ID'],
+                ];
+                const rows = LABELS.map(([key, label]) => {
+                  const conf: string[] = confirmed[key] ?? [];
+                  const confLower = new Set(conf.map((v) => String(v).toLowerCase()));
+                  // A value only counts as "learned" until it is confirmed.
+                  const learnedOnly = (learned[key] ?? []).filter(
+                    (v: string) => !confLower.has(String(v).toLowerCase())
+                  );
+                  return { key, label, conf, learnedOnly };
+                }).filter((r) => r.conf.length || r.learnedOnly.length);
+                if (!rows.length) return null;
+
+                return (
+                  <div className="space-y-1.5 rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:text-gray-900">
+                    <div className="text-[10px] font-medium tracking-widest text-gray-500 uppercase dark:text-gray-600">
+                      Facts
+                    </div>
+                    {rows.map(({ key, label, conf, learnedOnly }) => (
+                      <div key={key} className="flex flex-wrap items-center gap-1.5">
+                        <span className="w-16 flex-none font-semibold">{label}:</span>
+                        {conf.map((v) => (
+                          <span
+                            key={`c-${v}`}
+                            className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-[11px] text-green-800"
+                            title="Confirmed — outranks scraped values and survives Clear results"
+                          >
+                            🔒 {v}
+                            {isAdmin && (
+                              <button
+                                type="button"
+                                disabled={busy === `fact-${key}-${v}`}
+                                onClick={() =>
+                                  mutateConfirmed(
+                                    { action: 'unconfirm_fact', key, value: v },
+                                    `fact-${key}-${v}`
+                                  )
+                                }
+                                className="text-green-700 hover:text-red-600 disabled:opacity-50"
+                                title="Remove this confirmed value"
+                              >
+                                ×
+                              </button>
+                            )}
+                          </span>
+                        ))}
+                        {learnedOnly.map((v: string) => (
+                          <span
+                            key={`l-${v}`}
+                            className="inline-flex items-center gap-1 rounded-full bg-gray-200 px-2 py-0.5 text-[11px] text-gray-700"
+                          >
+                            {v}
+                            {isAdmin && (
+                              <button
+                                type="button"
+                                disabled={busy === `fact-${key}-${v}`}
+                                onClick={() =>
+                                  mutateConfirmed(
+                                    { action: 'confirm_fact', key, value: v },
+                                    `fact-${key}-${v}`
+                                  )
+                                }
+                                className="text-gray-500 hover:text-green-700 disabled:opacity-50"
+                                title="Confirm this value as truth"
+                              >
+                                ✓
+                              </button>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    ))}
                   </div>
-                ) : null;
+                );
               })()}
+
+              {/* Confirm a URL a human found — a page you know is this person's,
+                  whether or not a search surfaced it. It becomes truth (its
+                  county/date/middle name seed future runs) without taking one of
+                  the 14 removal slots. */}
+              {isAdmin && (
+                <div className="flex items-center gap-2">
+                  <input
+                    type="url"
+                    value={confirmUrlValue}
+                    onChange={(e) => setConfirmUrlValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') confirmUrl();
+                    }}
+                    placeholder="Confirm a known URL (https://…)"
+                    className="min-w-0 flex-1 rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] dark:text-gray-900"
+                  />
+                  <button
+                    type="button"
+                    className="btn px-2.5 py-1 text-xs"
+                    disabled={busy === 'confirm-url' || !confirmUrlValue.trim()}
+                    onClick={confirmUrl}
+                    title="Record this URL as this person's and fold its facts into the confirmed set"
+                  >
+                    {busy === 'confirm-url' ? 'Confirming…' : 'Confirm URL'}
+                  </button>
+                </div>
+              )}
 
               {/* Candidate review. Deep search never fills a slot on its own —
                   someone confirms each URL, and provenance makes the chaining
@@ -770,7 +907,9 @@ export default function ContactPanel({
                         className={`rounded-lg border px-3 py-2 ${
                           c.status === 'new'
                             ? 'border-gray-200'
-                            : 'border-gray-100 bg-gray-50 opacity-60'
+                            : c.status === 'confirmed'
+                              ? 'border-green-200 bg-green-50'
+                              : 'border-gray-100 bg-gray-50 opacity-60'
                         }`}
                       >
                         <div className="flex items-start gap-2">
@@ -822,9 +961,21 @@ export default function ContactPanel({
                                 className="btn px-2 py-0.5 text-xs"
                                 disabled={busy === `cand-${c.id}`}
                                 onClick={() => reviewCandidate(c.id, 'accept')}
+                                title="Add to a removal link slot"
                               >
                                 Add
                               </button>
+                              {/* Confirm as truth without spending a slot. */}
+                              {isAdmin && (
+                                <button
+                                  className="btn px-2 py-0.5 text-xs"
+                                  disabled={busy === `cand-${c.id}`}
+                                  onClick={() => reviewCandidate(c.id, 'confirm')}
+                                  title="Mark as this person's and fold its facts into the confirmed set, without using a slot"
+                                >
+                                  Confirm
+                                </button>
+                              )}
                               <button
                                 className="btn px-2 py-0.5 text-xs text-gray-500"
                                 disabled={busy === `cand-${c.id}`}
@@ -833,6 +984,13 @@ export default function ContactPanel({
                                 Dismiss
                               </button>
                             </div>
+                          ) : c.status === 'confirmed' ? (
+                            <span
+                              className="flex-none rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-800"
+                              title="Confirmed as this person's — seeds runs, survives Clear"
+                            >
+                              🔒 confirmed
+                            </span>
                           ) : (
                             <span className="flex-none text-[10px] text-gray-400">{c.status}</span>
                           )}
