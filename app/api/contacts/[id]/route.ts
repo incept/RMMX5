@@ -4,7 +4,8 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { logActivity } from '@/lib/activity';
 import { fireNotification } from '@/lib/notifications';
 import { startSequencesForStatus, stopEnrollmentsFor } from '@/lib/sequence-runner';
-import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
+import { readJsonBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -23,8 +24,7 @@ export async function PATCH(request: Request, { params }: Params) {
   try {
     patch = await readJsonBody(request, 256 * 1024);
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:contacts/[id]', error);
   }
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
     return NextResponse.json({ error: 'A contact patch object is required' }, { status: 400 });

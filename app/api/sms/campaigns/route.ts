@@ -4,7 +4,8 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { renderTemplate } from '@/lib/sequence-runner';
 import { deliveryKey, MAX_BULK_RECIPIENTS, validIdempotencyKey } from '@/lib/bulk-delivery';
 import { enqueueJob } from '@/lib/job-queue';
-import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
+import { readJsonBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 export async function POST(request: Request) {
   const auth = await requireUser();
@@ -13,8 +14,7 @@ export async function POST(request: Request) {
   try {
     body = await readJsonBody(request, 256 * 1024);
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:sms/campaigns', error);
   }
   body.name = String(body.name ?? '').trim().slice(0, 200);
   body.body = String(body.body ?? '').slice(0, 20_000);

@@ -7,7 +7,8 @@ import {
   validateVoicemailFileContent,
   VOICEMAIL_MAX_BYTES,
 } from '@/lib/uploads';
-import { enforceDeclaredLength, requestErrorResponse } from '@/lib/request-limits';
+import { enforceDeclaredLength } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 const BUCKET = 'voicemail-audio';
 
@@ -19,8 +20,7 @@ export async function POST(request: Request) {
   try {
     enforceDeclaredLength(request, VOICEMAIL_MAX_BYTES + 1024 * 1024, { required: true });
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:voicemail/drops', error);
   }
 
   const form = await request.formData();

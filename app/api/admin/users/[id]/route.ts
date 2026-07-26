@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
-import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
+import { readJsonBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -14,8 +15,7 @@ export async function PATCH(request: Request, { params }: Params) {
   try {
     body = await readJsonBody(request, 64 * 1024);
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:admin/users/[id]', error);
   }
 
   if (id === auth.profile.id && (body.role === 'worker' || body.status === 'disabled')) {

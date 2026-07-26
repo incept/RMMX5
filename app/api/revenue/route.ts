@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { fetchStripeRevenue } from '@/lib/integrations/stripe';
+import { logDebug, errorMessage } from '@/lib/debug-log';
 
 /**
  * GET — dashboard revenue block:
@@ -36,6 +37,14 @@ export async function GET() {
     stripe = await fetchStripeRevenue();
   } catch (e: any) {
     stripeError = e.message;
+    // The message does reach the dashboard, but nobody reads a greyed-out
+    // figure as an alert. A revenue total silently falling back to zero is
+    // exactly the kind of thing that should be discoverable after the fact.
+    await logDebug({
+      level: 'warn',
+      source: 'api:revenue',
+      message: `Stripe revenue lookup failed: ${errorMessage(e)}`,
+    }).catch(() => {});
   }
 
   return NextResponse.json({

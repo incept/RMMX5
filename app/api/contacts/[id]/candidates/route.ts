@@ -3,7 +3,8 @@ import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { applyScores } from '@/lib/scoring';
 import { logActivity } from '@/lib/activity';
-import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
+import { readJsonBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -32,8 +33,7 @@ export async function PATCH(request: Request, { params }: Params) {
   try {
     body = await readJsonBody(request, 32 * 1024);
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:contacts/[id]/candidates', error);
   }
   const action = body.action;
   if (!body.candidateId || (action !== 'accept' && action !== 'reject')) {

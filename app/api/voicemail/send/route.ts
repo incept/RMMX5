@@ -3,7 +3,8 @@ import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { deliveryKey, MAX_BULK_RECIPIENTS, validIdempotencyKey } from '@/lib/bulk-delivery';
 import { enqueueJob } from '@/lib/job-queue';
-import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
+import { readJsonBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 export async function POST(request: Request) {
   const auth = await requireAdmin();
@@ -12,8 +13,7 @@ export async function POST(request: Request) {
   try {
     body = await readJsonBody(request, 256 * 1024);
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:voicemail/send', error);
   }
   if (!body.dropId) return NextResponse.json({ error: 'dropId required' }, { status: 400 });
   const requestKey = request.headers.get('idempotency-key');

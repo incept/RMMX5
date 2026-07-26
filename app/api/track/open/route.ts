@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
 import { stopEnrollmentsFor } from '@/lib/sequence-runner';
 import { isTrackableId, passesCooldown } from '@/lib/track-guard';
+import { logDebug, errorMessage } from '@/lib/debug-log';
 
 // 1x1 transparent GIF
 const PIXEL = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
@@ -27,8 +28,16 @@ export async function GET(request: Request) {
         });
         if (data.contact_id) await stopEnrollmentsFor(data.contact_id, 'open');
       }
-    } catch {
-      // tracking must never fail the image response
+    } catch (error) {
+      // Tracking must never fail the image response — but swallowing it whole
+      // meant open counts could drift for weeks with nothing to show for it.
+      // Logged at warn: the recipient still gets their pixel, and we still know.
+      await logDebug({
+        level: 'warn',
+        source: 'api:track/open',
+        message: `Open tracking failed: ${errorMessage(error)}`,
+        context: { messageId },
+      }).catch(() => {});
     }
   }
 

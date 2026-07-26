@@ -5,7 +5,8 @@ import { stopEnrollmentsFor } from '@/lib/sequence-runner';
 import { logActivity } from '@/lib/activity';
 import { verifyEmailitWebhook } from '@/lib/webhook-auth';
 import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receipts';
-import { readTextBody, requestErrorResponse } from '@/lib/request-limits';
+import { readTextBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 /**
  * Emailit event webhook (bounces & complaints) — configure in the Emailit
@@ -23,8 +24,7 @@ export async function POST(request: Request) {
   try {
     rawBody = await readTextBody(request, 1024 * 1024);
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:webhooks/emailit', error);
   }
   const cfg = await getSetting<{ webhook_signing_secret?: string }>('emailit');
   if (
