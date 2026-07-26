@@ -5,6 +5,14 @@ import { applyScores } from '@/lib/scoring';
 import { logActivity } from '@/lib/activity';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
+import { canonicalUrl } from '@/lib/integrations/brightdata';
+import { splitName } from '@/lib/deep-search/facts';
+import {
+  addConfirmedFact,
+  confirmFactsFromUrl,
+  isConfirmableKey,
+  removeConfirmedFact,
+} from '@/lib/deep-search/confirmed';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -124,14 +132,116 @@ export async function PATCH(request: Request, { params }: Params) {
     return apiFailure('api:contacts/[id]/candidates', error);
   }
   const action = body.action;
-  if (!body.candidateId || (action !== 'accept' && action !== 'reject')) {
+  const admin = createAdminClient();
+
+  // Confirming a FACT or a pasted URL touches confirmed_facts, not a candidate,
+  // so these branches run before the candidate lookup. All are admin-only: this
+  // is asserting truth the engine will act on, matching the deep-search route.
+  if (action === 'confirm_fact' || action === 'unconfirm_fact') {
+    const adminAuth = await requireAdmin();
+    if ('error' in adminAuth) return adminAuth.error;
+    try {
+      if (!isConfirmableKey(body.key) || typeof body.value !== 'string' || !body.value.trim()) {
+        return NextResponse.json(
+          { error: 'key (a fact field) and a non-empty value are required' },
+          { status: 400 }
+        );
+      }
+      const { data: c, error: readError } = await admin
+        .from('contacts')
+        .select('confirmed_facts')
+        .eq('id', id)
+        .maybeSingle();
+      if (readError) throw readError;
+      if (!c) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+
+      const next =
+        action === 'confirm_fact'
+          ? addConfirmedFact(c.confirmed_facts, body.key, body.value)
+          : removeConfirmedFact(c.confirmed_facts, body.key, body.value);
+      const { error: writeError } = await admin
+        .from('contacts')
+        .update({ confirmed_facts: next })
+        .eq('id', id);
+      if (writeError) throw writeError;
+
+      await logActivity({
+        contactId: id,
+        actorId: adminAuth.profile.id,
+        type: 'updated',
+        description: `${action === 'confirm_fact' ? 'Confirmed' : 'Unconfirmed'} ${body.key} "${body.value.trim()}"`,
+      });
+      return NextResponse.json({ ok: true, confirmed_facts: next });
+    } catch (error) {
+      return apiFailure('api:contacts/[id]/candidates', error, { contactId: id });
+    }
+  }
+
+  if (action === 'confirm_url') {
+    const adminAuth = await requireAdmin();
+    if ('error' in adminAuth) return adminAuth.error;
+    try {
+      const raw = typeof body.url === 'string' ? body.url.trim() : '';
+      if (!/^https?:\/\/\S+$/i.test(raw) || raw.length > 2048) {
+        return NextResponse.json({ error: 'A valid HTTP(S) URL is required' }, { status: 400 });
+      }
+      const { data: c, error: readError } = await admin
+        .from('contacts')
+        .select('name, confirmed_facts')
+        .eq('id', id)
+        .maybeSingle();
+      if (readError) throw readError;
+      if (!c) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+
+      const name = splitName(c.name ?? '');
+      // Derive the URL's facts into the same authoritative store a confirmed
+      // fact lands in — the whole reason a confirmed link is worth anything.
+      const next = confirmFactsFromUrl(c.confirmed_facts, raw, name);
+      const { error: writeError } = await admin
+        .from('contacts')
+        .update({ confirmed_facts: next })
+        .eq('id', id);
+      if (writeError) throw writeError;
+
+      // Record the URL so it shows in the list and, being in search_candidates,
+      // is suppressed from re-surfacing on later runs. onConflict handles a URL
+      // a probe already found: promote it to confirmed rather than erroring.
+      const { error: upsertError } = await admin.from('search_candidates').upsert(
+        {
+          contact_id: id,
+          url: raw,
+          canonical_url: canonicalUrl(raw),
+          source: 'manual',
+          source_detail: 'confirmed by hand',
+          confidence: 1,
+          status: 'confirmed',
+          reviewed_by: adminAuth.profile.id,
+          reviewed_at: new Date().toISOString(),
+        },
+        { onConflict: 'contact_id,canonical_url' }
+      );
+      if (upsertError) throw upsertError;
+
+      await logActivity({
+        contactId: id,
+        actorId: adminAuth.profile.id,
+        type: 'updated',
+        description: `Confirmed URL as this person's: ${raw}`,
+        meta: { url: raw },
+      });
+      return NextResponse.json({ ok: true, status: 'confirmed', confirmed_facts: next });
+    } catch (error) {
+      return apiFailure('api:contacts/[id]/candidates', error, { contactId: id });
+    }
+  }
+
+  if (!body.candidateId || (action !== 'accept' && action !== 'reject' && action !== 'confirm')) {
     return NextResponse.json(
-      { error: 'candidateId and action (accept or reject) are required' },
+      { error: 'candidateId and action (accept, reject, or confirm) are required' },
       { status: 400 }
     );
   }
 
-  const admin = createAdminClient();
   const { data: candidate, error: candidateError } = await admin
     .from('search_candidates')
     .select('*')
@@ -142,6 +252,69 @@ export async function PATCH(request: Request, { params }: Params) {
     return NextResponse.json({ error: candidateError.message }, { status: 400 });
   }
   if (!candidate) return NextResponse.json({ error: 'Candidate not found' }, { status: 404 });
+
+  // Confirm a found candidate as truth WITHOUT spending a removal slot: promote
+  // its status and fold its URL's facts into confirmed_facts. A search view is
+  // not a person's record page, so it cannot be confirmed as one.
+  if (action === 'confirm') {
+    const adminAuth = await requireAdmin();
+    if ('error' in adminAuth) return adminAuth.error;
+    if (candidate.matched_facts?.kind === 'site_search') {
+      return NextResponse.json(
+        { error: 'A search view is not a record page and cannot be confirmed' },
+        { status: 409 }
+      );
+    }
+    try {
+      const { data: c, error: readError } = await admin
+        .from('contacts')
+        .select('name, confirmed_facts')
+        .eq('id', id)
+        .maybeSingle();
+      if (readError) throw readError;
+      if (!c) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+
+      const name = splitName(c.name ?? '');
+      const next = confirmFactsFromUrl(c.confirmed_facts, candidate.url, name);
+      const { error: writeError } = await admin
+        .from('contacts')
+        .update({ confirmed_facts: next })
+        .eq('id', id);
+      if (writeError) throw writeError;
+
+      // Only from new/rejected: an accepted candidate owns a link slot, and
+      // flipping it to confirmed would strand that slot's provenance.
+      const { data: updated, error: statusError } = await admin
+        .from('search_candidates')
+        .update({
+          status: 'confirmed',
+          reviewed_by: adminAuth.profile.id,
+          reviewed_at: new Date().toISOString(),
+        })
+        .eq('id', candidate.id)
+        .in('status', ['new', 'rejected'])
+        .select('id')
+        .maybeSingle();
+      if (statusError) throw statusError;
+      if (!updated) {
+        return NextResponse.json(
+          { error: 'Candidate is already accepted into a slot; confirm does not apply' },
+          { status: 409 }
+        );
+      }
+
+      await logActivity({
+        contactId: id,
+        actorId: adminAuth.profile.id,
+        type: 'updated',
+        description: `Confirmed candidate as this person's: ${candidate.url}`,
+        meta: { url: candidate.url },
+      });
+      return NextResponse.json({ ok: true, status: 'confirmed', confirmed_facts: next });
+    } catch (error) {
+      return apiFailure('api:contacts/[id]/candidates', error, { contactId: id });
+    }
+  }
 
   if (action === 'reject') {
     const { data, error } = await admin
