@@ -896,3 +896,38 @@ test('puppeteer-core is declared as a server external package', async () => {
   const config = await readFile(new URL('../next.config.ts', import.meta.url), 'utf8');
   assert.match(config, /serverExternalPackages: \[[^\]]*'puppeteer-core'/);
 });
+
+test('clearing results removes what actually makes a re-run repeat itself', async () => {
+  // The visible list is not what causes a repeat. Three things persist: rejected
+  // candidates suppress their URL forever, search_facts only accumulates, and
+  // the hourly dedupe key blocks a fresh enqueue. Clearing only the rows the
+  // operator can see would return an identical result set.
+  const source = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  const fn = source.slice(source.indexOf('export async function DELETE'));
+  const body = fn.slice(0, fn.indexOf('\nexport async function PATCH'));
+
+  assert.match(body, /\.in\('status', \['new', 'rejected'\]\)/, 'clears dismissed rows too');
+  assert.match(body, /search_facts: \{\}/, 'resets the learned facts');
+  assert.match(body, /\.eq\('kind', 'deep_search'\)[\s\S]*?\.neq\('status', 'processing'\)/, 'frees the dedupe key');
+  // Accepted candidates are the provenance for filled slots and must survive.
+  assert.doesNotMatch(body, /'accepted'/, 'accepted rows are never in the delete filter');
+  assert.doesNotMatch(body, /contact_links/, 'link slots are never touched');
+});
+
+test('clearing is refused while a deep search is running', async () => {
+  // Otherwise the live run inserts candidates after the delete and reinstates
+  // the facts just reset, leaving a half-state nobody asked for.
+  const source = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  const fn = source.slice(source.indexOf('export async function DELETE'));
+  const body = fn.slice(0, fn.indexOf('\nexport async function PATCH'));
+  assert.match(body, /\.eq\('status', 'processing'\)/);
+  assert.match(body, /status: 409/);
+  // And it is admin-only, matching the deep-search route that creates the data.
+  assert.match(body, /await requireAdmin\(\)/);
+});
