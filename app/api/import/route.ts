@@ -3,7 +3,8 @@ import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { applyScores } from '@/lib/scoring';
 import { logActivity } from '@/lib/activity';
-import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
+import { readJsonBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 const MAX_IMPORT_ROWS = 1000;
 const IMPORT_BODY_BYTES = 5 * 1024 * 1024;
@@ -23,8 +24,7 @@ export async function POST(request: Request) {
   try {
     body = await readJsonBody(request, IMPORT_BODY_BYTES);
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:import', error);
   }
   const rows: Record<string, string>[] = body.rows ?? [];
   if (!rows.length) return NextResponse.json({ error: 'No rows to import' }, { status: 400 });

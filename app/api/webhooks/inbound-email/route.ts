@@ -5,7 +5,8 @@ import { stopEnrollmentsFor } from '@/lib/sequence-runner';
 import { logActivity } from '@/lib/activity';
 import { verifyBearerSecret } from '@/lib/webhook-auth';
 import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receipts';
-import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
+import { readJsonBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 /**
  * Generic inbound-email webhook → unified inbox.
@@ -26,8 +27,7 @@ export async function POST(request: Request) {
   try {
     body = await readJsonBody(request, 1024 * 1024);
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:webhooks/inbound-email', error);
   }
   if (!body?.from) return NextResponse.json({ error: 'from required' }, { status: 400 });
 

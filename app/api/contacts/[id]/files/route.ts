@@ -8,7 +8,8 @@ import {
   storageSafeName,
   validateContactFileContent,
 } from '@/lib/uploads';
-import { enforceDeclaredLength, requestErrorResponse } from '@/lib/request-limits';
+import { enforceDeclaredLength } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -53,8 +54,7 @@ export async function POST(request: Request, { params }: Params) {
   try {
     enforceDeclaredLength(request, CONTACT_FILE_MAX_BYTES + 1024 * 1024, { required: true });
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:contacts/[id]/files', error);
   }
 
   const form = await request.formData();

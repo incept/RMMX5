@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { getSetting, setSetting } from '@/lib/settings';
 import { getUsageSummary } from '@/lib/usage';
-import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
+import { readJsonBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 const KNOWN_KEYS = [
   'brightdata',
@@ -84,8 +85,7 @@ export async function PUT(request: Request) {
   try {
     body = await readJsonBody(request, 128 * 1024);
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:admin/settings', error);
   }
 
   if (!KNOWN_KEYS.includes(body.key)) {

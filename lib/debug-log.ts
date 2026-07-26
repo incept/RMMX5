@@ -25,7 +25,12 @@ export async function logDebug(entry: {
     else if (level === 'warn') console.warn(line, entry.context ?? '');
     else console.info(line, entry.context ?? '');
 
-    await createAdminClient()
+    // The client RETURNS errors rather than throwing them, so an insert that is
+    // rejected — grants, RLS, a column that moved — would slip past the catch
+    // below and log nothing, forever, without a single symptom. That is not
+    // hypothetical: it is why the debug log sat empty through an outage while
+    // every layer dutifully "logged" the cause.
+    const { error } = await createAdminClient()
       .from('debug_log')
       .insert({
         level,
@@ -34,8 +39,18 @@ export async function logDebug(entry: {
         context: entry.context ?? {},
         contact_id: entry.contactId ?? null,
       });
-  } catch {
-    // Never let logging break the caller.
+    if (error) {
+      // Nowhere to write this but the host's log — the database is the thing
+      // that just failed. Loud on purpose: a broken debug log makes every other
+      // diagnostic in the system silently useless.
+      console.error(
+        `[debug-log] INSERT FAILED (${error.code ?? 'no code'}): ${error.message}. ` +
+          `Dropped entry -> [${level}] ${entry.source}: ${entry.message}`
+      );
+    }
+  } catch (e) {
+    // Never let logging break the caller — but never let it vanish either.
+    console.error('[debug-log] threw while logging:', e);
   }
 }
 

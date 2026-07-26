@@ -5,7 +5,8 @@ import { sendCrmEmail } from '@/lib/email-send';
 import { renderTemplate } from '@/lib/sequence-runner';
 import { deliveryKey, MAX_BULK_RECIPIENTS, validIdempotencyKey } from '@/lib/bulk-delivery';
 import { enqueueJob } from '@/lib/job-queue';
-import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
+import { readJsonBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 export async function POST(request: Request) {
   const auth = await requireUser();
@@ -14,8 +15,7 @@ export async function POST(request: Request) {
   try {
     body = await readJsonBody(request, 512 * 1024);
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:email/send', error);
   }
   body.subject = String(body.subject ?? '').trim().slice(0, 500);
   body.html = String(body.html ?? '').slice(0, 250_000);

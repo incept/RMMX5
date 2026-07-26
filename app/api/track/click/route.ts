@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { stopEnrollmentsFor } from '@/lib/sequence-runner';
 import { verifyTrackingUrl } from '@/lib/signing';
 import { isTrackableId, passesCooldown } from '@/lib/track-guard';
+import { logDebug, errorMessage } from '@/lib/debug-log';
 
 /**
  * Click tracking + redirect: GET /api/track/click?m=<message id>&u=<url>&s=<hmac>
@@ -42,8 +43,16 @@ export async function GET(request: Request) {
         });
         if (data.contact_id) await stopEnrollmentsFor(data.contact_id, 'click');
       }
-    } catch {
-      // tracking must never break the redirect
+    } catch (error) {
+      // Tracking must never break the redirect — the recipient still reaches
+      // the page. But a failure nobody records means click counts drift with no
+      // symptom, so it is written down at warn rather than discarded.
+      await logDebug({
+        level: 'warn',
+        source: 'api:track/click',
+        message: `Click tracking failed: ${errorMessage(error)}`,
+        context: { messageId },
+      }).catch(() => {});
     }
   }
 

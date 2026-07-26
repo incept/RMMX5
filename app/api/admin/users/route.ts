@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
-import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
+import { readJsonBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 /** GET — list all profiles (admin). */
 export async function GET() {
@@ -24,8 +25,7 @@ export async function POST(request: Request) {
   try {
     body = await readJsonBody(request, 64 * 1024);
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:admin/users', error);
   }
   body.email = String(body.email ?? '').trim().toLowerCase().slice(0, 320);
   body.fullName = String(body.fullName ?? '').trim().slice(0, 200);

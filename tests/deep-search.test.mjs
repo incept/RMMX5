@@ -815,3 +815,51 @@ test('a failed deep-search enqueue answers with JSON the operator can read', asy
   const catchAt = source.indexOf('} catch (e) {');
   assert.ok(tryAt < enqueueAt && enqueueAt < catchAt, 'enqueueJob runs inside the try');
 });
+
+test('every API route records its own failures', async () => {
+  // The gap that hid the deep-search outage: routes caught errors and returned
+  // a message while recording nothing, so a fault left a status code and no
+  // trace. Tracking endpoints are exempt from RETURNING an error — they must
+  // still answer with a pixel or redirect — but not from logging one.
+  const { readdir } = await import('node:fs/promises');
+  const dir = new URL('../app/api/', import.meta.url);
+  const walk = async (d) => {
+    const out = [];
+    for (const entry of await readdir(d, { withFileTypes: true })) {
+      const child = new URL(entry.name + (entry.isDirectory() ? '/' : ''), d);
+      if (entry.isDirectory()) out.push(...(await walk(child)));
+      else if (entry.name === 'route.ts') out.push(child);
+    }
+    return out;
+  };
+  const routes = await walk(dir);
+  assert.ok(routes.length >= 20, 'found the routes');
+
+  const silent = [];
+  for (const route of routes) {
+    const source = await readFile(route, 'utf8');
+    const reports = source.includes('apiFailure(') || source.includes('logDebug(');
+    if (!reports) silent.push(route.pathname.split('/app/api/')[1]);
+  }
+  assert.deepEqual(silent, [], `routes that can fail silently: ${silent.join(', ')}`);
+});
+
+test('logDebug notices when its own insert is rejected', async () => {
+  // The client RETURNS errors instead of throwing, so an unchecked insert would
+  // slip past the catch and log nothing, forever, with no symptom at all.
+  const source = await readFile(new URL('../lib/debug-log.ts', import.meta.url), 'utf8');
+  assert.match(source, /const \{ error \} = await createAdminClient\(\)/);
+  assert.match(source, /INSERT FAILED/);
+  // The fallback must be the console: the database is the thing that just failed.
+  assert.match(source, /console\.error\(\s*`\[debug-log\] INSERT FAILED/);
+});
+
+test('deliberate 4xx are not logged as faults', async () => {
+  // A rejected form submission is not a fault, and logging every one would bury
+  // the errors that matter.
+  const source = await readFile(new URL('../lib/api-errors.ts', import.meta.url), 'utf8');
+  assert.match(source, /const deliberate = typeof \(error as \{ status\?: number \} \| null\)\?\.status === 'number'/);
+  assert.match(source, /if \(!deliberate \|\| response\.status >= 500\)/);
+  // Postgres codes are the usual answer, so they must survive into the log.
+  assert.match(source, /code: \(error as \{ code\?: string \}/);
+});

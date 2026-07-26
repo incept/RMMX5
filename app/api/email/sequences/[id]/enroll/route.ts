@@ -3,7 +3,8 @@ import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { enrollContact } from '@/lib/sequence-runner';
 import { MAX_BULK_RECIPIENTS } from '@/lib/bulk-delivery';
-import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
+import { readJsonBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -20,8 +21,7 @@ export async function POST(request: Request, { params }: Params) {
   try {
     body = await readJsonBody(request, 256 * 1024);
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:email/sequences/[id]/enroll', error);
   }
   if (body.contactIds != null && !Array.isArray(body.contactIds)) {
     return NextResponse.json({ error: 'contactIds must be an array' }, { status: 400 });

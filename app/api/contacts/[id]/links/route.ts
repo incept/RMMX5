@@ -4,7 +4,8 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { applyScores } from '@/lib/scoring';
 import { logActivity } from '@/lib/activity';
 import { fireNotification } from '@/lib/notifications';
-import { readJsonBody, requestErrorResponse } from '@/lib/request-limits';
+import { readJsonBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -21,8 +22,7 @@ export async function PUT(request: Request, { params }: Params) {
   try {
     body = await readJsonBody(request, 128 * 1024);
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:contacts/[id]/links', error);
   }
   const { links } = body;
   if (!Array.isArray(links)) {

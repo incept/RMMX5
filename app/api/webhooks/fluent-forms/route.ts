@@ -10,11 +10,8 @@ import { verifyBearerSecret } from '@/lib/webhook-auth';
 import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receipts';
 import { logDebug, errorMessage } from '@/lib/debug-log';
 import { enqueueJob } from '@/lib/job-queue';
-import {
-  enforceDeclaredLength,
-  readJsonBody,
-  requestErrorResponse,
-} from '@/lib/request-limits';
+import { enforceDeclaredLength, readJsonBody } from '@/lib/request-limits';
+import { apiFailure } from '@/lib/api-errors';
 
 /**
  * Fluent Forms webhook — point the form's webhook feed at:
@@ -56,8 +53,7 @@ export async function POST(request: Request) {
       payload = Object.fromEntries((await request.formData()).entries()) as Record<string, any>;
     }
   } catch (error) {
-    const response = requestErrorResponse(error);
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    return apiFailure('api:webhooks/fluent-forms', error);
   }
 
   const admin = createAdminClient();
