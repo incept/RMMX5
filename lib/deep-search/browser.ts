@@ -1,4 +1,12 @@
-import puppeteer, { type Browser, type Page } from 'puppeteer-core';
+// TYPE-ONLY, and it must stay that way. A static import put puppeteer-core in
+// the module graph of everything that reaches deep search — including the queue,
+// and therefore the route whose entire job is to INSERT ONE ROW. When the
+// bundler then failed to materialise it on the host ("open EEXIST"), the whole
+// chain died at load time, before any handler ran, so no try/catch could see it
+// and nothing reached the debug log. An optional 300MB dependency must never be
+// able to do that: the real import happens lazily, inside the one function that
+// needs a browser, where failing means "this tier is unavailable" and no more.
+import { type Browser, type Page } from 'puppeteer-core';
 import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
 
@@ -121,8 +129,17 @@ export async function closeBrowser(reason: string): Promise<void> {
 
 async function getBrowser(executablePath: string): Promise<Browser> {
   if (!browserPromise) {
-    const launching = puppeteer
-      .launch({
+    // The import is loaded here, not at module scope, so a bundling or install
+    // problem can only disable this tier — never break an unrelated route that
+    // happens to sit downstream of the same import.
+    //
+    // Wrapped in an immediately-invoked async function so browserPromise is
+    // claimed SYNCHRONOUSLY below: awaiting the import before assigning would
+    // let two callers each pass the null check and launch their own Chrome,
+    // which is the one thing this singleton exists to prevent.
+    const launching = (async () => {
+      const { default: puppeteer } = await import('puppeteer-core');
+      return puppeteer.launch({
         executablePath,
         headless: true,
         timeout: LAUNCH_TIMEOUT_MS,
@@ -138,16 +155,17 @@ async function getBrowser(executablePath: string): Promise<Browser> {
           '--no-first-run',
           '--mute-audio',
         ],
-      })
-      .catch((e) => {
-        // A failed launch must not poison every later attempt — but only clear
-        // the slot if it is still OURS. closeBrowser during a pending launch
-        // nulls browserPromise, a later call starts a second launch, and an
-        // unguarded clear here would discard that live one and start a third,
-        // leaving two browser processes running. Same guard as 'disconnected'.
-        if (browserPromise === launching) browserPromise = null;
-        throw e;
       });
+    })().catch((e) => {
+      // A failed launch — or a puppeteer-core that will not load at all — must
+      // not poison every later attempt. Only clear the slot if it is still
+      // OURS: closeBrowser during a pending launch nulls browserPromise, a
+      // later call starts a second launch, and an unguarded clear here would
+      // discard that live one and start a third, leaving two browser processes
+      // running. Same guard as the 'disconnected' handler below.
+      if (browserPromise === launching) browserPromise = null;
+      throw e;
+    });
     browserPromise = launching;
     void launching.then((browser) => {
       browser.once('disconnected', () => {
@@ -230,7 +248,10 @@ export async function fetchWithBrowser(
     return {
       ok: false,
       unavailable: true,
-      reason: `Chrome failed to launch: ${e?.message ?? 'unknown error'}`,
+      // Covers a failed launch AND a puppeteer-core that will not load at all —
+      // both mean the same thing to the caller: this tier cannot serve the
+      // page, so fall through to the next rather than failing the run.
+      reason: `Browser tier unavailable: ${e?.message ?? 'unknown error'}`,
     };
   }
 
