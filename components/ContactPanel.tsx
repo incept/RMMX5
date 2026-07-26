@@ -217,6 +217,38 @@ export default function ContactPanel({
     }
   }
 
+  async function clearCandidates() {
+    // Spelled out because it is irreversible and removes more than the list:
+    // rejected rows are what suppress a URL on later runs, and the learned facts
+    // are what steer the next run's probes.
+    if (
+      !confirm(
+        'Clear deep-search results for this contact?\n\n' +
+          '• Removes candidates awaiting review and previously dismissed ones\n' +
+          '• Resets the facts learned by searching (county, middle name, dates)\n' +
+          '• Links already accepted into slots are kept\n\n' +
+          'The next deep search then starts fresh from the contact record and its saved links.'
+      )
+    ) {
+      return;
+    }
+    setBusy('clear');
+    try {
+      const res = await fetch(`/api/contacts/${contactId}/candidates`, { method: 'DELETE' });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) {
+        alert(data.error ?? `Could not clear results (HTTP ${res.status})`);
+        return;
+      }
+      await Promise.all([load(), loadCandidates()]);
+      onChanged();
+    } catch (e: any) {
+      alert(`Could not clear results: ${e?.message ?? 'network error'}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function reviewCandidate(candidateId: string, action: 'accept' | 'reject') {
     setBusy(`cand-${candidateId}`);
     const res = await fetch(`/api/contacts/${contactId}/candidates`, {
@@ -714,8 +746,22 @@ export default function ContactPanel({
                   logic auditable while it earns trust. */}
               {candidates.length > 0 && (
                 <div>
-                  <div className="mb-2 text-[10px] font-medium tracking-widest text-gray-500 uppercase dark:text-gray-600">
-                    Candidates found ({newCandidateCount} to review)
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div className="text-[10px] font-medium tracking-widest text-gray-500 uppercase dark:text-gray-600">
+                      Candidates found ({newCandidateCount} to review)
+                    </div>
+                    {/* Admin-only, like the deep search that produced these. */}
+                    {isAdmin && (
+                      <button
+                        type="button"
+                        onClick={clearCandidates}
+                        disabled={busy === 'clear'}
+                        title="Remove these results and the facts learned from them, so the next deep search starts fresh"
+                        className="text-[10px] font-medium text-gray-500 underline decoration-dotted hover:text-red-600 disabled:opacity-50"
+                      >
+                        {busy === 'clear' ? 'Clearing…' : 'Clear results'}
+                      </button>
+                    )}
                   </div>
                   <div className="space-y-1.5">
                     {candidates.map((c) => (
