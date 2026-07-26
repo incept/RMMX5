@@ -731,31 +731,39 @@ export default function ContactsPage() {
           ))}
         </div>
         <span className="h-3.5 w-px bg-gray-200" />
-        <div className="flex flex-wrap items-center gap-3.5">
-          <button
-            className={`inline-flex items-center gap-1.5 text-xs ${
-              statusFilter === '' ? 'text-gray-900' : 'text-gray-400 hover:text-gray-900'
+        {/*
+          A dropdown rather than a chip per status. Sixteen statuses wrapped onto
+          two or three lines and pushed the grid itself below the fold, which cost
+          more than the one click a select adds. The colour dot is kept beside it
+          because status colour is the same cue used on the rows and in the panel,
+          and a bare name would break that association.
+        */}
+        <div className="flex flex-none items-center gap-1.5">
+          <span
+            className="h-[5px] w-[5px] flex-none rounded-full"
+            style={{
+              background:
+                statuses.find((s) => s.id === statusFilter)?.color || '#d1d5db',
+            }}
+          />
+          <select
+            value={statusFilter}
+            onChange={(e) => {
+              setStatusFilter(e.target.value);
+              setSelected(new Set());
+            }}
+            aria-label="Filter by status"
+            className={`max-w-[190px] cursor-pointer truncate border-none bg-transparent py-0 pr-5 pl-0 text-xs focus:ring-0 ${
+              statusFilter === '' ? 'text-gray-400' : 'font-medium text-gray-900'
             }`}
-            onClick={() => setStatusFilter('')}
           >
-            <span className="h-[5px] w-[5px] flex-none rounded-full bg-gray-300" />
-            Any
-          </button>
-          {statuses.map((s) => (
-            <button
-              key={s.id}
-              className={`inline-flex items-center gap-1.5 whitespace-nowrap text-xs ${
-                statusFilter === s.id ? 'text-gray-900' : 'text-gray-400 hover:text-gray-900'
-              }`}
-              onClick={() => setStatusFilter(statusFilter === s.id ? '' : s.id)}
-            >
-              <span
-                className="h-[5px] w-[5px] flex-none rounded-full"
-                style={{ background: s.color || '#9ca3af' }}
-              />
-              {s.name}
-            </button>
-          ))}
+            <option value="">Any status</option>
+            {statuses.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
         </div>
         {filtersDirty && (
           <button

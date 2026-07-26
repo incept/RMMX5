@@ -70,6 +70,18 @@ export function removeConfirmedFact(
 }
 
 /**
+ * Empty one fact field, leaving the others untouched.
+ *
+ * Used by the per-field clear controls. Only the machine-learned store is passed
+ * in — confirmed values live separately and are removed one at a time, because
+ * discarding a bad guess and retracting something a human vouched for are
+ * different intentions and should not share a button.
+ */
+export function clearLearnedFact(existing: any, key: keyof SearchFacts): SearchFacts {
+  return { ...normalizeFacts(existing), [key]: [] };
+}
+
+/**
  * Confirming a LINK converges on the same store: its value to the engine is the
  * facts its URL encodes (county, booking date, middle name, record id), so we
  * derive those and merge them in. The URL itself is recorded separately by the

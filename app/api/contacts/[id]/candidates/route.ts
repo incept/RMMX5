@@ -9,6 +9,7 @@ import { canonicalUrl } from '@/lib/integrations/brightdata';
 import { splitName } from '@/lib/deep-search/facts';
 import {
   addConfirmedFact,
+  clearLearnedFact,
   confirmFactsFromUrl,
   isConfirmableKey,
   removeConfirmedFact,
@@ -33,26 +34,27 @@ export async function GET(_request: Request, { params }: Params) {
 }
 
 /**
- * DELETE — clear a contact's deep-search results so the next run starts fresh.
+ * DELETE — clear a contact's found LINKS.
  *
- * This has to remove more than the visible list, because the list is not what
- * makes a re-run repeat itself. Three things persist between runs:
+ * Scoped to links on purpose. Facts are cleared one at a time from the panel
+ * instead, because they are not interchangeable: a wrong county is worth
+ * throwing away while the middle name and booking date beside it are usually
+ * right, and an all-or-nothing reset made the operator lose the good ones to
+ * fix the bad one.
+ *
+ * Two things beyond the visible list still have to go, or "clear" would be a
+ * lie — the next run would rebuild an identical set:
  *
  *   * every candidate URL is suppressed on later runs, INCLUDING rejected ones,
- *     so a URL dismissed for a reason that has since been fixed can never come
- *     back on its own;
- *   * search_facts only ever accumulates. Correcting a contact's state does not
- *     evict the old one, and a stale county keeps steering probes and keeps
- *     adding corroboration to strangers who happen to match it;
+ *     so a URL dismissed for a reason that has since been fixed could never
+ *     come back on its own;
  *   * the enqueue dedupe key is per contact per hour, so a re-run in the same
- *     hour silently answers "already queued" and does nothing.
+ *     hour would silently answer "already queued" and do nothing.
  *
- * Clearing only the rows the operator can see would leave all three in place and
- * produce an identical result set, which is the opposite of what "clear" means.
- *
- * ACCEPTED candidates are deliberately kept: each one is the provenance record
- * for a filled link slot, so deleting it would orphan real work product and let
- * an already-accepted URL be suggested again. Link slots are never touched.
+ * ACCEPTED candidates are kept: each is the provenance record for a filled link
+ * slot, so deleting one would orphan real work product and let an
+ * already-accepted URL be suggested again. CONFIRMED candidates are kept for the
+ * same reason — a human vouched for them. Link slots are never touched.
  */
 export async function DELETE(_request: Request, { params }: Params) {
   // Admin-only, matching the deep-search route that produces this data. It is
@@ -88,11 +90,9 @@ export async function DELETE(_request: Request, { params }: Params) {
       .select('id');
     if (deleteError) throw deleteError;
 
-    const { error: factsError } = await admin
-      .from('contacts')
-      .update({ search_facts: {} })
-      .eq('id', id);
-    if (factsError) throw factsError;
+    // Facts are deliberately NOT reset here. They are cleared individually from
+    // the panel, so a wrong county can go without taking a correct middle name
+    // and booking date with it.
 
     // Free the hourly dedupe key so the operator can re-run straight away —
     // clearing results and then being told "already queued" would be absurd.
@@ -110,9 +110,9 @@ export async function DELETE(_request: Request, { params }: Params) {
       contactId: id,
       actorId: auth.profile.id,
       type: 'updated',
-      description: `Cleared deep-search results (${cleared} candidate${
+      description: `Cleared found links (${cleared} candidate${
         cleared === 1 ? '' : 's'
-      } removed, learned facts reset)`,
+      } removed; facts kept)`,
     });
     return NextResponse.json({ ok: true, cleared });
   } catch (error) {
@@ -172,6 +172,46 @@ export async function PATCH(request: Request, { params }: Params) {
         description: `${action === 'confirm_fact' ? 'Confirmed' : 'Unconfirmed'} ${body.key} "${body.value.trim()}"`,
       });
       return NextResponse.json({ ok: true, confirmed_facts: next });
+    } catch (error) {
+      return apiFailure('api:contacts/[id]/candidates', error, { contactId: id });
+    }
+  }
+
+  // Clear one fact FIELD — every learned value for that key. Scoped to a single
+  // field because facts are not interchangeable: a wrong county is worth
+  // discarding while the middle name and booking date beside it are usually
+  // right, and the old all-or-nothing reset made you lose the good ones to fix
+  // the bad one. Confirmed values are left alone; a human vouched for those and
+  // they have their own remove control.
+  if (action === 'clear_fact') {
+    const adminAuth = await requireAdmin();
+    if ('error' in adminAuth) return adminAuth.error;
+    try {
+      if (!isConfirmableKey(body.key)) {
+        return NextResponse.json({ error: 'key must be a fact field' }, { status: 400 });
+      }
+      const { data: c, error: readError } = await admin
+        .from('contacts')
+        .select('search_facts')
+        .eq('id', id)
+        .maybeSingle();
+      if (readError) throw readError;
+      if (!c) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+
+      const next = clearLearnedFact(c.search_facts, body.key);
+      const { error: writeError } = await admin
+        .from('contacts')
+        .update({ search_facts: next })
+        .eq('id', id);
+      if (writeError) throw writeError;
+
+      await logActivity({
+        contactId: id,
+        actorId: adminAuth.profile.id,
+        type: 'updated',
+        description: `Cleared found ${body.key} values`,
+      });
+      return NextResponse.json({ ok: true, search_facts: next });
     } catch (error) {
       return apiFailure('api:contacts/[id]/candidates', error, { contactId: id });
     }

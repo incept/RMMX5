@@ -219,16 +219,15 @@ export default function ContactPanel({
   }
 
   async function clearCandidates() {
-    // Spelled out because it is irreversible and removes more than the list:
-    // rejected rows are what suppress a URL on later runs, and the learned facts
-    // are what steer the next run's probes.
+    // Spelled out because it is irreversible and removes more than the visible
+    // list: dismissed rows are what suppress a URL on later runs.
     if (
       !confirm(
-        'Clear deep-search results for this contact?\n\n' +
-          '• Removes candidates awaiting review and previously dismissed ones\n' +
-          '• Resets the facts learned by searching (county, middle name, dates)\n' +
-          '• Links accepted into slots, and anything you confirmed (🔒), are kept\n\n' +
-          'The next deep search then starts fresh from the contact record, its saved links, and confirmed facts.'
+        'Clear found links for this contact?\n\n' +
+          '• Removes links awaiting review and previously dismissed ones\n' +
+          '• Links accepted into slots, and anything you confirmed (🔒), are kept\n' +
+          '• Facts are NOT touched — clear those individually per row\n\n' +
+          'The next deep search can then find those links again.'
       )
     ) {
       return;
@@ -762,10 +761,12 @@ export default function ContactPanel({
                 </button>
               </div>
 
-              {/* Facts the search relies on. A confirmed value (a human vouched
-                  for it) outranks a learned one, seeds every run, and survives
-                  Clear results; a learned value can be promoted with one click,
-                  which is the fix for a wrong county steering the next run. */}
+              {/* Facts the search relies on.
+                  ✓ confirms AND saves that single value: it then outranks
+                  anything a search finds, seeds every run, and is never cleared
+                  automatically. × retracts a confirmed value. "clear" empties
+                  just that one field's found values, so a wrong county can go
+                  without taking a correct middle name and date with it. */}
               {(() => {
                 const learned = contact.search_facts ?? {};
                 const confirmed = contact.confirmed_facts ?? {};
@@ -799,7 +800,7 @@ export default function ContactPanel({
                           <span
                             key={`c-${v}`}
                             className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-[11px] text-green-800"
-                            title="Confirmed — outranks scraped values and survives Clear results"
+                            title="Confirmed and saved — outranks anything a search finds, seeds every run, and is never cleared automatically"
                           >
                             🔒 {v}
                             {isAdmin && (
@@ -837,13 +838,42 @@ export default function ContactPanel({
                                   )
                                 }
                                 className="text-gray-500 hover:text-green-700 disabled:opacity-50"
-                                title="Confirm this value as truth"
+                                title={`Confirm and save "${v}" as this contact's ${label.toLowerCase()} — it then outranks anything a search finds, seeds every run, and is kept when you clear links`}
                               >
                                 ✓
                               </button>
                             )}
                           </span>
                         ))}
+                        {/* Clear this ONE field. Facts are not interchangeable —
+                            a wrong county should go without taking a correct
+                            middle name and booking date with it. */}
+                        {isAdmin && learnedOnly.length > 0 && (
+                          <button
+                            type="button"
+                            disabled={busy === `clear-fact-${key}`}
+                            onClick={() => {
+                              if (
+                                !confirm(
+                                  `Clear the found ${label.toLowerCase()} value${
+                                    learnedOnly.length === 1 ? '' : 's'
+                                  } (${learnedOnly.join(', ')})?\n\n` +
+                                    (conf.length
+                                      ? `Confirmed ${label.toLowerCase()} (${conf.join(', ')}) is kept — use × to remove that.\n\n`
+                                      : '') +
+                                    'Other facts are untouched. A later deep search may find it again.'
+                                )
+                              ) {
+                                return;
+                              }
+                              mutateConfirmed({ action: 'clear_fact', key }, `clear-fact-${key}`);
+                            }}
+                            className="ml-1 text-[10px] text-gray-400 underline decoration-dotted hover:text-red-600 disabled:opacity-50"
+                            title={`Clear the found ${label.toLowerCase()} values (confirmed ones stay)`}
+                          >
+                            {busy === `clear-fact-${key}` ? 'clearing…' : 'clear'}
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -893,10 +923,10 @@ export default function ContactPanel({
                         type="button"
                         onClick={clearCandidates}
                         disabled={busy === 'clear'}
-                        title="Remove these results and the facts learned from them, so the next deep search starts fresh"
+                        title="Remove found links awaiting review and previously dismissed ones. Facts are kept — clear those per row."
                         className="text-[10px] font-medium text-gray-500 underline decoration-dotted hover:text-red-600 disabled:opacity-50"
                       >
-                        {busy === 'clear' ? 'Clearing…' : 'Clear results'}
+                        {busy === 'clear' ? 'Clearing…' : 'Clear links'}
                       </button>
                     )}
                   </div>
