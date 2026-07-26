@@ -1021,3 +1021,106 @@ test('confirm actions are admin-only and a search view cannot be confirmed', asy
   }
   assert.match(route, /A search view is not a record page and cannot be confirmed/);
 });
+
+// --- Trestle reverse-phone enrichment --------------------------------------
+
+test('a Trestle response yields a name and a city/state pair', async () => {
+  const { parsePhoneIdentity } = await import('../lib/integrations/trestle-parse.ts');
+  const id = parsePhoneIdentity({
+    is_valid: true,
+    line_type: 'Mobile',
+    owners: [
+      {
+        name: 'Gene Beachak',
+        firstname: 'Gene',
+        lastname: 'Beachak',
+        addresses: [{ city: 'Raleigh', state_code: 'NC', postal_code: '27601' }],
+      },
+    ],
+  });
+  assert.equal(id.name, 'Gene Beachak');
+  assert.equal(id.city, 'Raleigh');
+  assert.equal(id.state, 'NC');
+});
+
+test('a half-address is treated as no address', async () => {
+  // A city without its state cannot narrow a search, and can point it at the
+  // wrong state entirely — worse than having no location at all.
+  const { parsePhoneIdentity } = await import('../lib/integrations/trestle-parse.ts');
+  const id = parsePhoneIdentity({
+    owners: [{ name: 'Gene Beachak', addresses: [{ city: 'Raleigh' }] }],
+  });
+  assert.equal(id.name, 'Gene Beachak');
+  assert.equal(id.city, null);
+  assert.equal(id.state, null);
+});
+
+test('parsing never throws on an unexpected shape', async () => {
+  // This runs inside a queue worker: a field rename must degrade to "no result",
+  // not take the job down.
+  const { parsePhoneIdentity } = await import('../lib/integrations/trestle-parse.ts');
+  for (const shape of [{}, { owners: [] }, { owners: null }, { owners: [{}] }, null, undefined]) {
+    const id = parsePhoneIdentity(shape);
+    assert.equal(id.name, null);
+    assert.equal(id.city, null);
+  }
+});
+
+test('a name assembles from first/last when no full name is given', async () => {
+  const { parsePhoneIdentity } = await import('../lib/integrations/trestle-parse.ts');
+  const id = parsePhoneIdentity({
+    owners: [{ firstname: 'Gene', lastname: 'Beachak', addresses: [] }],
+  });
+  assert.equal(id.name, 'Gene Beachak');
+});
+
+test('enrichment only ever fills blanks', async () => {
+  // A value a person gave you outranks a data provider's guess — the same
+  // precedence the search uses for confirmed facts. The lone exception is the
+  // "Caller +1919…" placeholder, which is a label rather than information.
+  const source = await readFile(new URL('../lib/enrichment.ts', import.meta.url), 'utf8');
+  assert.match(source, /if \(needsName && identity\.name\)/);
+  assert.match(source, /if \(!contact\.city\?\.trim\(\)\)/);
+  assert.match(source, /if \(!contact\.state\?\.trim\(\)\)/);
+  // The "Caller +1919…" label is the one value enrichment may overwrite.
+  assert.match(source, /function isPlaceholderName/, 'placeholder names are recognised');
+  assert.match(source, /caller/i);
+  // And it returns early rather than spending a lookup it cannot use.
+  assert.match(source, /if \(!needsName && !needsLocation\)/);
+});
+
+test('enrichment runs on the queue, never in the CallScaler webhook', async () => {
+  // CallScaler retries a slow delivery, and a retried webhook is how one
+  // submission became several contacts.
+  const route = await readFile(
+    new URL('../app/api/webhooks/callscaler/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(route, /enqueueJob\(\s*'contact_enrichment'/);
+  assert.doesNotMatch(route, /lookupPhoneIdentity|enrichContactFromPhone/);
+});
+
+test('every job kind in the TypeScript union is allowed by the database', async () => {
+  // deep_search shipped in the union without the constraint and every enqueue
+  // failed with 23514 — no row, no log, and a 500 that read as a hang. This
+  // fails the build instead of production.
+  const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
+  const union = queue.slice(queue.indexOf('export type JobKind'), queue.indexOf(';', queue.indexOf('export type JobKind')));
+  const kinds = [...union.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  assert.ok(kinds.length >= 6, 'found the union members');
+
+  // The newest constraint definition wins, so scan every migration in order.
+  const { readdir } = await import('node:fs/promises');
+  const dir = new URL('../supabase/migrations/', import.meta.url);
+  const files = (await readdir(dir)).filter((f) => f.endsWith('.sql')).sort();
+  let allowed = null;
+  for (const f of files) {
+    const sql = await readFile(new URL(f, dir), 'utf8');
+    for (const m of sql.matchAll(/job_queue_kind_check check \(\s*kind in \(([^)]*)\)/g)) {
+      allowed = [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]);
+    }
+  }
+  assert.ok(allowed, 'found a kind constraint in the migrations');
+  const missing = kinds.filter((k) => !allowed.includes(k));
+  assert.deepEqual(missing, [], `kinds the database would reject: ${missing.join(', ')}`);
+});
