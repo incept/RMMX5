@@ -76,18 +76,21 @@ export async function getUsageSummary() {
   });
   if (error) throw new Error(error.message);
 
-  const [brightdata, anthropic] = await Promise.all([
+  const [brightdata, anthropic, trestle] = await Promise.all([
     getSetting<{ serp_cost?: number | string; unlocker_cost?: number | string }>('brightdata'),
     getSetting<{
       input_cost_per_million?: number | string;
       output_cost_per_million?: number | string;
     }>('anthropic'),
+    getSetting<{ reverse_phone_cost?: number | string }>('trestle'),
   ]);
   const price: Record<string, number> = {
     serp: Number(brightdata.serp_cost) || 0,
     brightdata_unlocker: Number(brightdata.unlocker_cost) || 0,
     anthropic_input_per_million: Number(anthropic.input_cost_per_million) || 0,
     anthropic_output_per_million: Number(anthropic.output_cost_per_million) || 0,
+    // Counter name follows the provider_operation convention above.
+    trestle_reverse_phone: Number(trestle.reverse_phone_cost) || 0,
   };
 
   const summary: Record<string, Record<string, number>> = {};

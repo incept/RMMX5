@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { createAdminClient } from '@/lib/supabase/server';
 import { runAutoSearchForContact } from '@/lib/lead-intake';
 import { runDeepSearchForContact } from '@/lib/deep-search';
+import { enrichContactFromPhone } from '@/lib/enrichment';
 import { sendCrmEmail } from '@/lib/email-send';
 import { sendSms } from '@/lib/integrations/textlink';
 import { sendVoicemailDrop } from '@/lib/integrations/voicemail';
@@ -12,6 +13,7 @@ import { errorMessage, logDebug } from '@/lib/debug-log';
 export type JobKind =
   | 'auto_search'
   | 'deep_search'
+  | 'contact_enrichment'
   | 'email_delivery'
   | 'sms_delivery'
   | 'voicemail_delivery'
@@ -106,6 +108,27 @@ async function handleJob(job: any) {
         requestKey: `job:${job.id}:attempt:${job.attempt_count}`,
       }
     );
+    return;
+  }
+
+  if (job.kind === 'contact_enrichment') {
+    // Fills a blank name/city/state from the caller's number. Never runs in the
+    // webhook: CallScaler retries a slow delivery, and a retried webhook is how
+    // one submission became several contacts.
+    const result = await enrichContactFromPhone(String(payload.contactId), {
+      actorId: (payload.actorId as string | null) ?? null,
+    });
+    // A lookup that found nothing is a normal outcome, not a failure to retry.
+    // Only a thrown error (network, database) marks the job failed.
+    if (result.filled.includes('name')) {
+      // A real name is what makes the automatic search worth running at all, so
+      // the search is chained here rather than guessed at enqueue time.
+      await enqueueJob(
+        'auto_search',
+        { contactId: String(payload.contactId) },
+        `auto-search:enriched:${payload.contactId}`
+      );
+    }
     return;
   }
 

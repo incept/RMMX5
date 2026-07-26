@@ -28,6 +28,17 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
     ],
   },
   {
+    key: 'trestle',
+    title: 'Trestle (reverse phone enrichment)',
+    hint:
+      "Turns a CallScaler caller's number into a name and city/state. Runs once per new call contact, on the queue rather than in the webhook. It only ever fills blanks — anything a person told you, or that you typed, always wins. Leave the key blank to disable enrichment entirely.",
+    fields: [
+      { key: 'api_key', label: 'API key', secret: true },
+      { key: 'monthly_limit', label: 'Monthly lookup limit', placeholder: '500' },
+      { key: 'reverse_phone_cost', label: 'Cost per lookup (USD)', placeholder: '0.05' },
+    ],
+  },
+  {
     key: 'probe_proxy',
     title: 'Deep-search proxy',
     hint:

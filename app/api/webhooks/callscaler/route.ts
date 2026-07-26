@@ -45,6 +45,22 @@ export async function POST(request: Request) {
   try {
     const result = await processCallScalerCall(payload);
 
+    // A brand-new call contact is a phone number and little else — usually no
+    // location, and often no name worth searching. Enrichment runs first and
+    // chains the auto search itself once it has a real name, so the search is
+    // not wasted on "Caller +1919…". Queued, never inline: CallScaler retries a
+    // slow delivery, and a retried webhook is how one call became several
+    // contacts before.
+    if (result.createdContact && result.contactId) {
+      await enqueueJob(
+        'contact_enrichment',
+        { contactId: result.contactId },
+        `enrich:callscaler:${result.callId}`
+      );
+    }
+
+    // Already-named callers still get searched directly; enrichment only chains
+    // a search when it is the thing that supplied the name.
     if (result.searchContactId) {
       await enqueueJob(
         'auto_search',
