@@ -897,11 +897,12 @@ test('puppeteer-core is declared as a server external package', async () => {
   assert.match(config, /serverExternalPackages: \[[^\]]*'puppeteer-core'/);
 });
 
-test('clearing results removes what actually makes a re-run repeat itself', async () => {
-  // The visible list is not what causes a repeat. Three things persist: rejected
-  // candidates suppress their URL forever, search_facts only accumulates, and
-  // the hourly dedupe key blocks a fresh enqueue. Clearing only the rows the
-  // operator can see would return an identical result set.
+test('clearing links removes what actually makes a re-run repeat itself', async () => {
+  // The visible list is not what causes a repeat. Two things persist and must go
+  // with it: dismissed candidates suppress their URL forever, and the hourly
+  // dedupe key blocks a fresh enqueue. Facts are NOT among them any more — they
+  // are cleared per field, so a wrong county can go without taking a correct
+  // middle name and date with it.
   const source = await readFile(
     new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
     'utf8'
@@ -910,7 +911,6 @@ test('clearing results removes what actually makes a re-run repeat itself', asyn
   const body = fn.slice(0, fn.indexOf('\nexport async function PATCH'));
 
   assert.match(body, /\.in\('status', \['new', 'rejected'\]\)/, 'clears dismissed rows too');
-  assert.match(body, /search_facts: \{\}/, 'resets the learned facts');
   assert.match(body, /\.eq\('kind', 'deep_search'\)[\s\S]*?\.neq\('status', 'processing'\)/, 'frees the dedupe key');
   // Accepted candidates are the provenance for filled slots and must survive.
   assert.doesNotMatch(body, /'accepted'/, 'accepted rows are never in the delete filter');
@@ -1003,9 +1003,10 @@ test('confirmed things are exempt from Clear results', async () => {
   const del = route.slice(route.indexOf('export async function DELETE'), route.indexOf('export async function PATCH'));
   // Clear deletes only new/rejected candidates — confirmed and accepted survive.
   assert.match(del, /\.in\('status', \['new', 'rejected'\]\)/);
-  // And it resets search_facts but never confirmed_facts.
-  assert.match(del, /search_facts: \{\}/);
+  // It touches neither fact store: confirmed is truth, and learned facts now
+  // have their own per-field controls.
   assert.doesNotMatch(del, /confirmed_facts/, 'Clear must not touch confirmed_facts');
+  assert.doesNotMatch(del, /search_facts/, 'Clear is scoped to links now');
 });
 
 test('confirm actions are admin-only and a search view cannot be confirmed', async () => {
@@ -1132,4 +1133,62 @@ test('every job kind in the TypeScript union is allowed by the database', async 
   assert.ok(allowed, 'found a kind constraint in the migrations');
   const missing = kinds.filter((k) => !allowed.includes(k));
   assert.deepEqual(missing, [], `kinds the database would reject: ${missing.join(', ')}`);
+});
+
+test('clearing one fact field leaves the others intact', async () => {
+  // Facts are not interchangeable. A wrong county should go without taking a
+  // correct middle name and booking date with it — which the old all-or-nothing
+  // reset could not do.
+  const { clearLearnedFact } = await import('../lib/deep-search/confirmed.ts');
+  const before = {
+    county: ['Durham'],
+    middle: ['Michael'],
+    booking_dates: ['2026-04-22'],
+    state: ['NC'],
+  };
+  const after = clearLearnedFact(before, 'county');
+  assert.deepEqual(after.county, []);
+  assert.deepEqual(after.middle, ['Michael'], 'middle survives');
+  assert.deepEqual(after.booking_dates, ['2026-04-22'], 'booking date survives');
+  assert.deepEqual(after.state, ['NC'], 'state survives');
+});
+
+test('clearing a fact field does not touch confirmed values', async () => {
+  // Discarding a machine guess and retracting something a human vouched for are
+  // different intentions; they must not share a control.
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  const at = route.indexOf("action === 'clear_fact'");
+  assert.ok(at > -1, 'the clear_fact branch exists');
+  const branch = route.slice(at, at + 1200);
+  assert.match(branch, /select\('search_facts'\)/, 'reads only the learned store');
+  assert.match(branch, /update\(\{ search_facts: next \}\)/, 'writes only the learned store');
+  assert.doesNotMatch(branch, /confirmed_facts/, 'confirmed values are untouched');
+  assert.match(branch, /requireAdmin\(\)/);
+});
+
+test('clearing links no longer wipes the facts', async () => {
+  // The button is scoped to links now; facts have their own per-field controls.
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  const del = route.slice(route.indexOf('export async function DELETE'), route.indexOf('export async function PATCH'));
+  assert.doesNotMatch(del, /search_facts: \{\}/, 'DELETE must not reset facts');
+  // The parts that still have to go, or a re-run would rebuild the same set.
+  assert.match(del, /\.in\('status', \['new', 'rejected'\]\)/);
+  assert.match(del, /\.eq\('kind', 'deep_search'\)/);
+});
+
+test('the status filter is a single dropdown, not a chip per status', async () => {
+  // Sixteen statuses wrapped over multiple lines and pushed the grid below the
+  // fold. The colour dot stays, because that cue is shared with the rows.
+  const page = await readFile(new URL('../app/(app)/contacts/page.tsx', import.meta.url), 'utf8');
+  assert.match(page, /aria-label="Filter by status"/);
+  assert.match(page, /<option value="">Any status<\/option>/);
+  assert.match(page, /statuses\.map\(\(s\) => \(\s*<option/);
+  // The old row of buttons is gone.
+  assert.doesNotMatch(page, /onClick=\{\(\) => setStatusFilter\(statusFilter === s\.id \? '' : s\.id\)\}/);
 });
