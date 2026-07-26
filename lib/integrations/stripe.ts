@@ -1,4 +1,5 @@
 import { getSetting } from '@/lib/settings';
+import { readResponseText } from '@/lib/request-limits';
 
 /**
  * Read-only Stripe revenue reporting via the REST API (no SDK needed).
@@ -12,13 +13,18 @@ export interface RevenueMonth {
   count: number;
 }
 
-export async function fetchStripeRevenue(): Promise<{ months: RevenueMonth[]; currency: string }> {
+export async function fetchStripeRevenue(): Promise<{
+  months: RevenueMonth[];
+  currency: string;
+  truncated: boolean;
+}> {
   const cfg = await getSetting<{ secret_key?: string }>('stripe');
   if (!cfg.secret_key) throw new Error('Stripe is not configured (Admin → Integrations).');
 
   const months = new Map<string, RevenueMonth>();
   let currency = 'usd';
   let startingAfter: string | undefined;
+  let truncated = false;
 
   // Up to 500 transactions (5 pages) — plenty for a dashboard view.
   for (let page = 0; page < 5; page++) {
@@ -29,9 +35,9 @@ export async function fetchStripeRevenue(): Promise<{ months: RevenueMonth[]; cu
       headers: { Authorization: `Bearer ${cfg.secret_key}` },
       signal: AbortSignal.timeout(20_000),
     });
-    if (!res.ok) throw new Error(`Stripe request failed: ${res.status} ${(await res.text()).slice(0, 500)}`);
-
-    const data = await res.json();
+    const responseText = await readResponseText(res, 1024 * 1024);
+    if (!res.ok) throw new Error(`Stripe request failed: ${res.status} ${responseText.slice(0, 500)}`);
+    const data = JSON.parse(responseText);
     for (const txn of data.data ?? []) {
       currency = txn.currency ?? currency;
       const month = new Date(txn.created * 1000).toISOString().slice(0, 7);
@@ -43,11 +49,13 @@ export async function fetchStripeRevenue(): Promise<{ months: RevenueMonth[]; cu
     }
 
     if (!data.has_more || !data.data?.length) break;
+    if (page === 4) truncated = true;
     startingAfter = data.data[data.data.length - 1].id;
   }
 
   return {
     months: [...months.values()].sort((a, b) => a.month.localeCompare(b.month)),
     currency,
+    truncated,
   };
 }

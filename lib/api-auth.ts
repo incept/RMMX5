@@ -42,9 +42,20 @@ export async function requireAdmin() {
   const result = await requireUser();
   if ('error' in result) return result;
 
-  if (result.profile.role !== 'admin') {
+  if (!['admin', 'super_admin'].includes(result.profile.role)) {
     return { error: NextResponse.json({ error: 'Admin access required' }, { status: 403 }) };
   }
 
+  return result;
+}
+
+export async function requireSuperAdmin() {
+  const result = await requireUser();
+  if ('error' in result) return result;
+  if (result.profile.role !== 'super_admin') {
+    return {
+      error: NextResponse.json({ error: 'Super administrator access required' }, { status: 403 }),
+    };
+  }
   return result;
 }

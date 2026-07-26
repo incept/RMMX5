@@ -358,7 +358,7 @@ function parseSubmittedAt(value: string | null): string | null {
  * within WordPress's HTTP timeout. A slow response makes Fluent Forms mark the
  * delivery failed and retry, which is how duplicate contacts happen.
  */
-export async function processFluentFormsLead(payload: Record<string, any>) {
+export async function processFluentFormsLead(payload: Record<string, any>, eventId: string) {
   const supabase = createAdminClient();
 
   const index = indexPayload(payload);
@@ -379,47 +379,49 @@ export async function processFluentFormsLead(payload: Record<string, any>) {
     [firstName, lastName].filter(Boolean).join(' ') ||
     null;
 
-  const { data: newStatus } = await supabase
-    .from('statuses')
-    .select('id')
-    .eq('name', 'New')
-    .maybeSingle();
-
-  const { data: contact, error } = await supabase
-    .from('contacts')
-    .insert({
-      name: name || '(no name)',
-      email: pick('email', 'email_address'),
-      phone: pick('phone', 'phone_number', 'tel'),
-      city: pick('city'),
-      state: pick('state', 'region'),
-      status_id: newStatus?.id ?? null,
+  const contactFields = {
+    name: name || '(no name)',
+    email: pick('email', 'email_address'),
+    phone: pick('phone', 'phone_number', 'tel'),
+    city: pick('city'),
+    state: pick('state', 'region'),
       // Fluent Forms' default metadata block. It labels these "User IP",
       // "Source URL", "Browser", "Device", "User" and "Submitted On"; the
       // aliases below cover the key spellings its webhook feed actually sends.
-      browser: pick('browser', 'user_agent'),
-      ip: pick('ip', 'user_ip', 'ip_address', 'client_ip'),
-      device: pick('device', 'device_type', 'platform', 'os'),
-      source_url: pick('source_url', 'page_url', 'referer', 'referrer', 'permalink'),
-      wp_user: pick('wp_user', 'user', 'username', 'user_login', 'user_email', 'user_id'),
-      submitted_at: parseSubmittedAt(
-        pick('submitted_on', 'submitted_at', 'created_at', 'submission_date')
-      ),
-      source: pick('source', 'utm_source') ?? 'fluent_forms',
-      utm: pick(
-        'utm',
-        'utm_campaign',
-        'utm_medium',
-        'utm_traffic_source',
-        'utm_organic_source_str'
-      ),
-      ppc_kw: pick('ppc_kw', 'keyword', 'utm_term', 'gclid_keyword'),
+    browser: pick('browser', 'user_agent'),
+    ip: pick('ip', 'user_ip', 'ip_address', 'client_ip'),
+    device: pick('device', 'device_type', 'platform', 'os'),
+    source_url: pick('source_url', 'page_url', 'referer', 'referrer', 'permalink'),
+    wp_user: pick('wp_user', 'user', 'username', 'user_login', 'user_email', 'user_id'),
+    submitted_at: parseSubmittedAt(
+      pick('submitted_on', 'submitted_at', 'created_at', 'submission_date')
+    ),
+    source: pick('source', 'utm_source') ?? 'fluent_forms',
+    utm: pick(
+      'utm',
+      'utm_campaign',
+      'utm_medium',
+      'utm_traffic_source',
+      'utm_organic_source_str'
+    ),
+    ppc_kw: pick('ppc_kw', 'keyword', 'utm_term', 'gclid_keyword'),
       // Join key with CallScaler: the same gclid on a form fill and a phone
       // call means the same ad click, so call intake can merge instead of
       // creating a duplicate contact.
-      gclid: pick('gclid', 'google_click_id'),
-    })
+    gclid: pick('gclid', 'google_click_id'),
+  };
+  const { data: contactId, error: intakeError } = await supabase.rpc('create_fluent_lead', {
+    p_event_id: eventId,
+    p_payload: payload,
+    p_contact: contactFields,
+  });
+  if (intakeError || !contactId) {
+    throw new Error(intakeError?.message ?? 'transactional lead intake failed');
+  }
+  const { data: contact, error } = await supabase
+    .from('contacts')
     .select('*')
+    .eq('id', contactId)
     .single();
   if (error || !contact) throw new Error(error?.message ?? 'contact insert failed');
 

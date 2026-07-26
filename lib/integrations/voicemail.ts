@@ -1,4 +1,6 @@
 import { getSetting } from '@/lib/settings';
+import { readResponseText } from '@/lib/request-limits';
+import { assertPublicHttpsUrl } from '@/lib/public-url';
 
 /**
  * Voicemail drop (ringless voicemail) — provider-agnostic.
@@ -21,7 +23,8 @@ export async function sendVoicemailDrop(opts: {
     return { ok: false, error: 'Voicemail provider is not configured (Admin → Integrations).' };
   }
 
-  const res = await fetch(cfg.provider_url, {
+  const providerUrl = await assertPublicHttpsUrl(cfg.provider_url);
+  const res = await fetch(providerUrl, {
     method: 'POST',
     signal: AbortSignal.timeout(20_000),
     headers: {
@@ -33,10 +36,12 @@ export async function sendVoicemailDrop(opts: {
       audio_url: opts.audioUrl,
       caller_id: cfg.caller_id ?? '',
     }),
+    redirect: 'error',
   });
 
   if (!res.ok) {
-    return { ok: false, error: `Voicemail provider error: ${res.status} ${(await res.text()).slice(0, 500)}` };
+    const detail = await readResponseText(res, 64 * 1024);
+    return { ok: false, error: `Voicemail provider error: ${res.status} ${detail.slice(0, 500)}` };
   }
   return { ok: true };
 }

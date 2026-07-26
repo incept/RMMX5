@@ -53,6 +53,27 @@ const MAX_SERP_FALLBACKS = 4;
  * that wait to every domain.
  */
 const FALLBACK_TIMEOUT_MS = 25_000;
+const CANDIDATE_BATCH_SIZE = 25;
+
+class CandidateWriter {
+  private rows: Record<string, any>[] = [];
+
+  constructor(private readonly supabase: ReturnType<typeof createAdminClient>) {}
+
+  async add(row: Record<string, any>) {
+    this.rows.push(row);
+    if (this.rows.length >= CANDIDATE_BATCH_SIZE) await this.flush();
+  }
+
+  async flush() {
+    if (!this.rows.length) return;
+    const batch = this.rows.splice(0, this.rows.length);
+    const { error } = await this.supabase
+      .from('search_candidates')
+      .upsert(batch, { onConflict: 'contact_id,canonical_url', ignoreDuplicates: true });
+    if (error) throw new Error(`Could not store candidate batch: ${error.message}`);
+  }
+}
 
 interface ProbeSite {
   id: string;
@@ -249,10 +270,13 @@ async function rowsFromPage(
 export async function runDeepSearchForContact(
   contactId: string,
   actorId?: string | null,
-  opts?: { deadlineMs?: number; requestKey?: string }
+  opts?: { deadlineMs?: number; requestKey?: string; signal?: AbortSignal }
 ): Promise<DeepSearchResult> {
   const supabase = createAdminClient();
-  const signal = AbortSignal.timeout(Math.min(Math.max(opts?.deadlineMs ?? 95_000, 10_000), 110_000));
+  const deadlineSignal = AbortSignal.timeout(
+    Math.min(Math.max(opts?.deadlineMs ?? 95_000, 10_000), 110_000)
+  );
+  const signal = opts?.signal ? AbortSignal.any([deadlineSignal, opts.signal]) : deadlineSignal;
   const ensureTime = () => {
     if (signal.aborted) throw new Error('Deep search reached its execution deadline');
   };
@@ -330,7 +354,11 @@ export async function runDeepSearchForContact(
   const [{ data: siteRows }, { data: ruleRows }, { data: existing }] = await Promise.all([
     supabase.from('probe_sites').select('*').order('scope'),
     supabase.from('url_rules').select('*'),
-    supabase.from('search_candidates').select('canonical_url').eq('contact_id', contactId),
+    supabase
+      .from('search_candidates')
+      .select('canonical_url')
+      .eq('contact_id', contactId)
+      .limit(5_000),
   ]);
 
   // Inactive sites still matter: they are the SERP-fallback and id-pivot
@@ -339,6 +367,7 @@ export async function runDeepSearchForContact(
   const sites = sitesAll.filter((s) => s.active);
   const rules = (ruleRows ?? []) as UrlRule[];
   const seen = new Set((existing ?? []).map((r: any) => r.canonical_url));
+  const candidateWriter = new CandidateWriter(supabase);
 
   let probed = 0;
   let blocked = 0;
@@ -471,7 +500,7 @@ export async function runDeepSearchForContact(
         if (scored.confidence < MIN_CONFIDENCE) continue;
 
         const rule = matchUrlRule(row.url, rules);
-        const { error } = await supabase.from('search_candidates').insert({
+        await candidateWriter.add({
           contact_id: contactId,
           url: row.url,
           canonical_url: canonical,
@@ -483,23 +512,12 @@ export async function runDeepSearchForContact(
           matched_facts: scored.matched,
           url_rule_id: rule?.id ?? null,
         });
-        if (error && error.code !== '23505') {
-          await logDebug({
-            source: 'deep-search:candidate',
-            message: `Could not store candidate: ${error.message}`,
-            context: { url: row.url, domain: site.domain },
-            contactId,
-          });
-          continue;
-        }
         seen.add(canonical);
-        if (!error) {
-          candidates += 1;
-          sitesWithHits.add(site.domain);
-          // A record's own page teaches us more than the listing row did.
-          facts = mergeFacts(facts, rowFacts);
-          rememberFamilyIds(familyIds, site.family, rowFacts.record_ids);
-        }
+        candidates += 1;
+        sitesWithHits.add(site.domain);
+        // A record's own page teaches us more than the listing row did.
+        facts = mergeFacts(facts, rowFacts);
+        rememberFamilyIds(familyIds, site.family, rowFacts.record_ids);
       }
     }
     if (probed >= MAX_PROBES_PER_RUN) break;
@@ -613,7 +631,7 @@ export async function runDeepSearchForContact(
       if (scored.confidence < MIN_CONFIDENCE) continue;
 
       const rule = matchUrlRule(r.link, rules);
-      const { error } = await supabase.from('search_candidates').insert({
+      await candidateWriter.add({
         contact_id: contactId,
         url: r.link,
         canonical_url: canonical,
@@ -626,13 +644,11 @@ export async function runDeepSearchForContact(
         matched_facts: scored.matched,
         url_rule_id: rule?.id ?? null,
       });
-      if (!error) {
-        seen.add(canonical);
-        candidates += 1;
-        sitesWithHits.add(domain);
-        facts = mergeFacts(facts, rowFacts);
-        rememberFamilyIds(familyIds, site?.family ?? null, rowFacts.record_ids);
-      }
+      seen.add(canonical);
+      candidates += 1;
+      sitesWithHits.add(domain);
+      facts = mergeFacts(facts, rowFacts);
+      rememberFamilyIds(familyIds, site?.family ?? null, rowFacts.record_ids);
     }
   }
 
@@ -642,6 +658,7 @@ export async function runDeepSearchForContact(
      already in hand the URL is fully determined -- the only route left on a host
      BrightData will not fetch for us, and it costs nothing. */
   for (const site of sitesAll) {
+    ensureTime();
     if (!site.date_url_template) continue;
     for (const isoDate of facts.booking_dates.slice(0, 3)) {
       for (const county of (facts.county.length ? facts.county : [null]).slice(0, 2)) {
@@ -655,7 +672,7 @@ export async function runDeepSearchForContact(
         const canonical = canonicalUrl(url);
         if (!canonical || seen.has(canonical)) continue;
 
-        const { error } = await supabase.from('search_candidates').insert({
+        await candidateWriter.add({
           contact_id: contactId,
           url,
           canonical_url: canonical,
@@ -671,12 +688,10 @@ export async function runDeepSearchForContact(
           matched_facts: { booking_date: isoDate, ...(county ? { county } : {}) },
           url_rule_id: matchUrlRule(url, rules)?.id ?? null,
         });
-        if (!error) {
-          seen.add(canonical);
-          candidates += 1;
-          derived += 1;
-          sitesWithHits.add(site.domain);
-        }
+        seen.add(canonical);
+        candidates += 1;
+        derived += 1;
+        sitesWithHits.add(site.domain);
       }
     }
   }
@@ -686,6 +701,7 @@ export async function runDeepSearchForContact(
      wakepublicrecords .../sample.php?id=140252 are one booking. Once any sibling
      gives up an id, the rest are addressable with no request at all. */
   for (const [family, ids] of familyIds) {
+    ensureTime();
     for (const site of sitesAll) {
       if (site.family !== family || !site.record_url_template) continue;
       for (const id of ids) {
@@ -694,7 +710,7 @@ export async function runDeepSearchForContact(
         const canonical = canonicalUrl(url);
         if (!canonical || seen.has(canonical)) continue;
 
-        const { error } = await supabase.from('search_candidates').insert({
+        await candidateWriter.add({
           contact_id: contactId,
           url,
           canonical_url: canonical,
@@ -710,12 +726,10 @@ export async function runDeepSearchForContact(
           matched_facts: { record_id: id, family },
           url_rule_id: matchUrlRule(url, rules)?.id ?? null,
         });
-        if (!error) {
-          seen.add(canonical);
-          candidates += 1;
-          pivots += 1;
-          sitesWithHits.add(site.domain);
-        }
+        seen.add(canonical);
+        candidates += 1;
+        pivots += 1;
+        sitesWithHits.add(site.domain);
       }
     }
   }
@@ -730,6 +744,7 @@ export async function runDeepSearchForContact(
      search VIEW rather than a finding — a search URL is not removable content,
      so it must never land in a link slot. */
   for (const site of sitesAll) {
+    ensureTime();
     if (!site.search_template || !sitesWithHits.has(site.domain)) continue;
     const url = buildProbeUrl(
       site.search_template,
@@ -742,7 +757,7 @@ export async function runDeepSearchForContact(
     const canonical = canonicalUrl(url);
     if (!canonical || seen.has(canonical)) continue;
 
-    const { error } = await supabase.from('search_candidates').insert({
+    await candidateWriter.add({
       contact_id: contactId,
       url,
       canonical_url: canonical,
@@ -757,11 +772,10 @@ export async function runDeepSearchForContact(
       confidence: 0,
       matched_facts: { kind: 'site_search' },
     });
-    if (!error) {
-      seen.add(canonical);
-      siteSearches += 1;
-    }
+    seen.add(canonical);
+    siteSearches += 1;
   }
+  await candidateWriter.flush();
 
   // Reuses the existing search_flag, so these land in the contacts grid's
   // Flagged view with the reason on hover — no new surface to learn.
@@ -916,6 +930,7 @@ export async function captureUnruledSerpCandidates(
   if (!verdicts?.length) return 0;
 
   let stored = 0;
+  const candidateRows: Record<string, any>[] = [];
   for (const v of verdicts) {
     if (v.kind === 'other') continue;
     const r = unruled[v.i];
@@ -925,7 +940,7 @@ export async function captureUnruledSerpCandidates(
     // The classifier's judgement is not a substitute for the surname rule.
     if (scored.confidence < MIN_CONFIDENCE) continue;
 
-    const { error } = await supabase.from('search_candidates').insert({
+    candidateRows.push({
       contact_id: contactId,
       url: r.link,
       canonical_url: canonicalUrl(r.link),
@@ -937,7 +952,7 @@ export async function captureUnruledSerpCandidates(
       confidence: scored.confidence,
       matched_facts: { ...scored.matched, kind: v.kind },
     });
-    if (!error) stored += 1;
+    stored += 1;
 
     // Social and news URLs are dense with facts even when the page is closed to
     // us: a Busted Newspaper Facebook post is
@@ -952,6 +967,12 @@ export async function captureUnruledSerpCandidates(
         factsFromText(`${r.title} ${r.snippet}`, name)
       )
     );
+  }
+  if (candidateRows.length) {
+    const { error } = await supabase
+      .from('search_candidates')
+      .upsert(candidateRows, { onConflict: 'contact_id,canonical_url', ignoreDuplicates: true });
+    if (error) throw new Error(`Could not store classified candidates: ${error.message}`);
   }
 
   const merged = normalizeFacts(facts);

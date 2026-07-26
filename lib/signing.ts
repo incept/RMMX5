@@ -24,6 +24,19 @@ export function verifyTrackingUrl(messageId: string, url: string, sig: string | 
   return safeEqual(signTrackingUrl(messageId, url), sig);
 }
 
+export function signTrackingOpen(messageId: string): string {
+  return crypto
+    .createHmac('sha256', secret())
+    .update(`open|${messageId}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+export function verifyTrackingOpen(messageId: string, sig: string | null): boolean {
+  if (!secret() || !sig) return false;
+  return safeEqual(signTrackingOpen(messageId), sig);
+}
+
 /** Constant-time string comparison (hash first so lengths always match). */
 export function safeEqual(a: string, b: string): boolean {
   const ha = crypto.createHash('sha256').update(a).digest();

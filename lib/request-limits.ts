@@ -108,8 +108,20 @@ export async function readResponseText(response: Response, maxBytes: number): Pr
 
 export function requestErrorResponse(error: unknown): { message: string; status: number } {
   const candidate = error as { message?: string; status?: number };
+  const explicitStatus =
+    Number.isInteger(candidate?.status) &&
+    Number(candidate.status) >= 400 &&
+    Number(candidate.status) <= 599
+      ? Number(candidate.status)
+      : null;
+  if (explicitStatus !== null && explicitStatus < 500) {
+    return {
+      message: candidate?.message ?? 'Invalid request',
+      status: explicitStatus,
+    };
+  }
   return {
-    message: candidate?.message ?? 'Invalid request',
-    status: candidate?.status ?? 400,
+    message: 'The server could not complete this request',
+    status: explicitStatus ?? 500,
   };
 }

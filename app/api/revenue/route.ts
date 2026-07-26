@@ -19,17 +19,22 @@ export async function GET() {
   if ('error' in auth) return auth.error;
 
   const admin = createAdminClient();
-  const { data: contacts } = await admin
-    .from('contacts')
-    .select('id, name, revenue_projection, client_since')
-    .gt('revenue_projection', 0)
-    .order('revenue_projection', { ascending: false })
-    .limit(50);
-
-  const projectionTotal = (contacts ?? []).reduce(
-    (sum, c) => sum + Number(c.revenue_projection ?? 0),
-    0
-  );
+  const [{ data: contacts }, { data: projectionTotal, error: totalError }] = await Promise.all([
+    admin
+      .from('contacts')
+      .select('id, name, revenue_projection, client_since')
+      .gt('revenue_projection', 0)
+      .order('revenue_projection', { ascending: false })
+      .limit(50),
+    admin.rpc('revenue_projection_total'),
+  ]);
+  if (totalError) {
+    await logDebug({
+      level: 'error',
+      source: 'api:revenue',
+      message: `Projection total failed: ${totalError.message}`,
+    });
+  }
 
   let stripe: any = null;
   let stripeError: string | null = null;
@@ -48,7 +53,7 @@ export async function GET() {
   }
 
   return NextResponse.json({
-    projectionTotal: Math.round(projectionTotal * 100) / 100,
+    projectionTotal: Math.round(Number(projectionTotal ?? 0) * 100) / 100,
     topProjections: contacts ?? [],
     stripe,
     stripeError,

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { logDebug, errorMessage } from '@/lib/debug-log';
 import { requestErrorResponse } from '@/lib/request-limits';
+import { randomUUID } from 'crypto';
 
 /**
  * One place for an API route to fail.
@@ -29,6 +30,7 @@ export async function apiFailure(
 ): Promise<NextResponse> {
   const response = requestErrorResponse(error);
   const deliberate = typeof (error as { status?: number } | null)?.status === 'number';
+  const reference = response.status >= 500 ? randomUUID() : null;
 
   if (!deliberate || response.status >= 500) {
     await logDebug({
@@ -38,6 +40,7 @@ export async function apiFailure(
       contactId: opts?.contactId ?? null,
       context: {
         ...opts?.context,
+        reference,
         status: response.status,
         // A Postgres error carries these and they are usually the whole answer.
         code: (error as { code?: string } | null)?.code ?? null,
@@ -47,5 +50,8 @@ export async function apiFailure(
     });
   }
 
-  return NextResponse.json({ error: response.message }, { status: response.status });
+  return NextResponse.json(
+    { error: response.message, ...(reference ? { reference } : {}) },
+    { status: response.status }
+  );
 }

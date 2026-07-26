@@ -28,19 +28,33 @@ export default function MarketingPage() {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    const [t, l, s, st, a] = await Promise.all([
+    const [t, l, s, st, a, lc, sc] = await Promise.all([
       supabase.from('email_templates').select('*').order('name'),
-      supabase.from('email_lists').select('*, email_list_members ( id )').order('name'),
+      supabase.from('email_lists').select('*').order('name'),
       supabase
         .from('email_sequences')
-        .select('*, email_lists ( name ), sequence_steps ( * ), sequence_enrollments ( id, status )')
+        .select('*, email_lists ( name ), sequence_steps ( * )')
         .order('name'),
       supabase.from('statuses').select('id, name, color').order('sort_order'),
       supabase.from('email_accounts').select('id, name, from_email').order('name'),
+      supabase.rpc('marketing_list_counts'),
+      supabase.rpc('marketing_sequence_counts'),
     ]);
+    const listCounts = new Map<string, number>(
+      (lc.data ?? []).map((row: any) => [row.list_id, Number(row.member_count)])
+    );
+    const sequenceCounts = new Map<string, any>(
+      (sc.data ?? []).map((row: any) => [row.sequence_id, row])
+    );
     setTemplates(t.data ?? []);
-    setLists(l.data ?? []);
-    setSequences(s.data ?? []);
+    setLists((l.data ?? []).map((row: any) => ({ ...row, member_count: listCounts.get(row.id) ?? 0 })));
+    setSequences(
+      (s.data ?? []).map((row: any) => ({
+        ...row,
+        enrollment_count: Number(sequenceCounts.get(row.id)?.enrollment_count ?? 0),
+        active_count: Number(sequenceCounts.get(row.id)?.active_count ?? 0),
+      }))
+    );
     setStatuses(st.data ?? []);
     setAccounts(a.data ?? []);
   }, [supabase]);
@@ -227,7 +241,7 @@ export default function MarketingPage() {
           </button>
           <div className="grid gap-3 lg:grid-cols-2">
             {sequences.map((seq) => {
-              const active = seq.sequence_enrollments?.filter((e: any) => e.status === 'active').length ?? 0;
+              const active = seq.active_count ?? 0;
               return (
                 <div key={seq.id} className="card">
                   <div className="flex items-center justify-between">
@@ -623,8 +637,8 @@ export default function MarketingPage() {
               <div key={l.id} className="card">
                 <div className="font-semibold">{l.name}</div>
                 <div className="mt-1 text-xs text-gray-500">
-                  {l.email_list_members?.length ?? 0} member
-                  {(l.email_list_members?.length ?? 0) === 1 ? '' : 's'}
+                  {l.member_count ?? 0} member
+                  {(l.member_count ?? 0) === 1 ? '' : 's'}
                 </div>
                 {l.description && <div className="mt-1 text-xs text-gray-400">{l.description}</div>}
                 <div className="mt-3 flex gap-2">
@@ -701,7 +715,7 @@ export default function MarketingPage() {
                     <option value="">Choose list…</option>
                     {lists.map((l) => (
                       <option key={l.id} value={l.id}>
-                        {l.name} ({l.email_list_members?.length ?? 0})
+                        {l.name} ({l.member_count ?? 0})
                       </option>
                     ))}
                   </select>

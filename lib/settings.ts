@@ -21,6 +21,7 @@ import { createAdminClient } from '@/lib/supabase/server';
  */
 
 const CACHE_TTL_MS = 30_000;
+const MAX_CACHE_ENTRIES = 32;
 const cache = new Map<string, { value: any; at: number }>();
 
 /**
@@ -39,6 +40,7 @@ export async function getSetting<T = Record<string, any>>(
   if (!opts?.fresh) {
     const hit = cache.get(key);
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value as T;
+    if (hit) cache.delete(key);
   }
   const supabase = createAdminClient();
   const { data, error } = await supabase
@@ -49,6 +51,11 @@ export async function getSetting<T = Record<string, any>>(
   if (error) throw error;
   const value = (data?.value ?? {}) as T;
   cache.set(key, { value, at: Date.now() });
+  while (cache.size > MAX_CACHE_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
   return value;
 }
 

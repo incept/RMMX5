@@ -9,15 +9,26 @@ import { sendVoicemailDrop } from '@/lib/integrations/voicemail';
 import { sendViaEmailit } from '@/lib/integrations/emailit';
 import { logActivity } from '@/lib/activity';
 import { errorMessage, logDebug } from '@/lib/debug-log';
+import { applyScores } from '@/lib/scoring';
 
 export type JobKind =
   | 'auto_search'
   | 'deep_search'
   | 'contact_enrichment'
+  | 'score_contact'
   | 'email_delivery'
   | 'sms_delivery'
   | 'voicemail_delivery'
   | 'notification_delivery';
+
+function escapeHtml(value: unknown): string {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
 
 export async function enqueueJob(
   kind: JobKind,
@@ -86,9 +97,10 @@ async function refreshSmsCampaign(campaignId: string) {
     .eq('id', campaignId);
 }
 
-async function handleJob(job: any) {
+async function handleJob(job: any, signal?: AbortSignal) {
   const payload = job.payload ?? {};
   const supabase = createAdminClient();
+  if (signal?.aborted) throw signal.reason ?? new Error('Job lease was lost');
 
   if (job.kind === 'auto_search') {
     await runAutoSearchForContact(
@@ -106,6 +118,7 @@ async function handleJob(job: any) {
       {
         deadlineMs: 95_000,
         requestKey: `job:${job.id}:attempt:${job.attempt_count}`,
+        signal,
       }
     );
     return;
@@ -129,6 +142,11 @@ async function handleJob(job: any) {
         `auto-search:enriched:${payload.contactId}`
       );
     }
+    return;
+  }
+
+  if (job.kind === 'score_contact') {
+    await applyScores(String(payload.contactId));
     return;
   }
 
@@ -218,7 +236,7 @@ async function handleJob(job: any) {
       result = await sendViaEmailit({
         to: String(payload.destination),
         subject: 'Update on your case',
-        html: `<p>${String(payload.message)}</p>`,
+        html: `<p>${escapeHtml(payload.message).replaceAll('\n', '<br/>')}</p>`,
       });
     } else if (payload.channel === 'sms' && payload.destination) {
       result = await sendSms(String(payload.destination), String(payload.message));
@@ -259,7 +277,9 @@ async function finishJob(job: any, worker: string, failure?: unknown) {
     return;
   }
 
-  const terminal = job.attempt_count >= job.max_attempts;
+  const terminal =
+    job.attempt_count >= job.max_attempts ||
+    (failure as { retryable?: boolean } | null)?.retryable === false;
   const backoffMinutes = Math.min(60, 2 ** Math.max(0, job.attempt_count - 1));
   const message = errorMessage(failure).slice(0, 2000);
   const { data, error } = await supabase
@@ -296,26 +316,43 @@ async function finishJob(job: any, worker: string, failure?: unknown) {
   });
 }
 
-async function withJobHeartbeat<T>(job: any, worker: string, run: () => Promise<T>): Promise<T> {
+async function withJobHeartbeat<T>(
+  job: any,
+  worker: string,
+  run: (signal: AbortSignal) => Promise<T>
+): Promise<T> {
   const supabase = createAdminClient();
   let stopped = false;
   let heartbeatRunning = false;
+  let lostLease: Error | null = null;
+  const controller = new AbortController();
   const timer = setInterval(() => {
     if (stopped || heartbeatRunning) return;
     heartbeatRunning = true;
     void (async () => {
       try {
-        const { error } = await supabase
+        const { data, error } = await supabase
           .from('job_queue')
           .update({ locked_at: new Date().toISOString(), updated_at: new Date().toISOString() })
           .eq('id', job.id)
           .eq('status', 'processing')
-          .eq('locked_by', worker);
+          .eq('locked_by', worker)
+          .select('id')
+          .maybeSingle();
         if (error) {
           await logDebug({
             level: 'warn',
             source: `job:${job.kind}`,
             message: `Could not renew job lease: ${error.message}`,
+            context: { job_id: job.id, worker },
+          });
+        } else if (!data) {
+          lostLease = new Error(`Lost lease while processing job ${job.id}`);
+          controller.abort(lostLease);
+          await logDebug({
+            level: 'warn',
+            source: `job:${job.kind}`,
+            message: lostLease.message,
             context: { job_id: job.id, worker },
           });
         }
@@ -333,7 +370,9 @@ async function withJobHeartbeat<T>(job: any, worker: string, run: () => Promise<
   }, 30_000);
   timer.unref?.();
   try {
-    return await run();
+    const result = await run(controller.signal);
+    if (lostLease) throw lostLease;
+    return result;
   } finally {
     stopped = true;
     clearInterval(timer);
@@ -358,7 +397,7 @@ export async function processQueuedJobs(limit = 1) {
   // ticks; parallel work here only creates RAM and latency spikes.
   for (const job of jobs ?? []) {
     try {
-      await withJobHeartbeat(job, worker, () => handleJob(job));
+      await withJobHeartbeat(job, worker, (signal) => handleJob(job, signal));
       await finishJob(job, worker);
       completed += 1;
     } catch (failure) {

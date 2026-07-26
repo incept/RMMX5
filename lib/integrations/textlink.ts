@@ -1,4 +1,5 @@
 import { getSetting } from '@/lib/settings';
+import { readResponseText } from '@/lib/request-limits';
 
 /**
  * Sends an SMS via the TextLink API.
@@ -31,11 +32,16 @@ export async function sendSms(
     }),
   });
 
+  const responseText = await readResponseText(res, 128 * 1024);
   if (!res.ok) {
-    return { ok: false, error: `TextLink HTTP error: ${res.status} ${(await res.text()).slice(0, 500)}` };
+    return { ok: false, error: `TextLink HTTP error: ${res.status} ${responseText.slice(0, 500)}` };
   }
-
-  const data = await res.json();
+  let data: any;
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    return { ok: false, error: 'TextLink returned an invalid JSON response' };
+  }
   if (!data.ok) {
     return { ok: false, error: data.message || 'TextLink reported failure' };
   }

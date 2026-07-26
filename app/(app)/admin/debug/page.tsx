@@ -21,6 +21,9 @@ export default function DebugLogPage() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [purgeTarget, setPurgeTarget] = useState('email_events');
+  const [purgeDays, setPurgeDays] = useState(365);
+  const [purging, setPurging] = useState(false);
 
   const load = useCallback(async () => {
     let query = supabase
@@ -57,6 +60,42 @@ export default function DebugLogPage() {
 
   const sources = [...new Set(entries.map((e) => e.source))].sort();
   const errorCount = entries.filter((e) => e.level === 'error').length;
+  const purgeTargets = [
+    'email_events',
+    'email_messages',
+    'calls',
+    'activity_log',
+    'notifications_log',
+    'imports',
+    'search_candidates',
+    'debug_log',
+    'webhook_leads',
+    'sms_messages',
+    'voicemail_sends',
+    'job_queue',
+    'usage_events',
+    'contact_files',
+  ];
+
+  async function purgeOldData() {
+    const phrase = `PURGE ${purgeTarget}`;
+    if (!confirm(`Delete ${purgeTarget} older than ${purgeDays} days?\n\nThis cannot be undone.`)) {
+      return;
+    }
+    setPurging(true);
+    const res = await fetch('/api/admin/purge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: purgeTarget, olderThanDays: purgeDays, confirm: phrase }),
+    });
+    const data = await res.json();
+    setPurging(false);
+    if (!res.ok) return alert(data.error ?? 'Purge failed');
+    alert(
+      `Deleted ${data.deleted} row(s).${data.remaining ? ' More matching files remain; run again.' : ''}`
+    );
+    load();
+  }
 
   return (
     <div className="mx-auto max-w-5xl p-6">
@@ -74,22 +113,48 @@ export default function DebugLogPage() {
           <button className="btn py-1" onClick={load}>
             Refresh
           </button>
-          <button
-            className="btn py-1 text-red-600"
-            onClick={async () => {
-              if (!confirm('Clear all debug log entries?')) return;
-              await supabase.from('debug_log').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-              load();
-            }}
-          >
-            Clear
-          </button>
         </div>
       </div>
       <p className="mb-4 text-xs text-gray-400">
         Integration and delivery failures, newest first. Entries older than 14 days are pruned
         automatically by the cron tick.
       </p>
+
+      <div className="card mb-4">
+        <div className="mb-2 text-sm font-semibold">Data retention</div>
+        <p className="mb-3 text-xs text-gray-500">
+          Permanently purge historical operational data. Contact-file storage is removed with its
+          metadata in bounded batches.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            className="input w-56"
+            value={purgeTarget}
+            onChange={(e) => setPurgeTarget(e.target.value)}
+          >
+            {purgeTargets.map((target) => (
+              <option key={target} value={target}>
+                {target.replaceAll('_', ' ')}
+              </option>
+            ))}
+          </select>
+          <select
+            className="input w-40"
+            value={purgeDays}
+            onChange={(e) => setPurgeDays(Number(e.target.value))}
+          >
+            <option value={30}>Older than 30 days</option>
+            <option value={90}>Older than 90 days</option>
+            <option value={180}>Older than 6 months</option>
+            <option value={365}>Older than 1 year</option>
+            <option value={730}>Older than 2 years</option>
+            <option value={1825}>Older than 5 years</option>
+          </select>
+          <button className="btn text-red-600" disabled={purging} onClick={purgeOldData}>
+            {purging ? 'Purging…' : 'Purge old data'}
+          </button>
+        </div>
+      </div>
 
       <div className="mb-3 flex items-center gap-2">
         <select className="input w-36" value={level} onChange={(e) => setLevel(e.target.value)}>
