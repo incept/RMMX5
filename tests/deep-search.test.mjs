@@ -931,3 +931,93 @@ test('clearing is refused while a deep search is running', async () => {
   // And it is admin-only, matching the deep-search route that creates the data.
   assert.match(body, /await requireAdmin\(\)/);
 });
+
+// --- Human-confirmed truth (facts + links) ---------------------------------
+
+test('confirming a fact stores it in the normalised form the engine compares', async () => {
+  const { addConfirmedFact } = await import('../lib/deep-search/confirmed.ts');
+  // State is uppercased, a date is coerced to ISO — same normalisation the
+  // scraped facts go through, so a confirmed value actually matches.
+  assert.deepEqual(addConfirmedFact({}, 'state', 'nc').state, ['NC']);
+  assert.deepEqual(addConfirmedFact({}, 'booking_dates', '04/22/2026').booking_dates, ['2026-04-22']);
+  // Empty input is a no-op, not a blank entry.
+  assert.deepEqual(addConfirmedFact({ county: ['Wake'] }, 'county', '   ').county, ['Wake']);
+});
+
+test('unconfirming a fact evicts the wrong value case-insensitively', async () => {
+  const { removeConfirmedFact } = await import('../lib/deep-search/confirmed.ts');
+  // This is the eviction the old accumulate-only model lacked: correcting a
+  // fact drops it instead of leaving it to keep steering probes.
+  const after = removeConfirmedFact({ county: ['Wake', 'Durham'] }, 'county', 'wake');
+  assert.deepEqual(after.county, ['Durham']);
+  // Removing something not present changes nothing.
+  assert.deepEqual(removeConfirmedFact({ state: ['NC'] }, 'state', 'TX').state, ['NC']);
+});
+
+test('confirming a link folds its URL facts into the same store as a fact', async () => {
+  const { confirmFactsFromUrl } = await import('../lib/deep-search/confirmed.ts');
+  // Both origins converge: a confirmed link is worth exactly the facts its URL
+  // encodes, so it lands where a confirmed fact would.
+  const facts = confirmFactsFromUrl(
+    {},
+    'https://wakenc.mugshots.zone/beachak-gene-michael-mugshot-04-22-2026/',
+    GENE
+  );
+  assert.deepEqual(facts.county, ['Wake']);
+  assert.deepEqual(facts.state, ['NC']);
+  assert.deepEqual(facts.middle, ['Michael']);
+  assert.deepEqual(facts.booking_dates, ['2026-04-22']);
+});
+
+test('only real fact fields can be confirmed', async () => {
+  const { isConfirmableKey } = await import('../lib/deep-search/confirmed.ts');
+  assert.equal(isConfirmableKey('county'), true);
+  assert.equal(isConfirmableKey('state'), true);
+  assert.equal(isConfirmableKey('name'), false, 'name is on the contact, not a search fact');
+  assert.equal(isConfirmableKey('__proto__'), false);
+  assert.equal(isConfirmableKey(undefined), false);
+});
+
+test('a run seeds confirmed facts at the very top of precedence', async () => {
+  // Highest authority: a human said so. Merged before the contact state and slot
+  // links, so facts.county[0]/state[0] — which build the probe URLs — come from
+  // the confirmed set when one exists.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  const seedAt = source.indexOf('pinned = mergeFacts(pinned, normalizeFacts(contact.confirmed_facts))');
+  const stateAt = source.indexOf('if (seedState) pinned = mergeFacts(pinned, { state: [seedState] })');
+  assert.ok(seedAt > -1, 'confirmed_facts is seeded');
+  assert.ok(seedAt < stateAt, 'confirmed facts merge before the contact-record state');
+  // Both entry points (a full run and the SERP classifier) must agree.
+  assert.equal(
+    (source.match(/normalizeFacts\(contact\??\.confirmed_facts\)/g) ?? []).length,
+    2,
+    'both seed paths merge confirmed_facts'
+  );
+});
+
+test('confirmed things are exempt from Clear results', async () => {
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  const del = route.slice(route.indexOf('export async function DELETE'), route.indexOf('export async function PATCH'));
+  // Clear deletes only new/rejected candidates — confirmed and accepted survive.
+  assert.match(del, /\.in\('status', \['new', 'rejected'\]\)/);
+  // And it resets search_facts but never confirmed_facts.
+  assert.match(del, /search_facts: \{\}/);
+  assert.doesNotMatch(del, /confirmed_facts/, 'Clear must not touch confirmed_facts');
+});
+
+test('confirm actions are admin-only and a search view cannot be confirmed', async () => {
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  // Each confirm branch re-checks admin (asserting durable truth, like Clear).
+  for (const marker of ["action === 'confirm_fact'", "action === 'confirm_url'", "action === 'confirm'"]) {
+    const at = route.indexOf(marker);
+    assert.ok(at > -1, `${marker} exists`);
+    assert.match(route.slice(at, at + 400), /requireAdmin\(\)/, `${marker} is admin-gated`);
+  }
+  assert.match(route, /A search view is not a record page and cannot be confirmed/);
+});

@@ -259,7 +259,7 @@ export async function runDeepSearchForContact(
 
   const { data: contact } = await supabase
     .from('contacts')
-    .select('id, name, city, state, search_facts')
+    .select('id, name, city, state, search_facts, confirmed_facts')
     .eq('id', contactId)
     .single();
   if (!contact?.name) throw new Error('Contact has no name to search for');
@@ -269,20 +269,24 @@ export async function runDeepSearchForContact(
 
   // Facts a human has confirmed, which outrank anything a page told us.
   //
-  // Two sources: the contact record, and the link slots. A URL only reaches a
-  // slot when somebody accepted it, so every slot link is a verified sighting of
-  // this person — and parsing one costs nothing while often supplying the county
-  // and booking date that round B would otherwise have to discover by probing.
+  // Three sources, in descending authority: explicitly confirmed facts, the link
+  // slots, and the contact record. A URL only reaches a slot when somebody
+  // accepted it, so every slot link is a verified sighting of this person — and
+  // parsing one costs nothing while often supplying the county and booking date
+  // that round B would otherwise have to discover by probing.
   //
   // Order matters beyond neatness. Probe URLs are built from facts.county[0] and
-  // facts.state[0], and each key is capped, so merging pinned FIRST is what makes
-  // the confirmed value the one actually searched rather than merely present.
+  // facts.state[0], and each key is capped, so merging confirmed FIRST is what
+  // makes the confirmed value the one actually searched rather than merely
+  // present. confirmed_facts leads because it is the strongest signal there is:
+  // a human said so, and it survives Clear results when search_facts does not.
   const { data: slotLinks } = await supabase
     .from('contact_links')
     .select('url')
     .eq('contact_id', contactId);
 
   let pinned: SearchFacts = { ...EMPTY_FACTS };
+  pinned = mergeFacts(pinned, normalizeFacts(contact.confirmed_facts));
   const seedState = stateCode(contact.state);
   if (seedState) pinned = mergeFacts(pinned, { state: [seedState] });
   let seededLinks = 0;
@@ -882,17 +886,18 @@ export async function captureUnruledSerpCandidates(
   const supabase = createAdminClient();
   const { data: contact } = await supabase
     .from('contacts')
-    .select('search_facts, state')
+    .select('search_facts, confirmed_facts, state')
     .eq('id', contactId)
     .maybeSingle();
-  // Same precedence as a full run: confirmed links first, so the classifier
-  // judges against what a human has actually verified about this person.
+  // Same precedence as a full run: confirmed facts and links first, so the
+  // classifier judges against what a human has actually verified.
   const { data: slotLinks } = await supabase
     .from('contact_links')
     .select('url')
     .eq('contact_id', contactId);
 
   let pinned: SearchFacts = { ...EMPTY_FACTS };
+  pinned = mergeFacts(pinned, normalizeFacts(contact?.confirmed_facts));
   const seedState = stateCode(contact?.state);
   if (seedState) pinned = mergeFacts(pinned, { state: [seedState] });
   for (const row of slotLinks ?? []) {
