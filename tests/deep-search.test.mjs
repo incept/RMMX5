@@ -863,3 +863,36 @@ test('deliberate 4xx are not logged as faults', async () => {
   // Postgres codes are the usual answer, so they must survive into the log.
   assert.match(source, /code: \(error as \{ code\?: string \}/);
 });
+
+test('puppeteer-core is never a static import', async () => {
+  // A top-level import put a heavy optional dependency in the module graph of
+  // everything downstream — including the queue, and so the route that only
+  // wanted to insert a row. When the bundler could not materialise it on the
+  // host ("open EEXIST") the chain died at LOAD time, before any handler ran,
+  // where no try/catch could reach it and nothing could be logged.
+  const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(
+    source,
+    /^import puppeteer[ ,]/m,
+    'puppeteer-core must not be imported for value at module scope'
+  );
+  assert.match(source, /import \{ type Browser, type Page \} from 'puppeteer-core'/);
+  assert.match(source, /await import\('puppeteer-core'\)/, 'loaded lazily, where it is used');
+
+  // The singleton must still be claimed synchronously: awaiting the import
+  // before assigning would let two callers each launch their own Chrome.
+  assert.match(source, /const launching = \(async \(\) => \{/, 'wrapped so assignment is synchronous');
+  const fn = source.slice(source.indexOf('async function getBrowser'));
+  const body = fn.slice(0, fn.indexOf('\n}'));
+  assert.ok(
+    body.indexOf('browserPromise = launching;') > body.indexOf("await import('puppeteer-core')"),
+    'the assignment follows the IIFE rather than awaiting it'
+  );
+});
+
+test('puppeteer-core is declared as a server external package', async () => {
+  // Otherwise the bundler tries to materialise it at runtime, which is the
+  // failure above. nodemailer was already declared for the same reason.
+  const config = await readFile(new URL('../next.config.ts', import.meta.url), 'utf8');
+  assert.match(config, /serverExternalPackages: \[[^\]]*'puppeteer-core'/);
+});

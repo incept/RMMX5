@@ -13,7 +13,11 @@ if (publicKey.startsWith('sb_secret_') || publicKey.includes('service_role')) {
 }
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ['nodemailer'],
+  // Left to the bundler, puppeteer-core is materialised as an external module at
+  // runtime and fails on this host with "open EEXIST", which takes down every
+  // route that transitively imports it — including, absurdly, enqueuing a job.
+  // Declared here it is required straight from node_modules, like nodemailer.
+  serverExternalPackages: ['nodemailer', 'puppeteer-core'],
   async headers() {
     return [
       {
