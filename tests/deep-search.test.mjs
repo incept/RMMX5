@@ -22,6 +22,7 @@ import {
   findMiddleNames,
   normalizeLlmRow,
 } from '../lib/deep-search/extract.ts';
+import { isAmbiguous, profilesFor } from '../lib/deep-search/profiles.ts';
 
 // Every fixture below is a real URL or title from the Gene Beachak lead, so
 // these tests pin the extraction against the exact chain we are automating.
@@ -1207,6 +1208,158 @@ test('the toolbar is tightened: short labels, no owner view, green New button', 
   // one saturated fill on the page and read as a warning, not an invitation.
   assert.match(page, /bg-green-600\/15/);
   assert.doesNotMatch(page, /bg-red-600/);
+});
+
+/* ── Identity profiles: which PERSON is each candidate about? ────────────────
+   Fixtures are the real Gabriel Lopez queue: three Florida pages (Collier and
+   Lee counties, middle Alexander) and one unrelated Arkansas hit that the
+   engine chained into before anything was pinned. */
+
+const LOPEZ = splitName('Gabriel Lopez');
+const lopezCandidates = [
+  {
+    id: 'c-rb',
+    url: 'https://recentlybooked.com/fl/collier/gabriel-lopez~11_202600005441',
+    confidence: 0.75,
+    matched_facts: { last: 'Lopez', county: 'collier' },
+  },
+  {
+    id: 'c-mz',
+    url: 'https://leefl.mugshots.zone/lopez-gabriel-alexander-mugshot-12-10-2023/',
+    confidence: 0.9,
+    matched_facts: { last: 'Lopez', middle: 'alexander' },
+  },
+  {
+    id: 'c-ao',
+    url: 'https://florida.arrests.org/Arrests/Gabriel_Lopez_63297364/',
+    confidence: 0.7,
+    matched_facts: { last: 'Lopez', record_id: '63297364' },
+  },
+  {
+    id: 'c-bn',
+    url: 'https://bustednewspaper.com/arkansas/lopez-gabriel/20260725/',
+    confidence: 0.7,
+    matched_facts: { last: 'Lopez' },
+  },
+];
+
+test('the Gabriel Lopez case: candidates cluster into per-state identities', () => {
+  const profiles = profilesFor(lopezCandidates, LOPEZ);
+  assert.equal(profiles.length, 2);
+  const [fl, ar] = profiles;
+  assert.equal(fl.key, 'FL', 'most evidence leads');
+  assert.equal(fl.link_count, 3);
+  assert.deepEqual(
+    fl.counties.map((c) => c.toLowerCase()).sort(),
+    ['collier', 'lee'],
+    'both of his counties aggregate onto one person'
+  );
+  assert.ok(fl.middles.map((m) => m.toLowerCase()).includes('alexander'));
+  assert.equal(ar.key, 'AR');
+  assert.equal(ar.link_count, 1);
+  assert.ok(isAmbiguous(profiles), 'two states means two people until someone decides');
+});
+
+test('a candidate with no state joins a profile only through shared evidence', () => {
+  const profiles = profilesFor(
+    [
+      ...lopezCandidates,
+      // A page whose URL says nothing about where — but it shares a record id
+      // with the Florida group, and shared evidence is what attaches.
+      {
+        id: 'c-shared',
+        url: 'https://example.net/view-full-profile.php?id=63297364',
+        confidence: 0.7,
+        matched_facts: { record_id: '63297364' },
+      },
+      // One that shares nothing is parked as unknown, never guessed onto a person.
+      { id: 'c-mystery', url: 'https://example.net/some-page', confidence: 0.65, matched_facts: {} },
+    ],
+    LOPEZ
+  );
+  const fl = profiles.find((p) => p.key === 'FL');
+  assert.ok(fl.candidate_ids.includes('c-shared'), 'the shared record id attaches it');
+  const unknown = profiles.find((p) => p.key === 'unknown');
+  assert.ok(unknown && unknown.candidate_ids.includes('c-mystery'));
+  assert.ok(!unknown.candidate_ids.includes('c-shared'));
+});
+
+test('search views never join an identity profile', () => {
+  // A site-search link is BUILT from the current fact pool — it is not
+  // independent evidence of anyone, so it cannot tip the grouping.
+  const profiles = profilesFor(
+    [
+      ...lopezCandidates,
+      {
+        id: 'c-view',
+        url: 'https://leefl.mugshots.zone/?s=LOPEZ+GABRIEL+ALEXANDER',
+        confidence: 0,
+        matched_facts: { kind: 'site_search' },
+      },
+    ],
+    LOPEZ
+  );
+  for (const p of profiles) {
+    assert.ok(!p.candidate_ids.includes('c-view'), `${p.key} must not hold the search view`);
+  }
+});
+
+test('one state means one person — no ambiguity, nothing to decide', () => {
+  const profiles = profilesFor(
+    lopezCandidates.filter((c) => c.id !== 'c-bn'),
+    LOPEZ
+  );
+  assert.equal(profiles.length, 1);
+  assert.ok(!isAmbiguous(profiles));
+});
+
+test('choosing a profile confirms its place and dismisses the other states', async () => {
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  const at = route.indexOf("action === 'choose_profile'");
+  assert.ok(at > -1, 'the profile decision branch exists');
+  const branch = route.slice(at, at + 6000);
+  assert.match(branch, /requireAdmin\(\)/);
+  // The server regroups the stored rows itself — candidate ids arriving from
+  // the client are never trusted.
+  assert.match(branch, /profilesFor\(/);
+  // The identity decision confirms PLACE: state and counties, nothing more.
+  assert.match(branch, /state: \[key\],\s+county: chosen\.counties/);
+  assert.match(branch, /update\(\{ status: 'rejected' \}\)/);
+  // Choosing resolves the run's ambiguity flag rather than leaving it stale.
+  assert.match(branch, /startsWith\('Multiple identities'\)/);
+});
+
+test('an ambiguous run stops compounding and flags the contact', async () => {
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  // The guard needs BOTH nothing pinned and two states seen — a confirmed
+  // state (or a seeded county's state) keeps the run chaining as before.
+  assert.match(
+    engine,
+    /const ambiguous = \(\) => pinnedStates\.length === 0 && statesSeen\.size >= 2/
+  );
+  // The county round, derived date pages, and id pivots are all fact-chaining,
+  // and all three are gated.
+  assert.match(engine, /round === 1 && ambiguous\(\)/);
+  const derivedAt = engine.indexOf('Date-addressed pages, derived rather than searched');
+  const pivotsAt = engine.indexOf('Record-id pivots across a network');
+  assert.ok(derivedAt > -1 && pivotsAt > -1);
+  assert.match(engine.slice(derivedAt, derivedAt + 800), /if \(ambiguous\(\)\) break;/);
+  assert.match(engine.slice(pivotsAt, pivotsAt + 800), /if \(ambiguous\(\)\) break;/);
+  // And the operator is pointed at the decision, in the existing Flagged view.
+  assert.match(engine, /Multiple identities found \(\$\{\[\.\.\.statesSeen\]\.sort\(\)\.join\(', '\)\}\)/);
+});
+
+test('the panel shows identity groups with one decision per person', async () => {
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(panel, /This is them/);
+  assert.match(panel, /Not them/);
+  assert.match(panel, /'choose_profile'/);
+  assert.match(panel, /'reject_profile'/);
+  // Grouping only appears when the queue actually mixes people.
+  assert.match(panel, /stateProfiles\.length >= 2/);
 });
 
 test('a known county can be entered by hand and lands in the confirmed store', async () => {

@@ -68,6 +68,7 @@ export default function ContactPanel({
   const [compose, setCompose] = useState({ subject: '', html: '', accountId: '' });
   const [confirmUrlValue, setConfirmUrlValue] = useState('');
   const [countyValue, setCountyValue] = useState('');
+  const [profiles, setProfiles] = useState<any[]>([]);
 
   const load = useCallback(async () => {
     const [contactRes, linksRes, statusRes, stageRes, fieldsRes, activityRes] = await Promise.all([
@@ -139,7 +140,13 @@ export default function ContactPanel({
 
   const loadCandidates = useCallback(async () => {
     const res = await fetch(`/api/contacts/${contactId}/candidates`);
-    if (res.ok) setCandidates((await res.json()).candidates ?? []);
+    if (res.ok) {
+      const data = await res.json();
+      setCandidates(data.candidates ?? []);
+      // Identity profiles: the same candidates grouped by which PERSON their
+      // page describes. Two or more state groups means the queue mixes people.
+      setProfiles(data.profiles ?? []);
+    }
   }, [contactId]);
 
   const loadCalls = useCallback(async () => {
@@ -307,6 +314,21 @@ export default function ContactPanel({
     if (await mutateConfirmed({ action: 'confirm_url', url }, 'confirm-url')) {
       setConfirmUrlValue('');
     }
+  }
+
+  // One decision per person instead of one per link: "This is them" confirms
+  // the group's state and counties and dismisses the other states' candidates;
+  // "Not them" dismisses just that group. The server regroups the stored
+  // candidates itself, so nothing here is trusted beyond the state key.
+  async function decideProfile(p: any, decision: 'choose_profile' | 'reject_profile') {
+    const where = [p.state, ...(p.counties ?? [])].filter(Boolean).join(', ');
+    const n = p.candidate_ids?.length ?? 0;
+    const msg =
+      decision === 'choose_profile'
+        ? `This is them — ${where}?\n\nThe state and counties are saved as confirmed facts (they seed every run), and candidates from other states are dismissed.`
+        : `Not them — dismiss ${n} ${p.state} candidate${n === 1 ? '' : 's'}?\n\nNothing is saved about the rest; this only clears the wrong person's links.`;
+    if (!confirm(msg)) return;
+    await mutateConfirmed({ action: decision, state: p.state }, `profile-${p.key}`);
   }
 
   // A county typed by a human is truth, not a guess — same store the ✓ writes
@@ -955,27 +977,11 @@ export default function ContactPanel({
               {/* Candidate review. Deep search never fills a slot on its own —
                   someone confirms each URL, and provenance makes the chaining
                   logic auditable while it earns trust. */}
-              {candidates.length > 0 && (
-                <div>
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <div className="text-[10px] font-medium tracking-widest text-gray-500 uppercase dark:text-gray-600">
-                      Candidates found ({newCandidateCount} to review)
-                    </div>
-                    {/* Admin-only, like the deep search that produced these. */}
-                    {isAdmin && (
-                      <button
-                        type="button"
-                        onClick={clearCandidates}
-                        disabled={busy === 'clear'}
-                        title="Remove found links awaiting review and previously dismissed ones. Facts are kept — clear those per row."
-                        className="text-[10px] font-medium text-gray-500 underline decoration-dotted hover:text-red-600 disabled:opacity-50"
-                      >
-                        {busy === 'clear' ? 'Clearing…' : 'Clear links'}
-                      </button>
-                    )}
-                  </div>
-                  <div className="space-y-1.5">
-                    {candidates.map((c) => (
+              {candidates.length > 0 &&
+                (() => {
+                  // One row, rendered identically whether it sits inside an
+                  // identity group or in the flat list below.
+                  const renderCandidate = (c: any) => (
                       <div
                         key={c.id}
                         className={`rounded-lg border px-3 py-2 ${
@@ -1070,10 +1076,109 @@ export default function ContactPanel({
                           )}
                         </div>
                       </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+                  );
+
+                  // Identity grouping. With two or more states in play these
+                  // are different PEOPLE, so the unreviewed queue is shown per
+                  // person with one decision per group instead of one per link.
+                  // Reviewed candidates, search views, and anything without a
+                  // state signal stay in the flat list below the groups.
+                  const stateProfiles = profiles.filter(
+                    (p: any) => p.state && (p.candidate_ids?.length ?? 0) > 0
+                  );
+                  const grouped = stateProfiles.length >= 2;
+                  const byId = new Map(candidates.map((c: any) => [c.id, c]));
+                  const inGroups = new Set(stateProfiles.flatMap((p: any) => p.candidate_ids));
+                  const rest = grouped
+                    ? candidates.filter((c: any) => !inGroups.has(c.id))
+                    : candidates;
+                  const cap = (s: string) => s.replace(/\b\w/g, (ch: string) => ch.toUpperCase());
+
+                  return (
+                    <div>
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <div className="text-[10px] font-medium tracking-widest text-gray-500 uppercase dark:text-gray-600">
+                          Candidates found ({newCandidateCount} to review)
+                        </div>
+                        {/* Admin-only, like the deep search that produced these. */}
+                        {isAdmin && (
+                          <button
+                            type="button"
+                            onClick={clearCandidates}
+                            disabled={busy === 'clear'}
+                            title="Remove found links awaiting review and previously dismissed ones. Facts are kept — clear those per row."
+                            className="text-[10px] font-medium text-gray-500 underline decoration-dotted hover:text-red-600 disabled:opacity-50"
+                          >
+                            {busy === 'clear' ? 'Clearing…' : 'Clear links'}
+                          </button>
+                        )}
+                      </div>
+                      {grouped && (
+                        <div className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] leading-snug text-amber-800">
+                          These candidates describe {stateProfiles.length} different people.
+                          "This is them" saves that group's state and counties as confirmed
+                          facts and dismisses the other states' candidates in one click.
+                        </div>
+                      )}
+                      {grouped &&
+                        stateProfiles.map((p: any) => (
+                          <div key={p.key} className="mb-3">
+                            <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                              <div className="text-[11px] font-semibold text-gray-700">
+                                {p.state}
+                                {p.counties.length > 0 && (
+                                  <span className="font-normal text-gray-500">
+                                    {' '}
+                                    — {p.counties.map(cap).join(', ')}
+                                  </span>
+                                )}
+                                {p.middles.length > 0 && (
+                                  <span className="font-normal text-gray-500">
+                                    {' '}
+                                    · middle {p.middles.map(cap).join('/')}
+                                  </span>
+                                )}
+                                <span className="font-normal text-gray-400">
+                                  {' '}
+                                  · {p.candidate_ids.length} link
+                                  {p.candidate_ids.length === 1 ? '' : 's'}
+                                </span>
+                              </div>
+                              {isAdmin && (
+                                <div className="flex flex-none gap-1">
+                                  <button
+                                    type="button"
+                                    className="btn px-2 py-0.5 text-xs"
+                                    disabled={busy === `profile-${p.key}`}
+                                    onClick={() => decideProfile(p, 'choose_profile')}
+                                    title="Confirm this group's state and counties as this person's, and dismiss the candidates from other states"
+                                  >
+                                    This is them
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn px-2 py-0.5 text-xs text-gray-500"
+                                    disabled={busy === `profile-${p.key}`}
+                                    onClick={() => decideProfile(p, 'reject_profile')}
+                                    title="Dismiss every candidate in this group — it is a different person"
+                                  >
+                                    Not them
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                            <div className="space-y-1.5">
+                              {p.candidate_ids
+                                .map((cid: string) => byId.get(cid))
+                                .filter(Boolean)
+                                .map(renderCandidate)}
+                            </div>
+                          </div>
+                        ))}
+                      <div className="space-y-1.5">{rest.map(renderCandidate)}</div>
+                    </div>
+                  );
+                })()}
             </div>
           )}
 

@@ -383,8 +383,26 @@ export async function runDeepSearchForContact(
   // Domains that produced at least one hit, so we know which sites are worth
   // handing the operator a 'see everything on this site' link for.
   const sitesWithHits = new Set<string>();
+  // Distinct states among accepted candidates. Two states with nothing pinned
+  // means the queue plausibly holds TWO different people, and chaining any
+  // deeper would dig into whichever identity got in first — which is exactly
+  // how a common name went to Arkansas while the client was in Florida. The
+  // run keeps COLLECTING under ambiguity; it stops COMPOUNDING (county round,
+  // derived pages, id pivots) and flags the contact to pick an identity.
+  const statesSeen = new Set<string>();
+  const ambiguous = () => pinnedStates.length === 0 && statesSeen.size >= 2;
 
   for (const round of [0, 1] as const) {
+    // The county round runs on facts round 0 accumulated — under ambiguity
+    // those facts mix two people, so probing them would compound the mix.
+    if (round === 1 && ambiguous()) {
+      await logDebug({
+        source: 'deep-search:facts',
+        message: `Chaining stopped: candidates span ${[...statesSeen].sort().join(', ')} with nothing confirmed — pick the right identity in the panel, then re-run`,
+        contactId,
+      });
+      break;
+    }
     // Round 0: nothing needed, or the lead's own state. Round 1: county-scoped
     // sites, now that round 0 has probably supplied a county.
     const roundSites = sites.filter((s) =>
@@ -517,6 +535,7 @@ export async function runDeepSearchForContact(
         sitesWithHits.add(site.domain);
         // A record's own page teaches us more than the listing row did.
         facts = mergeFacts(facts, rowFacts);
+        for (const st of rowFacts.state) statesSeen.add(st);
         rememberFamilyIds(familyIds, site.family, rowFacts.record_ids);
       }
     }
@@ -648,6 +667,7 @@ export async function runDeepSearchForContact(
       candidates += 1;
       sitesWithHits.add(domain);
       facts = mergeFacts(facts, rowFacts);
+      for (const st of rowFacts.state) statesSeen.add(st);
       rememberFamilyIds(familyIds, site?.family ?? null, rowFacts.record_ids);
     }
   }
@@ -658,6 +678,9 @@ export async function runDeepSearchForContact(
      already in hand the URL is fully determined -- the only route left on a host
      BrightData will not fetch for us, and it costs nothing. */
   for (const site of sitesAll) {
+    // Derived pages are pure fact-chaining — skipped under ambiguity for the
+    // same reason the county round is.
+    if (ambiguous()) break;
     ensureTime();
     if (!site.date_url_template) continue;
     for (const isoDate of facts.booking_dates.slice(0, 3)) {
@@ -701,6 +724,8 @@ export async function runDeepSearchForContact(
      wakepublicrecords .../sample.php?id=140252 are one booking. Once any sibling
      gives up an id, the rest are addressable with no request at all. */
   for (const [family, ids] of familyIds) {
+    // Same reason as above: the ids may belong to two different people.
+    if (ambiguous()) break;
     ensureTime();
     for (const site of sitesAll) {
       if (site.family !== family || !site.record_url_template) continue;
@@ -778,8 +803,25 @@ export async function runDeepSearchForContact(
   await candidateWriter.flush();
 
   // Reuses the existing search_flag, so these land in the contacts grid's
-  // Flagged view with the reason on hover — no new surface to learn.
-  if (unindexedPrioritySites.length) {
+  // Flagged view with the reason on hover — no new surface to learn. Ambiguity
+  // outranks index lag: an unresolved identity makes every other follow-up
+  // premature, and choosing a profile in the panel clears this flag.
+  if (ambiguous()) {
+    const { error } = await supabase
+      .from('contacts')
+      .update({
+        search_flag: `Multiple identities found (${[...statesSeen].sort().join(', ')}) — pick the right one in the panel, then re-run`,
+        search_flagged_at: new Date().toISOString(),
+      })
+      .eq('id', contactId);
+    if (error) {
+      await logDebug({
+        source: 'deep-search:facts',
+        message: `Could not flag the identity ambiguity: ${error.message}`,
+        contactId,
+      });
+    }
+  } else if (unindexedPrioritySites.length) {
     const { error } = await supabase
       .from('contacts')
       .update({
@@ -830,7 +872,8 @@ export async function runDeepSearchForContact(
       `${pivots ? `, derived ${pivots} sibling record(s) from shared ids` : ''}` +
       `${derived ? `, built ${derived} date-addressed page(s) from county + booking date` : ''}` +
       `${siteSearches ? `, ${siteSearches} site search link(s) to check for further arrests` : ''}` +
-      `: ${candidates} new candidate(s) for review${learned ? `. Learned: ${learned}` : ''}`,
+      `: ${candidates} new candidate(s) for review${learned ? `. Learned: ${learned}` : ''}` +
+      `${ambiguous() ? `. Candidates span ${[...statesSeen].sort().join(', ')} — pick the right identity in the panel` : ''}`,
     meta: {
       probed,
       blocked,
