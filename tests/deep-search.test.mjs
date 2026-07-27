@@ -179,23 +179,23 @@ test('dateVariants covers the formats found in titles and paths', () => {
   assert.ok(variants.some((v) => v.startsWith('april 22')));
 });
 
-test('dateWindow pads around known booking dates', () => {
-  // recentlybooked's search requires FromDate/ToDate, so the window is built
-  // from whatever dates round A learned.
-  const w = dateWindow(['2026-04-22']);
-  assert.equal(w.from, '2026-04-15');
-  assert.equal(w.to, '2026-04-29');
-
-  const spread = dateWindow(['2026-04-22', '2025-01-10']);
-  assert.equal(spread.from, '2025-01-03');
-  assert.equal(spread.to, '2026-04-29');
+test('the default window is a rolling seven years ending today', () => {
+  // Every ordinary run gets this window, computed fresh each run. Learned
+  // booking dates deliberately do not narrow it: a window bracketing known
+  // dates excluded a brand-new July 23 record from the very site search that
+  // had it, and an eight-year-old arrest is the only thing seven years cuts.
+  const w = dateWindow([], new Date('2026-07-27T00:00:00Z'));
+  assert.equal(w.from, '2019-07-27');
+  assert.equal(w.to, '2026-07-27');
 });
 
-test('dateWindow falls back to a wide range when no date is known', () => {
-  // Missing a date must not skip the probe — old arrests are the whole point.
-  const w = dateWindow([], new Date('2026-07-25T00:00:00Z'));
-  assert.equal(w.to, '2026-07-25');
-  assert.equal(w.from, '2021-07-25');
+test('a focused window hugs its one arrest', () => {
+  // Passing dates means a run branched into ONE booking; padded a week either
+  // side because sites disagree on arrest vs booking vs publish date.
+  const today = new Date('2026-07-27T12:00:00Z');
+  const w = dateWindow(['2026-04-22'], today);
+  assert.equal(w.from, '2026-04-15');
+  assert.equal(w.to, '2026-04-29');
 });
 
 /* ── Shapes taken verbatim from 1,049 historical client links ───────────── */
@@ -1384,15 +1384,21 @@ test("confirmed pages are mined for the person's other arrests", async () => {
 
 test('a focused run drives every date-built URL from the one arrest', async () => {
   const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  // Site-search windows: an ordinary run passes NO dates (rolling seven-year
+  // window); a focused run passes only its one date. Learned dates never
+  // reach a window either way.
+  assert.match(engine, /const searchWindow = \(\) => dateWindow\(focusDate \? \[focusDate\] : \[\]\)/);
+  const windows = engine.match(/searchWindow\(\)/g) ?? [];
+  assert.ok(windows.length >= 2, `both window call sites use it; saw ${windows.length}`);
+  assert.doesNotMatch(engine, /dateWindow\(facts\.booking_dates\)/);
+  assert.doesNotMatch(engine, /dateWindow\(dateList\(\)\)/);
+  // Derived date-addressed pages still iterate the learned dates (or the one
+  // focus date) — those are exact roster URLs, not search windows.
   assert.match(
     engine,
     /const dateList = \(\) => \(focusDate \? \[focusDate\] : facts\.booking_dates\)/
   );
-  // All three date consumers go through it: probe windows, derived date pages,
-  // and the site-search links. None reads the raw variant set any more.
-  const uses = engine.match(/dateList\(\)/g) ?? [];
-  assert.ok(uses.length >= 3, `expected 3+ dateList() uses, saw ${uses.length}`);
-  assert.doesNotMatch(engine, /dateWindow\(facts\.booking_dates\)/);
+  assert.match(engine, /dateList\(\)\.slice\(0, 3\)/);
   // The date is validated before use, and pinned at the front of the variants
   // so probe URLs are built from it.
   assert.ok(engine.includes('/^\\d{4}-\\d{2}-\\d{2}$/.test(String(opts?.focusDate'));
@@ -1485,4 +1491,87 @@ test('a link a human removed stays removed', async () => {
   const intake = await readFile(new URL('../lib/lead-intake.ts', import.meta.url), 'utf8');
   assert.match(intake, /\.eq\('status', 'rejected'\)/);
   assert.match(intake, /humanRejected\.has\(canonical\)/);
+});
+
+/* ── Search-state icon, dashboard stages, status management, county field ──── */
+
+test('the grid shows deep-search state and can start a run from it', async () => {
+  const page = await readFile(new URL('../app/(app)/contacts/page.tsx', import.meta.url), 'utf8');
+  // Three states from two stamps: amber while queued, green when done, red
+  // when never run. Amber is a state, not a button.
+  assert.match(page, /const running = !!contact\.deep_search_queued_at/);
+  assert.match(page, /text-amber-500/);
+  assert.match(page, /text-red-500/);
+  assert.match(page, /queueDeepSearch\(contact\)/);
+  assert.match(page, /!isAdmin \|\| running/);
+  // The migration feeds both stamps through the grid RPC.
+  const migration = await readFile(
+    new URL('../supabase/migrations/0025_deep_search_state.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /add column if not exists deep_searched_at timestamptz/);
+  assert.match(migration, /c\.deep_searched_at, c\.deep_search_queued_at/);
+  // Enqueue stamps amber; the run's conclusion stamps green and clears it.
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/deep-search/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(route, /deep_search_queued_at: new Date\(\)\.toISOString\(\)/);
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(
+    engine,
+    /deep_searched_at: new Date\(\)\.toISOString\(\), deep_search_queued_at: null/
+  );
+});
+
+test('deleting a status moves its contacts where the admin chose', async () => {
+  const route = await readFile(
+    new URL('../app/api/admin/statuses/[id]/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(route, /requireAdmin\(\)/);
+  // The FK is ON DELETE SET NULL — without the guard, deletion silently
+  // strips the status off every contact in it.
+  assert.match(route, /pick a status to move them to first/);
+  assert.match(route, /update\(\{ status_id: moveTo \}\)/);
+  assert.ok(
+    route.indexOf('status_id: moveTo') < route.indexOf(".delete()"),
+    'contacts move BEFORE the status is deleted'
+  );
+});
+
+test('status edits fail loudly instead of silently vanishing', async () => {
+  const page = await readFile(
+    new URL('../app/(app)/admin/pipeline/page.tsx', import.meta.url),
+    'utf8'
+  );
+  // Zero-rows-affected (a silent RLS denial) and unique-name violations both
+  // get a readable message — this is how a new status "could not be named".
+  assert.match(page, /!data\?\.length/);
+  assert.match(page, /23505/);
+  // Enter commits, and Add picks a unique default name instead of silently
+  // colliding with the unique constraint.
+  assert.match(page, /e\.key === 'Enter' && e\.currentTarget\.blur\(\)/);
+  assert.match(page, /for \(let n = 2; taken\.has\(name\); n \+= 1\)/);
+});
+
+test('the dashboard leads with the stages that need a hand', async () => {
+  const page = await readFile(new URL('../app/(app)/dashboard/page.tsx', import.meta.url), 'utf8');
+  assert.match(page, /'New', 'No Link', 'Pending Service', 'Pending Confirmation'/);
+  assert.doesNotMatch(page, /Avg Reputation Score/);
+  assert.doesNotMatch(page, /Links removed/);
+  assert.doesNotMatch(page, /Live links/);
+  // The contacts box is a link into the grid.
+  assert.match(page, /href: '\/contacts'/);
+});
+
+test('county is editable from the Contact Info tab', async () => {
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  const at = panel.indexOf("tab === 'Contact Info'");
+  assert.ok(at > -1);
+  const block = panel.slice(at, at + 7000);
+  // Same confirmed store and the same chips as the search tab — a county
+  // typed on either tab seeds every run.
+  assert.match(block, /confirmed_facts\?\.county/);
+  assert.match(block, /confirmCounty\(\)/);
 });

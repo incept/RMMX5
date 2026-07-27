@@ -350,8 +350,13 @@ export async function runDeepSearchForContact(
   }
   let facts = mergeFacts(pinned, normalizeFacts(contact.search_facts));
 
-  // The dates driving windows and date-addressed URLs: just the focus date on
-  // a focused run, the whole variant set otherwise.
+  // The FromDate/ToDate window for site searches. An ordinary run passes NO
+  // dates and gets the rolling seven-years-to-today window — learned dates
+  // never narrow it (a bracketing window hid a brand-new record). A focused
+  // run passes its one date and gets a window hugging that arrest.
+  const searchWindow = () => dateWindow(focusDate ? [focusDate] : []);
+  // The dates driving derived date-addressed URLs: just the focus date on a
+  // focused run, the whole variant set otherwise.
   const dateList = () => (focusDate ? [focusDate] : facts.booking_dates);
 
   /**
@@ -560,7 +565,7 @@ export async function runDeepSearchForContact(
     );
     if (!roundSites.length) continue;
 
-    const window = dateWindow(dateList());
+    const window = searchWindow();
     const targets: { site: ProbeSite; url: string }[] = [];
     for (const site of roundSites) {
       const states = site.scope_state
@@ -934,7 +939,7 @@ export async function runDeepSearchForContact(
       name,
       facts.county[0] ?? null,
       facts.state[0] ?? seedState ?? null,
-      dateWindow(dateList())
+      searchWindow()
     );
     if (!url) continue;
     const canonical = canonicalUrl(url);
@@ -971,6 +976,24 @@ export async function runDeepSearchForContact(
       message: `Run hit its ${Math.round(budgetMs / 1000)}s window and concluded early — everything found was kept; re-run to continue`,
       contactId,
     });
+  }
+
+  // The grid's search icon runs on these two stamps: queued ⇒ amber, searched
+  // ⇒ green. Stamped at conclusion so a partial run counts — it kept its
+  // findings. Best-effort: before migration 0025 the columns do not exist,
+  // and that must not fail the run.
+  {
+    const { error } = await supabase
+      .from('contacts')
+      .update({ deep_searched_at: new Date().toISOString(), deep_search_queued_at: null })
+      .eq('id', contactId);
+    if (error) {
+      await logDebug({
+        source: 'deep-search',
+        message: `Could not stamp run completion (migration 0025 run?): ${error.message}`,
+        contactId,
+      });
+    }
   }
 
   // Reuses the existing search_flag, so these land in the contacts grid's
