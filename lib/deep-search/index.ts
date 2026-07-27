@@ -350,8 +350,13 @@ export async function runDeepSearchForContact(
   }
   let facts = mergeFacts(pinned, normalizeFacts(contact.search_facts));
 
-  // The dates driving windows and date-addressed URLs: just the focus date on
-  // a focused run, the whole variant set otherwise.
+  // The FromDate/ToDate window for site searches. An ordinary run passes NO
+  // dates and gets the rolling seven-years-to-today window — learned dates
+  // never narrow it (a bracketing window hid a brand-new record). A focused
+  // run passes its one date and gets a window hugging that arrest.
+  const searchWindow = () => dateWindow(focusDate ? [focusDate] : []);
+  // The dates driving derived date-addressed URLs: just the focus date on a
+  // focused run, the whole variant set otherwise.
   const dateList = () => (focusDate ? [focusDate] : facts.booking_dates);
 
   /**
@@ -560,7 +565,7 @@ export async function runDeepSearchForContact(
     );
     if (!roundSites.length) continue;
 
-    const window = dateWindow(dateList());
+    const window = searchWindow();
     const targets: { site: ProbeSite; url: string }[] = [];
     for (const site of roundSites) {
       const states = site.scope_state
@@ -934,7 +939,7 @@ export async function runDeepSearchForContact(
       name,
       facts.county[0] ?? null,
       facts.state[0] ?? seedState ?? null,
-      dateWindow(dateList())
+      searchWindow()
     );
     if (!url) continue;
     const canonical = canonicalUrl(url);

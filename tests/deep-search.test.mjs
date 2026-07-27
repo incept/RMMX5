@@ -179,30 +179,23 @@ test('dateVariants covers the formats found in titles and paths', () => {
   assert.ok(variants.some((v) => v.startsWith('april 22')));
 });
 
-test('dateWindow pads around known booking dates but always reaches today', () => {
-  // recentlybooked's search requires FromDate/ToDate, so the window is built
-  // from whatever dates round A learned — but its far edge must reach today,
-  // or a NEWER arrest than the ones known is excluded from the very site
-  // search that would find it (how a fresh July 23 record went unseen).
+test('the default window is a rolling seven years ending today', () => {
+  // Every ordinary run gets this window, computed fresh each run. Learned
+  // booking dates deliberately do not narrow it: a window bracketing known
+  // dates excluded a brand-new July 23 record from the very site search that
+  // had it, and an eight-year-old arrest is the only thing seven years cuts.
+  const w = dateWindow([], new Date('2026-07-27T00:00:00Z'));
+  assert.equal(w.from, '2019-07-27');
+  assert.equal(w.to, '2026-07-27');
+});
+
+test('a focused window hugs its one arrest', () => {
+  // Passing dates means a run branched into ONE booking; padded a week either
+  // side because sites disagree on arrest vs booking vs publish date.
   const today = new Date('2026-07-27T12:00:00Z');
   const w = dateWindow(['2026-04-22'], today);
   assert.equal(w.from, '2026-04-15');
-  assert.equal(w.to, '2026-07-27', 'the far edge is today, not the stale padded date');
-
-  const spread = dateWindow(['2026-04-22', '2025-01-10'], today);
-  assert.equal(spread.from, '2025-01-03');
-  assert.equal(spread.to, '2026-07-27');
-
-  // A booking date in the future of "today" (site clock skew) keeps its pad.
-  const fresh = dateWindow(['2026-07-26'], today);
-  assert.equal(fresh.to, '2026-08-02');
-});
-
-test('dateWindow falls back to a wide range when no date is known', () => {
-  // Missing a date must not skip the probe — old arrests are the whole point.
-  const w = dateWindow([], new Date('2026-07-25T00:00:00Z'));
-  assert.equal(w.to, '2026-07-25');
-  assert.equal(w.from, '2021-07-25');
+  assert.equal(w.to, '2026-04-29');
 });
 
 /* ── Shapes taken verbatim from 1,049 historical client links ───────────── */
@@ -1391,15 +1384,21 @@ test("confirmed pages are mined for the person's other arrests", async () => {
 
 test('a focused run drives every date-built URL from the one arrest', async () => {
   const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  // Site-search windows: an ordinary run passes NO dates (rolling seven-year
+  // window); a focused run passes only its one date. Learned dates never
+  // reach a window either way.
+  assert.match(engine, /const searchWindow = \(\) => dateWindow\(focusDate \? \[focusDate\] : \[\]\)/);
+  const windows = engine.match(/searchWindow\(\)/g) ?? [];
+  assert.ok(windows.length >= 2, `both window call sites use it; saw ${windows.length}`);
+  assert.doesNotMatch(engine, /dateWindow\(facts\.booking_dates\)/);
+  assert.doesNotMatch(engine, /dateWindow\(dateList\(\)\)/);
+  // Derived date-addressed pages still iterate the learned dates (or the one
+  // focus date) — those are exact roster URLs, not search windows.
   assert.match(
     engine,
     /const dateList = \(\) => \(focusDate \? \[focusDate\] : facts\.booking_dates\)/
   );
-  // All three date consumers go through it: probe windows, derived date pages,
-  // and the site-search links. None reads the raw variant set any more.
-  const uses = engine.match(/dateList\(\)/g) ?? [];
-  assert.ok(uses.length >= 3, `expected 3+ dateList() uses, saw ${uses.length}`);
-  assert.doesNotMatch(engine, /dateWindow\(facts\.booking_dates\)/);
+  assert.match(engine, /dateList\(\)\.slice\(0, 3\)/);
   // The date is validated before use, and pinned at the front of the variants
   // so probe URLs are built from it.
   assert.ok(engine.includes('/^\\d{4}-\\d{2}-\\d{2}$/.test(String(opts?.focusDate'));

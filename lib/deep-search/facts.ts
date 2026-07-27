@@ -195,17 +195,25 @@ export function dateVariants(iso: string): string[] {
 
 /**
  * The FromDate/ToDate window some site searches require (recentlybooked wants
- * one). Centred on the booking dates we already know, padded a week either side
- * because sites disagree on arrest vs booking vs publish date. With no date
- * known yet, falls back to a wide window rather than skipping the probe — an
- * old arrest is exactly what a client wants removed.
+ * one).
+ *
+ * Called with NO dates — every ordinary run — it is a rolling window: today
+ * back seven years, computed fresh each run. Known booking dates deliberately
+ * do not narrow it: a window bracketing known dates excluded both newer and
+ * older arrests from the very site search that had them (a fresh July 23
+ * record sat invisible behind a window built from older dates).
+ *
+ * Called WITH dates — a run focused on one arrest — the window hugs those
+ * dates, padded a week either side because sites disagree on arrest vs
+ * booking vs publish date. Digging into one booking is the one time narrow
+ * is right.
  */
 export function dateWindow(dates: string[], today = new Date()): { from: string; to: string } {
   const iso = (d: Date) => d.toISOString().slice(0, 10);
   const valid = dates.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
   if (!valid.length) {
     const from = new Date(today);
-    from.setFullYear(from.getFullYear() - 5);
+    from.setFullYear(from.getFullYear() - 7);
     return { from: iso(from), to: iso(today) };
   }
   const pad = (d: string, days: number) => {
@@ -213,12 +221,5 @@ export function dateWindow(dates: string[], today = new Date()): { from: string;
     dt.setUTCDate(dt.getUTCDate() + days);
     return iso(dt);
   };
-  // The far edge always reaches today. A window bracketing only the dates
-  // already known EXCLUDES any arrest newer than them from a FromDate/ToDate
-  // site search — and a brand-new booking is exactly what a monitoring product
-  // exists to catch (a July 23 record on recentlybooked sat invisible behind a
-  // window built from older dates).
-  const paddedTo = pad(valid[valid.length - 1], 7);
-  const todayIso = iso(today);
-  return { from: pad(valid[0], -7), to: paddedTo > todayIso ? paddedTo : todayIso };
+  return { from: pad(valid[0], -7), to: pad(valid[valid.length - 1], 7) };
 }
