@@ -6,7 +6,7 @@ import { logActivity } from '@/lib/activity';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 import { canonicalUrl } from '@/lib/integrations/brightdata';
-import { splitName } from '@/lib/deep-search/facts';
+import { mergeFacts, normalizeFacts, splitName, stateCode } from '@/lib/deep-search/facts';
 import {
   addConfirmedFact,
   clearLearnedFact,
@@ -14,6 +14,7 @@ import {
   isConfirmableKey,
   removeConfirmedFact,
 } from '@/lib/deep-search/confirmed';
+import { profilesFor } from '@/lib/deep-search/profiles';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -22,15 +23,30 @@ export async function GET(_request: Request, { params }: Params) {
   if ('error' in auth) return auth.error;
   const { id } = await params;
 
-  const { data, error } = await createAdminClient()
-    .from('search_candidates')
-    .select('*')
-    .eq('contact_id', id)
-    .order('status')
-    .order('confidence', { ascending: false })
-    .limit(200);
+  const admin = createAdminClient();
+  const [{ data, error }, { data: contact }] = await Promise.all([
+    admin
+      .from('search_candidates')
+      .select('*')
+      .eq('contact_id', id)
+      .order('status')
+      .order('confidence', { ascending: false })
+      .limit(200),
+    admin.from('contacts').select('name').eq('id', id).maybeSingle(),
+  ]);
   if (error) return NextResponse.json({ error: error.message }, { status: 400 });
-  return NextResponse.json({ candidates: data ?? [] });
+
+  // Identity profiles: group the UNREVIEWED candidates by which person their
+  // page describes, so a common name reads as "two people, pick one" instead of
+  // noise. Computed from the same rows on every read — no second store.
+  const rows = data ?? [];
+  const profiles = contact?.name
+    ? profilesFor(
+        rows.filter((c: any) => c.status === 'new'),
+        splitName(contact.name)
+      )
+    : [];
+  return NextResponse.json({ candidates: rows, profiles });
 }
 
 /**
@@ -212,6 +228,119 @@ export async function PATCH(request: Request, { params }: Params) {
         description: `Cleared found ${body.key} values`,
       });
       return NextResponse.json({ ok: true, search_facts: next });
+    } catch (error) {
+      return apiFailure('api:contacts/[id]/candidates', error, { contactId: id });
+    }
+  }
+
+  // Decide which PERSON the review queue is about. choose_profile makes the
+  // picked identity's place (state + counties) confirmed truth and dismisses
+  // every candidate anchored to a different state in one motion; reject_profile
+  // dismisses one identity without asserting anything about the rest. Both are
+  // the whole point of grouping: a common name should cost one decision, not
+  // one decision per link.
+  if (action === 'choose_profile' || action === 'reject_profile') {
+    const adminAuth = await requireAdmin();
+    if ('error' in adminAuth) return adminAuth.error;
+    try {
+      const key = stateCode(typeof body.state === 'string' ? body.state : '');
+      if (!key) {
+        return NextResponse.json(
+          { error: 'state (a two-letter profile key) is required' },
+          { status: 400 }
+        );
+      }
+      const [{ data: c, error: readError }, { data: pending, error: candError }] =
+        await Promise.all([
+          admin
+            .from('contacts')
+            .select('name, confirmed_facts, search_flag')
+            .eq('id', id)
+            .maybeSingle(),
+          admin
+            .from('search_candidates')
+            .select('id, url, confidence, matched_facts')
+            .eq('contact_id', id)
+            .eq('status', 'new')
+            .limit(500),
+        ]);
+      if (readError) throw readError;
+      if (candError) throw candError;
+      if (!c) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+
+      // Recomputed here rather than trusted from the client, so the ids acted
+      // on are exactly the ids the GET grouped from the same rows.
+      const profiles = profilesFor((pending ?? []) as any[], splitName(String(c.name ?? '')));
+      const chosen = profiles.find((p) => p.key === key);
+      if (!chosen) {
+        return NextResponse.json(
+          { error: `No ${key} profile among the current candidates` },
+          { status: 400 }
+        );
+      }
+
+      if (action === 'reject_profile') {
+        const { data: rej, error: writeError } = await admin
+          .from('search_candidates')
+          .update({ status: 'rejected' })
+          .in('id', chosen.candidate_ids)
+          .select('id');
+        if (writeError) throw writeError;
+        const n = rej?.length ?? 0;
+        await logActivity({
+          contactId: id,
+          actorId: adminAuth.profile.id,
+          type: 'updated',
+          description: `Dismissed the ${key} identity (${n} candidate${n === 1 ? '' : 's'})`,
+        });
+        return NextResponse.json({ ok: true, rejected: n });
+      }
+
+      // Confirm the chosen identity's PLACE. State and counties are what the
+      // partition was built on; middle names and dates stay learned facts —
+      // they are corroboration, not the identity decision itself.
+      const nextFacts = mergeFacts(normalizeFacts(c.confirmed_facts), {
+        state: [key],
+        county: chosen.counties,
+      });
+      const { error: writeError } = await admin
+        .from('contacts')
+        .update({
+          confirmed_facts: nextFacts,
+          // A run that saw two possible people flags the contact; choosing one
+          // is the resolution, so the flag goes with the decision.
+          ...(String(c.search_flag ?? '').startsWith('Multiple identities')
+            ? { search_flag: null, search_flagged_at: null }
+            : {}),
+        })
+        .eq('id', id);
+      if (writeError) throw writeError;
+
+      const losers = profiles
+        .filter((p) => p.state && p.key !== key)
+        .flatMap((p) => p.candidate_ids);
+      let rejected = 0;
+      if (losers.length) {
+        const { data: rej, error: rejError } = await admin
+          .from('search_candidates')
+          .update({ status: 'rejected' })
+          .in('id', losers)
+          .select('id');
+        if (rejError) throw rejError;
+        rejected = rej?.length ?? 0;
+      }
+
+      await logActivity({
+        contactId: id,
+        actorId: adminAuth.profile.id,
+        type: 'updated',
+        description: `Chose the ${key} identity — confirmed the state${
+          chosen.counties.length
+            ? ` and count${chosen.counties.length === 1 ? 'y' : 'ies'} ${chosen.counties.join(', ')}`
+            : ''
+        }; dismissed ${rejected} candidate${rejected === 1 ? '' : 's'} from other states`,
+      });
+      return NextResponse.json({ ok: true, confirmed_facts: nextFacts, rejected });
     } catch (error) {
       return apiFailure('api:contacts/[id]/candidates', error, { contactId: id });
     }
