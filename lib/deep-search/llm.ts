@@ -13,6 +13,9 @@ import { readResponseText } from '@/lib/request-limits';
 
 const HAIKU = 'claude-haiku-4-5-20251001';
 const MAX_PAGE_CHARS = 14_000;
+// Haiku answers a 14k-char extraction in a few seconds; 20s is generous. The
+// old 45s cap let ONE slow call eat half a deep-search run's 95s window.
+const EXTRACT_TIMEOUT_MS = 20_000;
 
 
 /**
@@ -66,8 +69,8 @@ export async function extractRowsWithLlm(
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       signal: opts?.signal
-        ? AbortSignal.any([opts.signal, AbortSignal.timeout(45_000)])
-        : AbortSignal.timeout(45_000),
+        ? AbortSignal.any([opts.signal, AbortSignal.timeout(EXTRACT_TIMEOUT_MS)])
+        : AbortSignal.timeout(EXTRACT_TIMEOUT_MS),
       headers: {
         'x-api-key': cfg.api_key,
         'anthropic-version': '2023-06-01',

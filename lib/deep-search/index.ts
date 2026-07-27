@@ -290,12 +290,20 @@ export async function runDeepSearchForContact(
   const focusDate = /^\d{4}-\d{2}-\d{2}$/.test(String(opts?.focusDate ?? ''))
     ? (opts!.focusDate as string)
     : null;
-  const deadlineSignal = AbortSignal.timeout(
-    Math.min(Math.max(opts?.deadlineMs ?? 95_000, 10_000), 110_000)
-  );
+  const budgetMs = Math.min(Math.max(opts?.deadlineMs ?? 95_000, 10_000), 110_000);
+  const deadlineSignal = AbortSignal.timeout(budgetMs);
   const signal = opts?.signal ? AbortSignal.any([deadlineSignal, opts.signal]) : deadlineSignal;
-  const ensureTime = () => {
-    if (signal.aborted) throw new Error('Deep search reached its execution deadline');
+  // Time is a budget, not a tripwire. The old guard THREW at the deadline,
+  // which destroyed the run — candidates unflushed, facts unpersisted, and the
+  // job retried into the same wall, so a minute of paid fetches bought nothing.
+  // Now every phase loop breaks on outOfTime() and the run CONCLUDES with what
+  // it found, and msLeft() lets expensive phases skip work they cannot finish.
+  const startedAt = Date.now();
+  const msLeft = () => budgetMs - (Date.now() - startedAt);
+  let deadlineHit = false;
+  const outOfTime = () => {
+    if (!deadlineHit && signal.aborted) deadlineHit = true;
+    return deadlineHit;
   };
 
   const { data: contact } = await supabase
@@ -446,16 +454,27 @@ export async function runDeepSearchForContact(
   let minedListings = 0;
   for (const pageUrl of confirmedUrls) {
     if (minedPages >= MAX_CONFIRMED_PAGE_FETCHES) break;
-    ensureTime();
+    // Mining is a bonus phase and can cost a browser fetch plus an extraction
+    // call per page; the probe rounds behind it are the core of the run. So it
+    // only runs while a comfortable margin remains — this is what let mining
+    // eat the whole window and starve the probes on its first night out.
+    if (outOfTime() || msLeft() < 60_000) break;
     const site = sitesAll.find((s) => urlOnDomain(pageUrl, s.domain));
     if (!site) continue; // a news article or social post has no roster to mine
     minedPages += 1;
 
-    const outcome = await fetchProbePage(pageUrl, {
-      render: site.needs_render,
-      needsBrowser: site.needs_browser,
-      signal,
-    });
+    let outcome: Awaited<ReturnType<typeof fetchProbePage>>;
+    try {
+      outcome = await fetchProbePage(pageUrl, {
+        render: site.needs_render,
+        needsBrowser: site.needs_browser,
+        signal,
+      });
+    } catch (e) {
+      // An abort mid-fetch (deadline, lease loss) concludes the run; it must
+      // never destroy it.
+      outcome = { ok: false, reason: errorMessage(e), blocked: false };
+    }
     if (!outcome.ok) {
       await logProbeFailure(site.domain, pageUrl, outcome.reason, contactId);
       continue;
@@ -568,16 +587,21 @@ export async function runDeepSearchForContact(
     rounds += 1;
 
     for (const { site, url } of targets) {
-      ensureTime();
+      if (outOfTime()) break;
       if (probed >= MAX_PROBES_PER_RUN) break;
       probed += 1;
       await sleep(PER_DOMAIN_DELAY_MS);
 
-      const outcome = await fetchProbePage(url, {
-        render: site.needs_render,
-        needsBrowser: site.needs_browser,
-        signal,
-      });
+      let outcome: Awaited<ReturnType<typeof fetchProbePage>>;
+      try {
+        outcome = await fetchProbePage(url, {
+          render: site.needs_render,
+          needsBrowser: site.needs_browser,
+          signal,
+        });
+      } catch (e) {
+        outcome = { ok: false, reason: errorMessage(e), blocked: false };
+      }
       if (!outcome.ok) {
         blocked += 1;
         blockedDomains.add(site.domain);
@@ -706,7 +730,10 @@ export async function runDeepSearchForContact(
   }
 
   for (const domain of fallbackDomains) {
-    ensureTime();
+    // Never start a fallback that cannot finish: both engines run against a
+    // FALLBACK_TIMEOUT_MS deadline, so launching one with less than that on
+    // the clock only manufactures timeout warnings (last night's logs).
+    if (outOfTime() || msLeft() < FALLBACK_TIMEOUT_MS + 5_000) break;
     // Unquoted on purpose. These sites render "BEACHAK GENE MICHAEL" or
     // "Beachak, Gene", so an exact-phrase "Gene Beachak" can return nothing at
     // all. site: already narrows hard, and scoreCorroboration supplies the
@@ -812,7 +839,7 @@ export async function runDeepSearchForContact(
     // Derived pages are pure fact-chaining — skipped under ambiguity for the
     // same reason the county round is.
     if (ambiguous()) break;
-    ensureTime();
+    if (outOfTime()) break;
     if (!site.date_url_template) continue;
     for (const isoDate of dateList().slice(0, 3)) {
       for (const county of (facts.county.length ? facts.county : [null]).slice(0, 2)) {
@@ -857,7 +884,7 @@ export async function runDeepSearchForContact(
   for (const [family, ids] of familyIds) {
     // Same reason as above: the ids may belong to two different people.
     if (ambiguous()) break;
-    ensureTime();
+    if (outOfTime()) break;
     for (const site of sitesAll) {
       if (site.family !== family || !site.record_url_template) continue;
       for (const id of ids) {
@@ -900,7 +927,7 @@ export async function runDeepSearchForContact(
      search VIEW rather than a finding — a search URL is not removable content,
      so it must never land in a link slot. */
   for (const site of sitesAll) {
-    ensureTime();
+    if (outOfTime()) break;
     if (!site.search_template || !sitesWithHits.has(site.domain)) continue;
     const url = buildProbeUrl(
       site.search_template,
@@ -932,6 +959,19 @@ export async function runDeepSearchForContact(
     siteSearches += 1;
   }
   await candidateWriter.flush();
+
+  // Say plainly that the window closed early. The candidates above were still
+  // flushed and the facts below still persist — a partial run is a shorter
+  // run, never a lost one — and the job completes instead of retrying into
+  // the same wall.
+  if (deadlineHit) {
+    await logDebug({
+      level: 'warn',
+      source: 'deep-search',
+      message: `Run hit its ${Math.round(budgetMs / 1000)}s window and concluded early — everything found was kept; re-run to continue`,
+      contactId,
+    });
+  }
 
   // Reuses the existing search_flag, so these land in the contacts grid's
   // Flagged view with the reason on hover — no new surface to learn. Ambiguity
@@ -1005,7 +1045,8 @@ export async function runDeepSearchForContact(
       `${derived ? `, built ${derived} date-addressed page(s) from county + booking date` : ''}` +
       `${siteSearches ? `, ${siteSearches} site search link(s) to check for further arrests` : ''}` +
       `: ${candidates} new candidate(s) for review${learned ? `. Learned: ${learned}` : ''}` +
-      `${ambiguous() ? `. Candidates span ${[...statesSeen].sort().join(', ')} — pick the right identity in the panel` : ''}`,
+      `${ambiguous() ? `. Candidates span ${[...statesSeen].sort().join(', ')} — pick the right identity in the panel` : ''}` +
+      `${deadlineHit ? '. Hit the time limit — partial results; re-run to continue' : ''}`,
     meta: {
       probed,
       blocked,

@@ -2,6 +2,7 @@ import { createAdminClient } from '@/lib/supabase/server';
 import {
   runSerpSearch,
   mergeSerpResults,
+  canonicalUrl,
   type SearchEngine,
   type SerpResult,
 } from '@/lib/integrations/brightdata';
@@ -209,10 +210,27 @@ export async function runAutoSearchForContact(
   const usedPositions = new Set((existing ?? []).filter((l) => l.url).map((l) => l.position));
   const existingUrls = new Set((existing ?? []).map((l) => l.url));
 
+  // URLs a human already dismissed or pulled out of a slot. Checking only the
+  // CURRENT slots meant a deleted link was re-placed on the very next search —
+  // the same roster page came back every run no matter how often the operator
+  // removed it. A deletion is a decision, and decisions are remembered as
+  // rejected candidates (see the links route).
+  const { data: rejectedRows } = await supabase
+    .from('search_candidates')
+    .select('canonical_url')
+    .eq('contact_id', contactId)
+    .eq('status', 'rejected')
+    .limit(5_000);
+  const humanRejected = new Set(
+    ((rejectedRows ?? []) as any[]).map((r) => r.canonical_url).filter(Boolean)
+  );
+
   let inserted = 0;
   let position = 1;
   for (const result of relevant) {
     if (existingUrls.has(result.link)) continue;
+    const canonical = canonicalUrl(result.link);
+    if (canonical && humanRejected.has(canonical)) continue;
     while (usedPositions.has(position) && position <= 14) position += 1;
     if (position > 14) break;
 
