@@ -67,6 +67,7 @@ export default function ContactPanel({
   const [note, setNote] = useState('');
   const [compose, setCompose] = useState({ subject: '', html: '', accountId: '' });
   const [confirmUrlValue, setConfirmUrlValue] = useState('');
+  const [countyValue, setCountyValue] = useState('');
 
   const load = useCallback(async () => {
     const [contactRes, linksRes, statusRes, stageRes, fieldsRes, activityRes] = await Promise.all([
@@ -305,6 +306,21 @@ export default function ContactPanel({
     }
     if (await mutateConfirmed({ action: 'confirm_url', url }, 'confirm-url')) {
       setConfirmUrlValue('');
+    }
+  }
+
+  // A county typed by a human is truth, not a guess — same store the ✓ writes
+  // to, so it seeds every run even before the first search finds anything.
+  async function confirmCounty() {
+    const county = countyValue.trim();
+    if (!county) return;
+    if (
+      await mutateConfirmed(
+        { action: 'confirm_fact', key: 'county', value: county },
+        'confirm-county'
+      )
+    ) {
+      setCountyValue('');
     }
   }
 
@@ -879,6 +895,34 @@ export default function ContactPanel({
                   </div>
                 );
               })()}
+
+              {/* Enter a county you already know. It shows up above as a 🔒
+                  confirmed chip, steers the county-based probe sites, and is
+                  most valuable BEFORE the first run — a common name plus a
+                  known county is the difference between one match and five. */}
+              {isAdmin && (
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={countyValue}
+                    onChange={(e) => setCountyValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') confirmCounty();
+                    }}
+                    placeholder="Add a known county (e.g. Collier)"
+                    className="min-w-0 flex-1 rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] dark:text-gray-900"
+                  />
+                  <button
+                    type="button"
+                    className="btn px-2.5 py-1 text-xs"
+                    disabled={busy === 'confirm-county' || !countyValue.trim()}
+                    onClick={confirmCounty}
+                    title="Save as a confirmed county — it seeds every deep search and outranks whatever a search finds"
+                  >
+                    {busy === 'confirm-county' ? 'Saving…' : 'Add county'}
+                  </button>
+                </div>
+              )}
 
               {/* Confirm a URL a human found — a page you know is this person's,
                   whether or not a search surfaced it. It becomes truth (its

@@ -1187,8 +1187,39 @@ test('the status filter is a single dropdown, not a chip per status', async () =
   // fold. The colour dot stays, because that cue is shared with the rows.
   const page = await readFile(new URL('../app/(app)/contacts/page.tsx', import.meta.url), 'utf8');
   assert.match(page, /aria-label="Filter by status"/);
-  assert.match(page, /<option value="">Any status<\/option>/);
+  assert.match(page, /<option value="">Any<\/option>/);
   assert.match(page, /statuses\.map\(\(s\) => \(\s*<option/);
   // The old row of buttons is gone.
   assert.doesNotMatch(page, /onClick=\{\(\) => setStatusFilter\(statusFilter === s\.id \? '' : s\.id\)\}/);
+});
+
+test('the toolbar is tightened: short labels, no owner view, green New button', async () => {
+  const page = await readFile(new URL('../app/(app)/contacts/page.tsx', import.meta.url), 'utf8');
+  // Contacts aren't assigned to owners at this time, so the view chip is gone
+  // (the ViewId type keeps 'mine' because the counts RPC still returns it).
+  assert.doesNotMatch(page, /label: 'My contacts'/);
+  // The flag view is icon-only and 'New this week' is just 'New'; the title
+  // attribute carries what the longer labels used to say.
+  assert.match(page, /label: '⚑', title:/);
+  assert.match(page, /label: 'New', title:/);
+  assert.doesNotMatch(page, /New this week/);
+  // The primary button is a translucent green pill labelled New — red was the
+  // one saturated fill on the page and read as a warning, not an invitation.
+  assert.match(page, /bg-green-600\/15/);
+  assert.doesNotMatch(page, /bg-red-600/);
+});
+
+test('a known county can be entered by hand and lands in the confirmed store', async () => {
+  // Seeding matters most BEFORE the first run: a common name plus a known
+  // county is the difference between one match and five (the Gabriel Lopez
+  // problem). Both entry points must write confirmed_facts — the store that
+  // seeds every run — not the learned search_facts a clear would wipe.
+  const page = await readFile(new URL('../app/(app)/contacts/page.tsx', import.meta.url), 'utf8');
+  assert.match(page, /confirmed_facts: \{ county: \[county\] \}/, 'new-contact modal seeds county');
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(
+    panel,
+    /action: 'confirm_fact', key: 'county', value: county/,
+    'panel adds a county through the same confirm_fact action the ✓ uses'
+  );
 });
