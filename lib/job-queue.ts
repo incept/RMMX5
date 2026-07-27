@@ -119,6 +119,8 @@ async function handleJob(job: any, signal?: AbortSignal) {
         deadlineMs: 95_000,
         requestKey: `job:${job.id}:attempt:${job.attempt_count}`,
         signal,
+        // A focused run digs into one arrest of a multi-arrest person.
+        focusDate: typeof payload.focusDate === 'string' ? payload.focusDate : undefined,
       }
     );
     return;

@@ -201,10 +201,21 @@ export default function ContactPanel({
     }
   }
 
-  async function runDeepSearch() {
-    setBusy('deep');
+  // With a focusDate the run branches out ONE arrest: that date drives every
+  // search window and date-built URL, so a three-arrest person gets three
+  // focused sweeps instead of one blurred one.
+  async function runDeepSearch(focusDate?: string) {
+    setBusy(focusDate ? `deep-${focusDate}` : 'deep');
     try {
-      const res = await fetch(`/api/contacts/${contactId}/deep-search`, { method: 'POST' });
+      const res = await fetch(`/api/contacts/${contactId}/deep-search`, {
+        method: 'POST',
+        ...(focusDate
+          ? {
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ focusDate }),
+            }
+          : {}),
+      });
       // A 500 from an unhandled server error carries no JSON body, and parsing
       // it threw BEFORE the spinner was cleared — so a request that failed
       // outright looked like a button that span forever. Never let the shape of
@@ -214,7 +225,9 @@ export default function ContactPanel({
         alert(
           data.duplicate
             ? 'Deep search is already queued.'
-            : 'Deep search queued. Results will appear after the next worker tick.'
+            : focusDate
+              ? `Deep search queued, focused on the ${focusDate} arrest.`
+              : 'Deep search queued. Results will appear after the next worker tick.'
         );
       } else {
         alert(data.error ?? `Deep search failed (HTTP ${res.status})`);
@@ -793,7 +806,7 @@ export default function ContactPanel({
                   className="btn"
                   disabled={busy === 'deep'}
                   title="Searches the mugshot sites' own search pages, then chains what they reveal (middle name, county) into deeper probes. Mostly free page fetches; a site that blocks us falls back to a Google site: query, up to 4 SERP requests per run."
-                  onClick={runDeepSearch}
+                  onClick={() => runDeepSearch()}
                 >
                   {busy === 'deep' ? 'Probing…' : '🕵 Deep search'}
                 </button>
@@ -857,6 +870,17 @@ export default function ContactPanel({
                                 ×
                               </button>
                             )}
+                            {key === 'booking_dates' && isAdmin && (
+                              <button
+                                type="button"
+                                disabled={busy === `deep-${v}`}
+                                onClick={() => runDeepSearch(v)}
+                                className="text-green-700 hover:text-brand-700 disabled:opacity-50"
+                                title={`Branch a deep search focused on the ${v} arrest — every probe window and date-built URL uses this date alone`}
+                              >
+                                {busy === `deep-${v}` ? '…' : '⌕'}
+                              </button>
+                            )}
                           </span>
                         ))}
                         {learnedOnly.map((v: string) => (
@@ -879,6 +903,17 @@ export default function ContactPanel({
                                 title={`Confirm and save "${v}" as this contact's ${label.toLowerCase()} — it then outranks anything a search finds, seeds every run, and is kept when you clear links`}
                               >
                                 ✓
+                              </button>
+                            )}
+                            {key === 'booking_dates' && isAdmin && (
+                              <button
+                                type="button"
+                                disabled={busy === `deep-${v}`}
+                                onClick={() => runDeepSearch(v)}
+                                className="text-gray-500 hover:text-brand-700 disabled:opacity-50"
+                                title={`Branch a deep search focused on the ${v} arrest — every probe window and date-built URL uses this date alone`}
+                              >
+                                {busy === `deep-${v}` ? '…' : '⌕'}
                               </button>
                             )}
                           </span>
@@ -911,6 +946,16 @@ export default function ContactPanel({
                           >
                             {busy === `clear-fact-${key}` ? 'clearing…' : 'clear'}
                           </button>
+                        )}
+                        {/* Two dates = two arrests. The ⌕ on each date branches
+                            a search that digs into that one booking. */}
+                        {key === 'booking_dates' && conf.length + learnedOnly.length >= 2 && (
+                          <span
+                            className="text-[10px] font-medium text-amber-600"
+                            title="Each date is a separate booking — branch a focused search per arrest with ⌕"
+                          >
+                            {conf.length + learnedOnly.length} arrests on record
+                          </span>
                         )}
                       </div>
                     ))}

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { enqueueJob } from '@/lib/job-queue';
+import { readJsonBody } from '@/lib/request-limits';
 import { logDebug, errorMessage } from '@/lib/debug-log';
 
 type Params = { params: Promise<{ id: string }> };
@@ -8,12 +9,21 @@ type Params = { params: Promise<{ id: string }> };
 export const maxDuration = 15;
 
 /** Enqueues deep search; expensive browser/provider work never lives in this request. */
-export async function POST(_request: Request, { params }: Params) {
+export async function POST(request: Request, { params }: Params) {
   const auth = await requireAdmin();
   if ('error' in auth) return auth.error;
   const { id } = await params;
 
   try {
+    // Optional body: { focusDate: 'yyyy-mm-dd' } branches out ONE arrest of a
+    // multi-arrest person — that date drives every window and date-built URL.
+    // The body is absent on a plain run, so a parse failure means unfocused.
+    const body = await readJsonBody(request, 4 * 1024).catch(() => ({}) as any);
+    const focusDate =
+      typeof body?.focusDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.focusDate)
+        ? body.focusDate
+        : null;
+
     const { data: contact } = await auth.supabase
       .from('contacts')
       .select('id')
@@ -21,12 +31,14 @@ export async function POST(_request: Request, { params }: Params) {
       .maybeSingle();
     if (!contact) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
 
-    // Collapse repeat clicks while still allowing a fresh sweep in a later hour.
+    // Collapse repeat clicks while still allowing a fresh sweep in a later
+    // hour. A focused run keys on its date too: branching three arrests
+    // back-to-back is the intended use, not a repeat click.
     const hour = Math.floor(Date.now() / 3_600_000);
     const result = await enqueueJob(
       'deep_search',
-      { contactId: id, actorId: auth.profile.id },
-      `deep-search:${id}:${hour}`,
+      { contactId: id, actorId: auth.profile.id, ...(focusDate ? { focusDate } : {}) },
+      `deep-search:${id}:${hour}${focusDate ? `:${focusDate}` : ''}`,
       2
     );
     return NextResponse.json(
