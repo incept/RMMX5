@@ -44,12 +44,14 @@ type SortKey =
   | 'email_opens'
   | 'email_clicks';
 type ViewId = 'all' | 'mine' | 'clients' | 'flagged' | 'recent';
-const VIEW_DEFS: { id: ViewId; label: string }[] = [
+// 'mine' stays in the type (the counts RPC still returns it) but has no chip:
+// contacts aren't assigned to owners at this time. The flag view is icon-only
+// and 'recent' is just "New" — the count beside each label carries the detail.
+const VIEW_DEFS: { id: ViewId; label: string; title?: string }[] = [
   { id: 'all', label: 'All' },
-  { id: 'mine', label: 'My contacts' },
   { id: 'clients', label: 'Clients' },
-  { id: 'flagged', label: '⚑ Flagged' },
-  { id: 'recent', label: 'New this week' },
+  { id: 'flagged', label: '⚑', title: 'Flagged — the search wants a re-run' },
+  { id: 'recent', label: 'New', title: 'Created in the last 7 days' },
 ];
 
 interface NewContactDraft {
@@ -58,6 +60,7 @@ interface NewContactDraft {
   phone: string;
   city: string;
   state: string;
+  county: string;
   status_id: string;
 }
 
@@ -404,7 +407,7 @@ export default function ContactsPage() {
   /* ── new contact modal ── */
   function openNewContact() {
     setNewContact({
-      name: '', email: '', phone: '', city: '', state: '',
+      name: '', email: '', phone: '', city: '', state: '', county: '',
       status_id: statuses.find((s) => s.name === 'New')?.id ?? '',
     });
   }
@@ -415,6 +418,10 @@ export default function ContactsPage() {
       return;
     }
     setCreating(true);
+    // A county typed here is human knowledge, not a guess, so it goes straight
+    // into confirmed_facts — the store that seeds every deep search and
+    // outranks whatever a search finds. Contacts has no county column.
+    const county = newContact.county.trim();
     const { data, error } = await supabase
       .from('contacts')
       .insert({
@@ -425,6 +432,7 @@ export default function ContactsPage() {
         state: newContact.state.trim() || null,
         status_id: newContact.status_id || null,
         source: 'manual',
+        ...(county ? { confirmed_facts: { county: [county] } } : {}),
       })
       .select('id')
       .single();
@@ -695,10 +703,11 @@ export default function ContactsPage() {
             Import
           </Link>
           <button
-            className="h-8 rounded-full bg-red-600 px-4 text-xs font-medium text-white transition hover:bg-red-700 hover:shadow-md active:scale-95"
+            className="h-8 rounded-full bg-green-600/15 px-4 text-xs font-medium text-green-700 transition hover:bg-green-600/25 active:scale-95"
             onClick={openNewContact}
+            title="New contact"
           >
-            New contact
+            New
           </button>
         </div>
       </div>
@@ -715,6 +724,7 @@ export default function ContactsPage() {
           {VIEW_DEFS.map((v) => (
             <button
               key={v.id}
+              title={v.title}
               className={`inline-flex items-baseline gap-1.5 whitespace-nowrap text-xs transition ${
                 view === v.id ? 'font-semibold text-gray-900' : 'text-gray-400 hover:text-gray-900'
               }`}
@@ -736,9 +746,11 @@ export default function ContactsPage() {
           two or three lines and pushed the grid itself below the fold, which cost
           more than the one click a select adds. The colour dot is kept beside it
           because status colour is the same cue used on the rows and in the panel,
-          and a bare name would break that association.
+          and a bare name would break that association. The pill wrapper is the
+          same treatment as the search input, and the gray ramp flips with the
+          theme, so it reads as one of the app's controls in both modes.
         */}
-        <div className="flex flex-none items-center gap-1.5">
+        <div className="flex h-7 flex-none items-center gap-1.5 rounded-full bg-gray-100 pl-3 pr-1.5">
           <span
             className="h-[5px] w-[5px] flex-none rounded-full"
             style={{
@@ -753,11 +765,11 @@ export default function ContactsPage() {
               setSelected(new Set());
             }}
             aria-label="Filter by status"
-            className={`max-w-[190px] cursor-pointer truncate border-none bg-transparent py-0 pr-5 pl-0 text-xs focus:ring-0 ${
+            className={`max-w-[170px] cursor-pointer truncate border-none bg-transparent py-0 pr-5 pl-0 text-xs focus:ring-0 ${
               statusFilter === '' ? 'text-gray-400' : 'font-medium text-gray-900'
             }`}
           >
-            <option value="">Any status</option>
+            <option value="">Any</option>
             {statuses.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
@@ -1101,6 +1113,15 @@ export default function ContactsPage() {
                     className="input"
                     value={newContact.state}
                     onChange={(e) => setNewContact({ ...newContact, state: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label">County</label>
+                  <input
+                    className="input"
+                    placeholder="If known — seeds the search"
+                    value={newContact.county}
+                    onChange={(e) => setNewContact({ ...newContact, county: e.target.value })}
                   />
                 </div>
               </div>
