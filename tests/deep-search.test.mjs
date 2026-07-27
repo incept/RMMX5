@@ -1438,3 +1438,51 @@ test('a known county can be entered by hand and lands in the confirmed store', a
     'panel adds a county through the same confirm_fact action the ✓ uses'
   );
 });
+
+/* ── The deadline concludes a run; a human deletion sticks ─────────────────── */
+
+test('the deadline concludes a run instead of destroying it', async () => {
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  // The old tripwire threw at the deadline: candidates unflushed, facts
+  // unpersisted, and the job retried into the same wall.
+  assert.doesNotMatch(engine, /ensureTime/);
+  assert.doesNotMatch(engine, /throw new Error\('Deep search reached its execution deadline'\)/);
+  // Every phase loop breaks on the clock instead.
+  const checks = engine.match(/outOfTime\(\)/g) ?? [];
+  assert.ok(checks.length >= 7, `phase loops check the clock; saw ${checks.length}`);
+  // Expensive phases skip work they cannot finish rather than starting it:
+  // mining needs a wide margin, and a SERP fallback needs its own timeout.
+  assert.match(engine, /msLeft\(\) < 60_000/);
+  assert.match(engine, /msLeft\(\) < FALLBACK_TIMEOUT_MS \+ 5_000/);
+  // A mid-fetch abort is contained at the call site, in both fetch loops.
+  const contained =
+    engine.match(/outcome = \{ ok: false, reason: errorMessage\(e\), blocked: false \}/g) ?? [];
+  assert.equal(contained.length, 2, 'both fetchProbePage call sites are wrapped');
+  // And the operator is told plainly that the window closed early.
+  assert.match(engine, /partial results; re-run to continue/);
+});
+
+test('one slow LLM extraction cannot eat half the run window', async () => {
+  const llm = await readFile(new URL('../lib/deep-search/llm.ts', import.meta.url), 'utf8');
+  assert.match(llm, /EXTRACT_TIMEOUT_MS = 20_000/);
+  // The extraction path no longer carries the old 45s cap anywhere.
+  const extractPart = llm.slice(0, llm.indexOf('classifySerpResults'));
+  assert.doesNotMatch(extractPart, /45_000/);
+});
+
+test('a link a human removed stays removed', async () => {
+  // Auto search's only dedupe was against URLs currently IN slots, so deleting
+  // a link just made room for the next run to re-place the same page.
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/links/route.ts', import.meta.url),
+    'utf8'
+  );
+  // Both removal shapes are remembered: clearing a slot and replacing its URL.
+  const remembered = route.match(/await rememberRemoval\(admin, id, prev\.url\)/g) ?? [];
+  assert.equal(remembered.length, 2);
+  assert.match(route, /status: 'rejected'/);
+  // And the auto search consults that memory before placing a link.
+  const intake = await readFile(new URL('../lib/lead-intake.ts', import.meta.url), 'utf8');
+  assert.match(intake, /\.eq\('status', 'rejected'\)/);
+  assert.match(intake, /humanRejected\.has\(canonical\)/);
+});
