@@ -24,7 +24,7 @@ import {
   stateName,
 } from './facts.ts';
 import { fetchProbePage, linksFromText, logProbeFailure, stripToText } from './fetch-page.ts';
-import { factsFromLlmRows, factsFromText, factsFromUrl } from './extract.ts';
+import { factsFromLlmRows, factsFromText, factsFromUrl, isNonRecordUrl } from './extract.ts';
 import { classifySerpResults, extractRowsWithLlm } from './llm.ts';
 
 /**
@@ -506,6 +506,9 @@ export async function runDeepSearchForContact(
     for (const row of rows) {
       const canonical = canonicalUrl(row.url);
       if (!canonical || seen.has(canonical)) continue;
+      // A search page or sitemap is never a finding — its URL carrying the
+      // name is the only reason it would score.
+      if (isNonRecordUrl(row.url)) continue;
       const haystack = `${row.text} ${row.url}`;
       const rowFacts = mergeFacts(
         mergeFacts({ ...EMPTY_FACTS }, factsFromUrl(row.url, name)),
@@ -659,6 +662,10 @@ export async function runDeepSearchForContact(
       for (const row of rows) {
         const canonical = canonicalUrl(row.url);
         if (!canonical || seen.has(canonical)) continue;
+        // A search page or sitemap is never a finding; treating one as a hit
+        // is also what made phantom "every arrest" links appear for sites
+        // with no real results.
+        if (isNonRecordUrl(row.url)) continue;
 
         // Score against everything we know, using the row's own text plus its
         // URL — the URL alone often carries the county and date.
@@ -801,6 +808,8 @@ export async function runDeepSearchForContact(
       if (!r.link) continue;
       const canonical = canonicalUrl(r.link);
       if (!canonical || seen.has(canonical)) continue;
+      // Google indexes these sites' sitemap XMLs and search pages too.
+      if (isNonRecordUrl(r.link)) continue;
       // Google will return near-miss results for a site: query; the corroboration
       // rules are what keep another person's record out.
       const haystack = `${r.title} ${r.snippet} ${r.link}`;
@@ -877,7 +886,9 @@ export async function runDeepSearchForContact(
         seen.add(canonical);
         candidates += 1;
         derived += 1;
-        sitesWithHits.add(site.domain);
+        // Deliberately NOT counted as a site hit: a derived roster is a
+        // lead nobody has seen, and marking it as evidence spawned "every
+        // arrest" search links for sites with no real results.
       }
     }
   }
@@ -917,7 +928,7 @@ export async function runDeepSearchForContact(
         seen.add(canonical);
         candidates += 1;
         pivots += 1;
-        sitesWithHits.add(site.domain);
+        // Same as derived pages: an unseen pivot is a lead, not a site hit.
       }
     }
   }
@@ -1177,6 +1188,9 @@ export async function captureUnruledSerpCandidates(
     if (v.kind === 'other') continue;
     const r = unruled[v.i];
     if (!r) continue;
+    // The classifier judges relevance, not page KIND — a sitemap XML full of
+    // arrest slugs reads as extremely relevant. Structure is ours to check.
+    if (isNonRecordUrl(r.link)) continue;
     const haystack = `${r.title} ${r.snippet} ${r.link}`;
     const scored = scoreCorroboration(haystack, name, facts);
     // The classifier's judgement is not a substitute for the surname rule.

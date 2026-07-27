@@ -860,6 +860,17 @@ export default function ContactPanel({
                 >
                   {busy === 'deep' ? 'Probing…' : '🕵 Deep search'}
                 </button>
+                {/* The same stamps that drive the grid icon, in words. */}
+                <span
+                  className="self-center text-[10px] text-gray-400"
+                  title="Stamped when a run concludes — a partial run counts; it kept its findings"
+                >
+                  {contact.deep_search_queued_at
+                    ? 'Deep search queued…'
+                    : contact.deep_searched_at
+                      ? `Last run ${new Date(contact.deep_searched_at).toLocaleString()}`
+                      : 'Never run'}
+                </span>
               </div>
 
               {/* Facts the search relies on.
