@@ -18,6 +18,15 @@ import {
   RequestSizeError,
 } from '../lib/request-limits.ts';
 
+test('the super administrator sees the admin menu', async () => {
+  const sidebar = await readFile(new URL('../components/Sidebar.tsx', import.meta.url), 'utf8');
+  // requireAdmin and useMyRole both treat super_admin as an admin; the nav's
+  // own literal role check was the one place that did not, hiding the Admin
+  // section from the account with the most authority.
+  assert.doesNotMatch(sidebar, /role === 'admin'/);
+  assert.match(sidebar, /\['admin', 'super_admin'\]\.includes\(role\)/);
+});
+
 test('the public landing page has no signup call', async () => {
   const source = await readFile(new URL('../app/page.tsx', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /\.auth\.signUp\s*\(/);
