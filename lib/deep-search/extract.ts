@@ -42,6 +42,32 @@ const NOT_A_COUNTY = new Set([
   'booking', 'bookings', 'jail', 'news', 'about', 'contact', 'sample', 'view',
 ]);
 
+/**
+ * URLs that can never be a person's RECORD page: a site's own search results,
+ * sitemaps, and feeds. The person's name sitting inside such a URL is exactly
+ * what let them score as candidates — bustednewspaper.com/search/perriaye+powe/
+ * carries the full name and scores 0.55 on the name alone, and an XML sitemap
+ * page carries hundreds of names. This is about never presenting noise AS A
+ * FINDING; the per-site "every arrest" search link is still offered, on
+ * purpose, as a zero-confidence tool link.
+ */
+export function isNonRecordUrl(url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return true; // not even a URL — certainly not a record page
+  }
+  const path = u.pathname.toLowerCase();
+  if (/\.(xml|xsl|rss|atom)$/.test(path)) return true;
+  if (/(^|\/)(sitemap[^/]*|feeds?|rss)(\/|$)/.test(path)) return true;
+  if (/(^|\/)search(\/|\.\w+$|$)/.test(path)) return true;
+  for (const key of ['s', 'q', 'search', 'query', 'keywords']) {
+    if (u.searchParams.has(key)) return true;
+  }
+  return false;
+}
+
 const MONTHS = [
   'january', 'february', 'march', 'april', 'may', 'june',
   'july', 'august', 'september', 'october', 'november', 'december',

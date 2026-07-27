@@ -7,6 +7,7 @@ import {
   type SerpResult,
 } from '@/lib/integrations/brightdata';
 import { applyScores, matchUrlRule, type UrlRule } from '@/lib/scoring';
+import { isNonRecordUrl } from '@/lib/deep-search/extract';
 import { logActivity } from '@/lib/activity';
 import { getSetting } from '@/lib/settings';
 import { lookupIpLocation } from '@/lib/integrations/ipapi';
@@ -229,6 +230,10 @@ export async function runAutoSearchForContact(
   let position = 1;
   for (const result of relevant) {
     if (existingUrls.has(result.link)) continue;
+    // A relevant DOMAIN can still return a non-record page — Google happily
+    // serves a site's search page or sitemap XML for a name query, and a
+    // link slot holding one is not a removal target.
+    if (isNonRecordUrl(result.link)) continue;
     const canonical = canonicalUrl(result.link);
     if (canonical && humanRejected.has(canonical)) continue;
     while (usedPositions.has(position) && position <= 14) position += 1;

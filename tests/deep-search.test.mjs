@@ -20,6 +20,7 @@ import {
   findCounties,
   findDates,
   findMiddleNames,
+  isNonRecordUrl,
   normalizeLlmRow,
 } from '../lib/deep-search/extract.ts';
 import { isAmbiguous, profilesFor } from '../lib/deep-search/profiles.ts';
@@ -1574,4 +1575,51 @@ test('county is editable from the Contact Info tab', async () => {
   // typed on either tab seeds every run.
   assert.match(block, /confirmed_facts\?\.county/);
   assert.match(block, /confirmCounty\(\)/);
+});
+
+/* ── Non-record URLs are never findings; the last run is visible ───────────── */
+
+test('search pages, sitemaps, and feeds are never findings', () => {
+  // The exact noise the operator reported: a site search carrying the full
+  // name (scores 0.55 on the name alone), and a sitemap XML from a SERP.
+  assert.equal(isNonRecordUrl('https://bustednewspaper.com/search/perriaye+powe/#'), true);
+  assert.equal(
+    isNonRecordUrl('https://bustednewspaper.com/posts-sitemap/posts-sitemap-links-17.xml'),
+    true
+  );
+  assert.equal(isNonRecordUrl('https://leefl.mugshots.zone/?s=LOPEZ+GABRIEL'), true);
+  assert.equal(isNonRecordUrl('https://example.com/feed/'), true);
+  assert.equal(isNonRecordUrl('not a url'), true);
+  // Real record pages sail through — including ones with non-search params.
+  assert.equal(
+    isNonRecordUrl('https://recentlybooked.com/ga/catoosa/perriaye-powe~1330_ppafb07232026'),
+    false
+  );
+  assert.equal(isNonRecordUrl('https://florida.arrests.org/Arrests/Gabriel_Lopez_63297364/'), false);
+  assert.equal(isNonRecordUrl('https://wakencbusts.com/view-full-profile.php?id=140252'), false);
+});
+
+test('every intake point drops non-record URLs, and unseen leads are not hits', async () => {
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  const drops = engine.match(/isNonRecordUrl\(/g) ?? [];
+  assert.ok(
+    drops.length >= 4,
+    `probe rows, mined rows, SERP fallback, and unruled capture all filter; saw ${drops.length}`
+  );
+  // Derived pages and id pivots no longer mark a domain as having evidence, so
+  // the "every arrest" search link only appears for a site where a real record
+  // was actually seen — whose search page is not blank by definition.
+  const derivedAt = engine.indexOf('Date-addressed pages, derived rather than searched');
+  const siteSearchAt = engine.indexOf('One "all arrests on this site" link per site');
+  assert.ok(derivedAt > -1 && siteSearchAt > -1);
+  assert.doesNotMatch(engine.slice(derivedAt, siteSearchAt), /sitesWithHits\.add/);
+  // The auto search cannot put a search page or sitemap into a link slot.
+  const intake = await readFile(new URL('../lib/lead-intake.ts', import.meta.url), 'utf8');
+  assert.match(intake, /isNonRecordUrl\(result\.link\)/);
+});
+
+test('the panel shows when the last deep search ran', async () => {
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(panel, /Last run \$\{new Date\(contact\.deep_searched_at\)\.toLocaleString\(\)\}/);
+  assert.match(panel, /Deep search queued…/);
 });
