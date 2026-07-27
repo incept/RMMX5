@@ -19,6 +19,8 @@ interface ContactRow {
   reputation_score: number | null;
   link_score: number | null;
   search_flag: string | null;
+  deep_searched_at: string | null;
+  deep_search_queued_at: string | null;
   created_at: string;
   statuses: (StatusOption & { is_client_status?: boolean }) | null;
   contact_links: { id: string; url: string; status: string }[];
@@ -606,6 +608,78 @@ export default function ContactsPage() {
   const visibleCols = order.filter((k) => !hidden.has(k));
   const skeletonWidths = [190, 150, 210, 170, 140, 200, 160, 180];
 
+  /* ── deep-search state icon ──
+     Left of every name: red = never run (click to run), amber = queued or
+     running, green = completed (click to run again). Driven by the two stamps
+     the enqueue route and the engine write; clicking is admin-only because
+     the deep-search API is. */
+  async function queueDeepSearch(contact: ContactRow) {
+    // Optimistic amber; the run's conclusion turns it green on the next load.
+    setContacts((rows) =>
+      rows.map((r) =>
+        r.id === contact.id ? { ...r, deep_search_queued_at: new Date().toISOString() } : r
+      )
+    );
+    const res = await fetch(`/api/contacts/${contact.id}/deep-search`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}) as any);
+    if (res.ok) {
+      flash(data.duplicate ? 'Deep search already queued' : `Deep search queued for ${contact.name}`);
+    } else {
+      flash(data.error ?? 'Could not queue the deep search');
+      await load();
+    }
+  }
+
+  const searchIcon = (contact: ContactRow) => {
+    const running = !!contact.deep_search_queued_at;
+    const done = !!contact.deep_searched_at;
+    const color = running ? 'text-amber-500' : done ? 'text-green-600' : 'text-red-500';
+    const title = running
+      ? 'Deep search queued — runs on the next worker tick'
+      : done
+        ? `Deep search completed ${new Date(contact.deep_searched_at!).toLocaleString()}${
+            isAdmin ? ' — click to run again' : ''
+          }`
+        : isAdmin
+          ? 'Deep search never run — click to run it'
+          : 'Deep search never run';
+    const glyph = (
+      <svg
+        viewBox="0 0 16 16"
+        className="h-3 w-3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+      >
+        <circle cx="6.7" cy="6.7" r="4.2" />
+        <line x1="9.9" y1="9.9" x2="13.6" y2="13.6" />
+      </svg>
+    );
+    // Amber is a state, not an action — clicking a queued search does nothing,
+    // so it does not get a button.
+    if (!isAdmin || running) {
+      return (
+        <span className={`flex-none self-center ${color}`} title={title}>
+          {glyph}
+        </span>
+      );
+    }
+    return (
+      <button
+        type="button"
+        className={`flex-none self-center transition hover:scale-125 ${color}`}
+        title={title}
+        onClick={(e) => {
+          e.stopPropagation();
+          queueDeepSearch(contact);
+        }}
+      >
+        {glyph}
+      </button>
+    );
+  };
+
   const checkbox = (on: boolean, onClick: (e: React.MouseEvent) => void) => (
     <button
       className={`flex h-[13px] w-[13px] items-center justify-center rounded border text-[9px] leading-none transition hover:scale-110 ${
@@ -871,6 +945,7 @@ export default function ContactsPage() {
                       className="flex min-w-[220px] flex-1 cursor-pointer items-baseline gap-2 pr-3"
                       onClick={() => setSelectedId(contact.id)}
                     >
+                      {searchIcon(contact)}
                       {contact.search_flag && (
                         <span
                           className="cursor-help text-amber-500"

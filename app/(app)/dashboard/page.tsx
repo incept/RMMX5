@@ -53,12 +53,17 @@ export default function DashboardPage() {
     metrics.by_status ?? [];
   const maxCount = Math.max(1, ...byStatus.map((s) => s.count));
 
-  const stats: { label: string; value: any; accent?: boolean }[] = [
-    { label: 'Contacts', value: metrics.contacts },
-    { label: 'Avg Reputation Score', value: metrics.average_reputation ?? '—', accent: true },
-    { label: 'Clients', value: metrics.clients },
-    { label: 'Live links', value: metrics.live_links },
-    { label: 'Links removed', value: metrics.removed_links },
+  // The boxes are the day's working questions, not vanity totals: how many
+  // contacts, and how many sit in each stage that needs somebody's hand. Each
+  // stage box carries its status colour — the same cue as everywhere else.
+  // A named stage that does not exist yet (statuses are editable) shows 0.
+  const STAGE_BOXES = ['New', 'No Link', 'Pending Service', 'Pending Confirmation'];
+  const stats: { label: string; value: any; color?: string; href?: string }[] = [
+    { label: 'Contacts', value: metrics.contacts, href: '/contacts' },
+    ...STAGE_BOXES.map((name) => {
+      const s = byStatus.find((x) => x.name === name);
+      return { label: name, value: s?.count ?? 0, color: s?.color };
+    }),
   ];
   if (isAdmin) {
     stats.push({
@@ -81,21 +86,39 @@ export default function DashboardPage() {
         </span>
       </div>
 
-      <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-        {stats.map((s, i) => (
-          <div
-            key={s.label}
-            className="card anim-rise-in"
-            style={{ animationDelay: `${i * 40}ms` }}
-          >
-            <div className={`text-2xl font-light tabular-nums ${s.accent ? 'text-brand-700' : ''}`}>
-              {s.value}
+      <div className="mb-6 grid grid-cols-3 gap-2 md:grid-cols-4 lg:grid-cols-6">
+        {stats.map((s, i) => {
+          const body = (
+            <>
+              <div className="text-xl font-light tabular-nums">{s.value}</div>
+              <div className="mt-0.5 flex items-center gap-1 text-[10px] font-medium uppercase tracking-widest text-gray-400">
+                {s.color && (
+                  <span
+                    className="h-[5px] w-[5px] flex-none rounded-full"
+                    style={{ background: s.color }}
+                  />
+                )}
+                <span className="truncate">{s.label}</span>
+              </div>
+            </>
+          );
+          const boxClass =
+            'anim-rise-in rounded-xl border border-gray-200 bg-surface px-3 py-2.5 shadow-xs';
+          return s.href ? (
+            <Link
+              key={s.label}
+              href={s.href}
+              className={`${boxClass} block transition hover:border-gray-300 hover:shadow-md`}
+              style={{ animationDelay: `${i * 40}ms` }}
+            >
+              {body}
+            </Link>
+          ) : (
+            <div key={s.label} className={boxClass} style={{ animationDelay: `${i * 40}ms` }}>
+              {body}
             </div>
-            <div className="mt-1 text-[10px] font-medium uppercase tracking-widest text-gray-400">
-              {s.label}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className={`grid gap-4 ${isAdmin ? 'lg:grid-cols-2' : ''}`}>

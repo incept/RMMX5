@@ -550,6 +550,56 @@ export default function ContactPanel({
                 {input('Phone', 'phone')}
                 {input('City', 'city')}
                 {input('State', 'state')}
+                {/* County lives in confirmed_facts, not a contacts column: a
+                    county typed here is human knowledge that seeds every deep
+                    search, and the 🔒 chips are the same ones the search tab
+                    shows. Saved on Enter — the Save button below only writes
+                    contact columns. */}
+                <div>
+                  <label className="label">County</label>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {(contact.confirmed_facts?.county ?? []).map((v: string) => (
+                      <span
+                        key={v}
+                        className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-800"
+                        title="Confirmed county — seeds every deep search and outranks whatever a search finds"
+                      >
+                        🔒 {v}
+                        {isAdmin && (
+                          <button
+                            type="button"
+                            disabled={busy === `fact-county-${v}`}
+                            onClick={() =>
+                              mutateConfirmed(
+                                { action: 'unconfirm_fact', key: 'county', value: v },
+                                `fact-county-${v}`
+                              )
+                            }
+                            className="text-green-700 hover:text-red-600 disabled:opacity-50"
+                            title="Remove this confirmed county"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </span>
+                    ))}
+                    {isAdmin && (
+                      <input
+                        className="input min-w-24 flex-1"
+                        placeholder={
+                          (contact.confirmed_facts?.county ?? []).length
+                            ? 'Add another — Enter saves'
+                            : 'If known — Enter saves it for the search'
+                        }
+                        value={countyValue}
+                        onChange={(e) => setCountyValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') confirmCounty();
+                        }}
+                      />
+                    )}
+                  </div>
+                </div>
                 <div>
                   <label className="label">Date created</label>
                   <input

@@ -973,6 +973,24 @@ export async function runDeepSearchForContact(
     });
   }
 
+  // The grid's search icon runs on these two stamps: queued ⇒ amber, searched
+  // ⇒ green. Stamped at conclusion so a partial run counts — it kept its
+  // findings. Best-effort: before migration 0025 the columns do not exist,
+  // and that must not fail the run.
+  {
+    const { error } = await supabase
+      .from('contacts')
+      .update({ deep_searched_at: new Date().toISOString(), deep_search_queued_at: null })
+      .eq('id', contactId);
+    if (error) {
+      await logDebug({
+        source: 'deep-search',
+        message: `Could not stamp run completion (migration 0025 run?): ${error.message}`,
+        contactId,
+      });
+    }
+  }
+
   // Reuses the existing search_flag, so these land in the contacts grid's
   // Flagged view with the reason on hover — no new surface to learn. Ambiguity
   // outranks index lag: an unresolved identity makes every other follow-up

@@ -213,5 +213,12 @@ export function dateWindow(dates: string[], today = new Date()): { from: string;
     dt.setUTCDate(dt.getUTCDate() + days);
     return iso(dt);
   };
-  return { from: pad(valid[0], -7), to: pad(valid[valid.length - 1], 7) };
+  // The far edge always reaches today. A window bracketing only the dates
+  // already known EXCLUDES any arrest newer than them from a FromDate/ToDate
+  // site search — and a brand-new booking is exactly what a monitoring product
+  // exists to catch (a July 23 record on recentlybooked sat invisible behind a
+  // window built from older dates).
+  const paddedTo = pad(valid[valid.length - 1], 7);
+  const todayIso = iso(today);
+  return { from: pad(valid[0], -7), to: paddedTo > todayIso ? paddedTo : todayIso };
 }

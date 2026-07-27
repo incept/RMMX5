@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
+import { createAdminClient } from '@/lib/supabase/server';
 import { enqueueJob } from '@/lib/job-queue';
 import { readJsonBody } from '@/lib/request-limits';
 import { logDebug, errorMessage } from '@/lib/debug-log';
@@ -41,6 +42,22 @@ export async function POST(request: Request, { params }: Params) {
       `deep-search:${id}:${hour}${focusDate ? `:${focusDate}` : ''}`,
       2
     );
+    // The grid's search icon turns amber on this stamp; the run clears it when
+    // it concludes. Set even on a duplicate — either way a run is in flight.
+    // Service role, since requireAdmin already gated the caller and a client-
+    // side RLS denial here would be silent. Best-effort: a missing stamp must
+    // not fail the enqueue.
+    const { error: stampError } = await createAdminClient()
+      .from('contacts')
+      .update({ deep_search_queued_at: new Date().toISOString() })
+      .eq('id', id);
+    if (stampError) {
+      await logDebug({
+        source: 'deep-search:enqueue',
+        message: `Could not stamp the queue time (migration 0025 run?): ${stampError.message}`,
+        contactId: id,
+      });
+    }
     return NextResponse.json(
       { ...result, status: result.duplicate ? 'already queued' : 'queued' },
       { status: result.duplicate ? 200 : 202 }

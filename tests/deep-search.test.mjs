@@ -179,16 +179,23 @@ test('dateVariants covers the formats found in titles and paths', () => {
   assert.ok(variants.some((v) => v.startsWith('april 22')));
 });
 
-test('dateWindow pads around known booking dates', () => {
+test('dateWindow pads around known booking dates but always reaches today', () => {
   // recentlybooked's search requires FromDate/ToDate, so the window is built
-  // from whatever dates round A learned.
-  const w = dateWindow(['2026-04-22']);
+  // from whatever dates round A learned — but its far edge must reach today,
+  // or a NEWER arrest than the ones known is excluded from the very site
+  // search that would find it (how a fresh July 23 record went unseen).
+  const today = new Date('2026-07-27T12:00:00Z');
+  const w = dateWindow(['2026-04-22'], today);
   assert.equal(w.from, '2026-04-15');
-  assert.equal(w.to, '2026-04-29');
+  assert.equal(w.to, '2026-07-27', 'the far edge is today, not the stale padded date');
 
-  const spread = dateWindow(['2026-04-22', '2025-01-10']);
+  const spread = dateWindow(['2026-04-22', '2025-01-10'], today);
   assert.equal(spread.from, '2025-01-03');
-  assert.equal(spread.to, '2026-04-29');
+  assert.equal(spread.to, '2026-07-27');
+
+  // A booking date in the future of "today" (site clock skew) keeps its pad.
+  const fresh = dateWindow(['2026-07-26'], today);
+  assert.equal(fresh.to, '2026-08-02');
 });
 
 test('dateWindow falls back to a wide range when no date is known', () => {
@@ -1485,4 +1492,87 @@ test('a link a human removed stays removed', async () => {
   const intake = await readFile(new URL('../lib/lead-intake.ts', import.meta.url), 'utf8');
   assert.match(intake, /\.eq\('status', 'rejected'\)/);
   assert.match(intake, /humanRejected\.has\(canonical\)/);
+});
+
+/* ── Search-state icon, dashboard stages, status management, county field ──── */
+
+test('the grid shows deep-search state and can start a run from it', async () => {
+  const page = await readFile(new URL('../app/(app)/contacts/page.tsx', import.meta.url), 'utf8');
+  // Three states from two stamps: amber while queued, green when done, red
+  // when never run. Amber is a state, not a button.
+  assert.match(page, /const running = !!contact\.deep_search_queued_at/);
+  assert.match(page, /text-amber-500/);
+  assert.match(page, /text-red-500/);
+  assert.match(page, /queueDeepSearch\(contact\)/);
+  assert.match(page, /!isAdmin \|\| running/);
+  // The migration feeds both stamps through the grid RPC.
+  const migration = await readFile(
+    new URL('../supabase/migrations/0025_deep_search_state.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /add column if not exists deep_searched_at timestamptz/);
+  assert.match(migration, /c\.deep_searched_at, c\.deep_search_queued_at/);
+  // Enqueue stamps amber; the run's conclusion stamps green and clears it.
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/deep-search/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(route, /deep_search_queued_at: new Date\(\)\.toISOString\(\)/);
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(
+    engine,
+    /deep_searched_at: new Date\(\)\.toISOString\(\), deep_search_queued_at: null/
+  );
+});
+
+test('deleting a status moves its contacts where the admin chose', async () => {
+  const route = await readFile(
+    new URL('../app/api/admin/statuses/[id]/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(route, /requireAdmin\(\)/);
+  // The FK is ON DELETE SET NULL — without the guard, deletion silently
+  // strips the status off every contact in it.
+  assert.match(route, /pick a status to move them to first/);
+  assert.match(route, /update\(\{ status_id: moveTo \}\)/);
+  assert.ok(
+    route.indexOf('status_id: moveTo') < route.indexOf(".delete()"),
+    'contacts move BEFORE the status is deleted'
+  );
+});
+
+test('status edits fail loudly instead of silently vanishing', async () => {
+  const page = await readFile(
+    new URL('../app/(app)/admin/pipeline/page.tsx', import.meta.url),
+    'utf8'
+  );
+  // Zero-rows-affected (a silent RLS denial) and unique-name violations both
+  // get a readable message — this is how a new status "could not be named".
+  assert.match(page, /!data\?\.length/);
+  assert.match(page, /23505/);
+  // Enter commits, and Add picks a unique default name instead of silently
+  // colliding with the unique constraint.
+  assert.match(page, /e\.key === 'Enter' && e\.currentTarget\.blur\(\)/);
+  assert.match(page, /for \(let n = 2; taken\.has\(name\); n \+= 1\)/);
+});
+
+test('the dashboard leads with the stages that need a hand', async () => {
+  const page = await readFile(new URL('../app/(app)/dashboard/page.tsx', import.meta.url), 'utf8');
+  assert.match(page, /'New', 'No Link', 'Pending Service', 'Pending Confirmation'/);
+  assert.doesNotMatch(page, /Avg Reputation Score/);
+  assert.doesNotMatch(page, /Links removed/);
+  assert.doesNotMatch(page, /Live links/);
+  // The contacts box is a link into the grid.
+  assert.match(page, /href: '\/contacts'/);
+});
+
+test('county is editable from the Contact Info tab', async () => {
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  const at = panel.indexOf("tab === 'Contact Info'");
+  assert.ok(at > -1);
+  const block = panel.slice(at, at + 7000);
+  // Same confirmed store and the same chips as the search tab — a county
+  // typed on either tab seeds every run.
+  assert.match(block, /confirmed_facts\?\.county/);
+  assert.match(block, /confirmCounty\(\)/);
 });
