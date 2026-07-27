@@ -122,7 +122,9 @@ export default function Sidebar({ role, userName }: { role: string; userName: st
       <nav className="flex-1 overflow-y-auto px-2 pb-4">
         {TOP.map((item) => leafRow(item, false))}
 
-        {SECTIONS.filter((s) => !s.adminOnly || role === 'admin').map((section) => {
+        {/* Same set of roles requireAdmin and useMyRole accept — the nav's own
+            literal check once hid this menu from the super administrator. */}
+        {SECTIONS.filter((s) => !s.adminOnly || ['admin', 'super_admin'].includes(role)).map((section) => {
           // The active route's section can't be collapsed shut behind the
           // user's back — it renders open regardless of the saved state.
           const containsActive = section.children.some((c) => isActive(c.href));
@@ -157,7 +159,7 @@ export default function Sidebar({ role, userName }: { role: string; userName: st
       <div className="border-t border-gray-200 px-4 py-3">
         <ThemeToggle />
         <div className="mt-3 truncate text-xs font-medium text-gray-700">{userName}</div>
-        <div className="mb-2 text-[10px] text-gray-400 uppercase">{role}</div>
+        <div className="mb-2 text-[10px] text-gray-400 uppercase">{role.replace('_', ' ')}</div>
         <div className="flex items-center gap-3">
           <Link href="/profile" className="text-xs text-gray-500 hover:text-brand-700">
             My profile
