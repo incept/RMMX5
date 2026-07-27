@@ -1362,6 +1362,68 @@ test('the panel shows identity groups with one decision per person', async () =>
   assert.match(panel, /stateProfiles\.length >= 2/);
 });
 
+/* ── Multi-arrest: mine confirmed pages, branch a focused search per arrest ── */
+
+test("confirmed pages are mined for the person's other arrests", async () => {
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  const at = engine.indexOf('Mine the pages we KNOW are this person');
+  assert.ok(at > -1, 'the mining block exists');
+  const block = engine.slice(at, at + 6000);
+  // Trusted sources only: pages on configured probe-site domains, fetched by
+  // us. SERP titles and snippets are never mined — they mix people too freely.
+  assert.match(block, /urlOnDomain\(pageUrl, s\.domain\)/);
+  assert.match(block, /MAX_CONFIRMED_PAGE_FETCHES = 3/);
+  // Mined listings pass the same gates as probe rows — the confirmed page
+  // vouches for its rows, but corroboration still decides.
+  assert.match(block, /scoreCorroboration/);
+  assert.match(block, /stateConflicts/);
+  assert.match(block, /\(confirmed page\)/);
+  // Mining runs BEFORE the probe rounds so what it learns steers them.
+  assert.ok(at < engine.indexOf('for (const round of [0, 1] as const)'));
+});
+
+test('a focused run drives every date-built URL from the one arrest', async () => {
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(
+    engine,
+    /const dateList = \(\) => \(focusDate \? \[focusDate\] : facts\.booking_dates\)/
+  );
+  // All three date consumers go through it: probe windows, derived date pages,
+  // and the site-search links. None reads the raw variant set any more.
+  const uses = engine.match(/dateList\(\)/g) ?? [];
+  assert.ok(uses.length >= 3, `expected 3+ dateList() uses, saw ${uses.length}`);
+  assert.doesNotMatch(engine, /dateWindow\(facts\.booking_dates\)/);
+  // The date is validated before use, and pinned at the front of the variants
+  // so probe URLs are built from it.
+  assert.ok(engine.includes('/^\\d{4}-\\d{2}-\\d{2}$/.test(String(opts?.focusDate'));
+  assert.match(engine, /if \(focusDate\) pinned = mergeFacts\(pinned, \{ booking_dates: \[focusDate\] \}\)/);
+});
+
+test('the deep-search route accepts a focus date and keys the queue on it', async () => {
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/deep-search/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.ok(route.includes('/^\\d{4}-\\d{2}-\\d{2}$/.test(body.focusDate)'));
+  // Branching three arrests back-to-back is the intended use, not a repeat
+  // click, so the hourly dedupe key includes the date.
+  assert.ok(route.includes("`deep-search:${id}:${hour}${focusDate ? `:${focusDate}` : ''}`"));
+  // And the worker hands it through to the run.
+  const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
+  assert.match(queue, /focusDate: typeof payload\.focusDate === 'string'/);
+});
+
+test('each booking date carries a branch button for a focused search', async () => {
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(panel, /JSON\.stringify\(\{ focusDate \}\)/);
+  assert.match(panel, /onClick=\{\(\) => runDeepSearch\(v\)\}/);
+  // Two dates = two arrests, said in words next to the row.
+  assert.match(panel, /arrests on record/);
+  // The plain button must not leak its click event into the focus parameter.
+  assert.match(panel, /onClick=\{\(\) => runDeepSearch\(\)\}/);
+  assert.doesNotMatch(panel, /onClick=\{runDeepSearch\}/);
+});
+
 test('a known county can be entered by hand and lands in the confirmed store', async () => {
   // Seeding matters most BEFORE the first run: a common name plus a known
   // county is the difference between one match and five (the Gabriel Lopez

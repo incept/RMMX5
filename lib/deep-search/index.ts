@@ -171,6 +171,17 @@ function buildRecordUrl(
   return out;
 }
 
+/** True when a URL lives on the site's domain, including its subdomains. */
+function urlOnDomain(url: string, domain: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    const d = domain.toLowerCase().replace(/^www\./, '');
+    return host === d || host.endsWith('.' + d);
+  } catch {
+    return false;
+  }
+}
+
 export interface DeepSearchResult {
   probed: number;
   blocked: number;
@@ -270,9 +281,15 @@ async function rowsFromPage(
 export async function runDeepSearchForContact(
   contactId: string,
   actorId?: string | null,
-  opts?: { deadlineMs?: number; requestKey?: string; signal?: AbortSignal }
+  opts?: { deadlineMs?: number; requestKey?: string; signal?: AbortSignal; focusDate?: string }
 ): Promise<DeepSearchResult> {
   const supabase = createAdminClient();
+  // A focused run branches out ONE arrest of a multi-arrest person: that date
+  // is pinned and every date-built URL and search window uses it alone, so the
+  // run digs into this booking instead of re-treading all of them.
+  const focusDate = /^\d{4}-\d{2}-\d{2}$/.test(String(opts?.focusDate ?? ''))
+    ? (opts!.focusDate as string)
+    : null;
   const deadlineSignal = AbortSignal.timeout(
     Math.min(Math.max(opts?.deadlineMs ?? 95_000, 10_000), 110_000)
   );
@@ -310,6 +327,8 @@ export async function runDeepSearchForContact(
     .eq('contact_id', contactId);
 
   let pinned: SearchFacts = { ...EMPTY_FACTS };
+  // Merged first so a focused run's date takes the front of the variant list.
+  if (focusDate) pinned = mergeFacts(pinned, { booking_dates: [focusDate] });
   pinned = mergeFacts(pinned, normalizeFacts(contact.confirmed_facts));
   const seedState = stateCode(contact.state);
   if (seedState) pinned = mergeFacts(pinned, { state: [seedState] });
@@ -322,6 +341,10 @@ export async function runDeepSearchForContact(
     seededLinks += 1;
   }
   let facts = mergeFacts(pinned, normalizeFacts(contact.search_facts));
+
+  // The dates driving windows and date-addressed URLs: just the focus date on
+  // a focused run, the whole variant set otherwise.
+  const dateList = () => (focusDate ? [focusDate] : facts.booking_dates);
 
   /**
    * The states we will accept records from. A same-name stranger booked in Texas
@@ -351,15 +374,22 @@ export async function runDeepSearchForContact(
     });
   }
 
-  const [{ data: siteRows }, { data: ruleRows }, { data: existing }] = await Promise.all([
-    supabase.from('probe_sites').select('*').order('scope'),
-    supabase.from('url_rules').select('*'),
-    supabase
-      .from('search_candidates')
-      .select('canonical_url')
-      .eq('contact_id', contactId)
-      .limit(5_000),
-  ]);
+  const [{ data: siteRows }, { data: ruleRows }, { data: existing }, { data: confirmedRows }] =
+    await Promise.all([
+      supabase.from('probe_sites').select('*').order('scope'),
+      supabase.from('url_rules').select('*'),
+      supabase
+        .from('search_candidates')
+        .select('canonical_url')
+        .eq('contact_id', contactId)
+        .limit(5_000),
+      supabase
+        .from('search_candidates')
+        .select('url')
+        .eq('contact_id', contactId)
+        .eq('status', 'confirmed')
+        .limit(20),
+    ]);
 
   // Inactive sites still matter: they are the SERP-fallback and id-pivot
   // targets. Only direct probing is limited to the active ones.
@@ -392,6 +422,107 @@ export async function runDeepSearchForContact(
   const statesSeen = new Set<string>();
   const ambiguous = () => pinnedStates.length === 0 && statesSeen.size >= 2;
 
+  /* -- Mine the pages we KNOW are this person's -----------------------------
+     A confirmed record page usually lists the person's OTHER arrests (the
+     arrests.org "other arrests" section; a mugshots.zone search view's rows),
+     and those listings are more trustworthy than anything a name search
+     returns: the person's own page vouches for them. Each listing becomes a
+     candidate, and its booking date lands in the facts — which is what the
+     per-arrest branch buttons in the panel run on.
+
+     Trusted sources ONLY: pages fetched from configured probe-site domains.
+     SERP titles and snippets are never mined — they mix people too freely.
+     Runs before the probe rounds so a mined county or date steers them. */
+  const MAX_CONFIRMED_PAGE_FETCHES = 3;
+  const confirmedUrls = [
+    ...new Set(
+      [
+        ...((confirmedRows ?? []) as any[]).map((r) => String(r?.url ?? '').trim()),
+        ...(slotLinks ?? []).map((r: any) => String(r?.url ?? '').trim()),
+      ].filter(Boolean)
+    ),
+  ];
+  let minedPages = 0;
+  let minedListings = 0;
+  for (const pageUrl of confirmedUrls) {
+    if (minedPages >= MAX_CONFIRMED_PAGE_FETCHES) break;
+    ensureTime();
+    const site = sitesAll.find((s) => urlOnDomain(pageUrl, s.domain));
+    if (!site) continue; // a news article or social post has no roster to mine
+    minedPages += 1;
+
+    const outcome = await fetchProbePage(pageUrl, {
+      render: site.needs_render,
+      needsBrowser: site.needs_browser,
+      signal,
+    });
+    if (!outcome.ok) {
+      await logProbeFailure(site.domain, pageUrl, outcome.reason, contactId);
+      continue;
+    }
+    let rows: RawRow[] = [];
+    try {
+      const pageText = stripToText(outcome.html, pageUrl);
+      const parsed = await rowsFromPage(pageText, pageUrl, site.domain, name, contactId, {
+        signal,
+        requestKey: opts?.requestKey ? `${opts.requestKey}:mine:${minedPages}` : undefined,
+      });
+      rows = parsed.rows;
+      if (parsed.llmFacts) facts = mergeFacts(facts, parsed.llmFacts);
+    } catch (e) {
+      await logDebug({
+        source: 'deep-search:mine',
+        message: `Could not read the confirmed page on ${site.domain}: ${errorMessage(e)}`,
+        context: { url: pageUrl },
+        contactId,
+      });
+      continue;
+    }
+
+    for (const row of rows) {
+      const canonical = canonicalUrl(row.url);
+      if (!canonical || seen.has(canonical)) continue;
+      const haystack = `${row.text} ${row.url}`;
+      const rowFacts = mergeFacts(
+        mergeFacts({ ...EMPTY_FACTS }, factsFromUrl(row.url, name)),
+        factsFromText(row.text, name)
+      );
+      if (stateConflicts(rowFacts.state)) continue;
+      const scored = scoreCorroboration(haystack, name, mergeFacts(facts, rowFacts));
+      if (scored.confidence < MIN_CONFIDENCE) continue;
+
+      const rule = matchUrlRule(row.url, rules);
+      await candidateWriter.add({
+        contact_id: contactId,
+        url: row.url,
+        canonical_url: canonical,
+        title: row.text.slice(0, 300) || null,
+        snippet:
+          "listed on a page already confirmed as this person's — usually another arrest of the same person",
+        source: 'probe',
+        source_detail: `${site.domain} (confirmed page)`,
+        round: 0,
+        confidence: scored.confidence,
+        matched_facts: scored.matched,
+        url_rule_id: rule?.id ?? null,
+      });
+      seen.add(canonical);
+      candidates += 1;
+      minedListings += 1;
+      sitesWithHits.add(site.domain);
+      facts = mergeFacts(facts, rowFacts);
+      for (const st of rowFacts.state) statesSeen.add(st);
+      rememberFamilyIds(familyIds, site.family, rowFacts.record_ids);
+    }
+  }
+  if (minedListings) {
+    await logDebug({
+      source: 'deep-search:mine',
+      message: `Confirmed page(s) listed ${minedListings} further record(s) — likely additional arrests of this person. Their dates now carry branch buttons on the Booked row.`,
+      contactId,
+    });
+  }
+
   for (const round of [0, 1] as const) {
     // The county round runs on facts round 0 accumulated — under ambiguity
     // those facts mix two people, so probing them would compound the mix.
@@ -410,7 +541,7 @@ export async function runDeepSearchForContact(
     );
     if (!roundSites.length) continue;
 
-    const window = dateWindow(facts.booking_dates);
+    const window = dateWindow(dateList());
     const targets: { site: ProbeSite; url: string }[] = [];
     for (const site of roundSites) {
       const states = site.scope_state
@@ -683,7 +814,7 @@ export async function runDeepSearchForContact(
     if (ambiguous()) break;
     ensureTime();
     if (!site.date_url_template) continue;
-    for (const isoDate of facts.booking_dates.slice(0, 3)) {
+    for (const isoDate of dateList().slice(0, 3)) {
       for (const county of (facts.county.length ? facts.county : [null]).slice(0, 2)) {
         const url = buildDateUrl(
           site.date_url_template,
@@ -776,7 +907,7 @@ export async function runDeepSearchForContact(
       name,
       facts.county[0] ?? null,
       facts.state[0] ?? seedState ?? null,
-      dateWindow(facts.booking_dates)
+      dateWindow(dateList())
     );
     if (!url) continue;
     const canonical = canonicalUrl(url);
@@ -866,8 +997,9 @@ export async function runDeepSearchForContact(
     actorId,
     type: 'search',
     description:
-      `Deep search probed ${probed} site search page(s)` +
+      `Deep search${focusDate ? ` focused on the ${focusDate} arrest` : ''} probed ${probed} site search page(s)` +
       `${blocked ? ` (${blocked} unreadable)` : ''}` +
+      `${minedPages ? `, read ${minedPages} confirmed page(s) — ${minedListings} further listing(s), usually other arrests` : ''}` +
       `${serpFallbacks ? `, searched ${serpFallbacks} blocked site(s) via Google` : ''}` +
       `${pivots ? `, derived ${pivots} sibling record(s) from shared ids` : ''}` +
       `${derived ? `, built ${derived} date-addressed page(s) from county + booking date` : ''}` +
@@ -883,6 +1015,9 @@ export async function runDeepSearchForContact(
       pivots,
       derived,
       siteSearches,
+      minedPages,
+      minedListings,
+      focusDate,
       facts: merged,
     },
   });
