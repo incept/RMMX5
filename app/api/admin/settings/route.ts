@@ -151,6 +151,9 @@ export async function PUT(request: Request) {
     }
   }
   if (body.key === 'trestle') {
+    // Stray whitespace pasted around the key is a documented cause of Trestle
+    // HTTP 403s; store it clean. (A masked value has no spaces to lose.)
+    if (typeof value.api_key === 'string') value.api_key = value.api_key.trim();
     for (const [field, label] of [
       ['monthly_limit', 'Monthly lookup limit'],
       ['reverse_phone_cost', 'Cost per lookup'],
