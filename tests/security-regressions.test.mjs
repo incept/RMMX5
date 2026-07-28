@@ -294,6 +294,26 @@ test('every integrations-page section can actually be saved, secrets masked', as
   }
 });
 
+test('manual reverse lookup is admin-gated and still only fills blanks', async () => {
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/enrich/route.ts', import.meta.url),
+    'utf8'
+  );
+  const enrichment = await readFile(new URL('../lib/enrichment.ts', import.meta.url), 'utf8');
+
+  // Every press is a billed provider call — workers must not have the button's
+  // endpoint even if they discover its URL.
+  assert.match(route, /requireAdmin/);
+  assert.match(route, /force: true/);
+
+  // Force skips the "already complete" short-circuit (the admin wants to SEE
+  // the answer) but must never widen what gets written: name/city/state writes
+  // stay behind their needsName/needsLocation guards.
+  assert.match(enrichment, /!needsName && !needsLocation && !opts\?\.force/);
+  assert.match(enrichment, /if \(needsName && identity\.name\)/);
+  assert.match(enrichment, /if \(needsLocation && identity\.city && identity\.state\)/);
+});
+
 test('password reset is non-enumerating and has a recovery page', async () => {
   const landing = await readFile(new URL('../app/page.tsx', import.meta.url), 'utf8');
   const reset = await readFile(
