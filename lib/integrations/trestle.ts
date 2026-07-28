@@ -44,7 +44,10 @@ export async function lookupPhoneIdentity(
     api_key?: string;
     monthly_limit?: number | string;
   }>('trestle');
-  if (!cfg.api_key) return null;
+  // Trimmed defensively: per Trestle's own docs, an invisible character pasted
+  // into the key (leading/trailing space) is a common cause of HTTP 403.
+  const apiKey = cfg.api_key?.trim();
+  if (!apiKey) return null;
 
   const e164 = toE164(phone ?? '');
   if (!e164) return null;
@@ -61,12 +64,14 @@ export async function lookupPhoneIdentity(
   });
 
   try {
+    // 3.2 is the currently documented Reverse Phone version; a key provisioned
+    // today may not be enabled for the retired 3.0 path.
     const url =
-      'https://api.trestleiq.com/3.0/phone?phone=' +
+      'https://api.trestleiq.com/3.2/phone?phone=' +
       encodeURIComponent(e164) +
       '&country_hint=US';
     const res = await fetch(url, {
-      headers: { 'x-api-key': cfg.api_key },
+      headers: { 'x-api-key': apiKey },
       signal: AbortSignal.timeout(15_000),
     });
     const bodyText = await readResponseText(res, 256 * 1024);
@@ -82,8 +87,15 @@ export async function lookupPhoneIdentity(
         });
         return null;
       }
+      // 403 has three documented causes, none retryable and none visible from
+      // the bare status: a wrong/deactivated key, stray whitespace pasted into
+      // it, or a key not scoped to the Reverse Phone product (Trestle keys are
+      // per-product). Say so, and pass Trestle's own message through.
+      const detail = bodyText ? ` — ${bodyText.slice(0, 200)}` : '';
       throw new TrestleLookupError(
-        `Trestle HTTP ${res.status}`,
+        res.status === 403
+          ? `Trestle HTTP 403${detail}. Check in the Trestle dashboard that this key is enabled for the Reverse Phone API specifically (keys are scoped per product), and re-paste it without stray spaces.`
+          : `Trestle HTTP ${res.status}${detail}`,
         res.status === 429 || res.status >= 500
       );
     }
