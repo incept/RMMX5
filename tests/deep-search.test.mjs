@@ -1077,6 +1077,22 @@ test('a name assembles from first/last when no full name is given', async () => 
   assert.equal(id.name, 'Gene Beachak');
 });
 
+test('the queued stamp is only written when a run is actually in flight', async () => {
+  // The second way amber lied, with NO error anywhere: the hourly dedupe key
+  // survived on finished jobs, so a re-click after a completed run created no
+  // job but still stamped "queued". The route now blocks only on a LIVE
+  // pending/processing job and otherwise enqueues a genuinely fresh run.
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/deep-search/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(route, /\.in\('status', \['pending', 'processing'\]\)/);
+  assert.match(route, /payload->>contactId/);
+  assert.doesNotMatch(route, /3_600_000/, 'the hour-bucket dedupe key is gone');
+  // Double-click race still collapses via the minute-resolution key.
+  assert.match(route, /Math\.floor\(Date\.now\(\) \/ 60_000\)/);
+});
+
 test('a terminally failed deep search cannot stay amber forever', async () => {
   // The live failure: two contacts sat "queued" for hours. The job had failed
   // its final attempt and parked in the job table; nothing told the contact,
@@ -1448,8 +1464,9 @@ test('the deep-search route accepts a focus date and keys the queue on it', asyn
   );
   assert.ok(route.includes('/^\\d{4}-\\d{2}-\\d{2}$/.test(body.focusDate)'));
   // Branching three arrests back-to-back is the intended use, not a repeat
-  // click, so the hourly dedupe key includes the date.
-  assert.ok(route.includes("`deep-search:${id}:${hour}${focusDate ? `:${focusDate}` : ''}`"));
+  // click, so both the active-run check and the dedupe key carry the date.
+  assert.ok(route.includes("activeQuery.eq('payload->>focusDate', focusDate)"));
+  assert.ok(route.includes("`deep-search:${id}:${minute}${focusDate ? `:${focusDate}` : ''}`"));
   // And the worker hands it through to the run.
   const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
   assert.match(queue, /focusDate: typeof payload\.focusDate === 'string'/);

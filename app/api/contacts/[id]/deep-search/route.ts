@@ -32,18 +32,41 @@ export async function POST(request: Request, { params }: Params) {
       .maybeSingle();
     if (!contact) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
 
-    // Collapse repeat clicks while still allowing a fresh sweep in a later
-    // hour. A focused run keys on its date too: branching three arrests
-    // back-to-back is the intended use, not a repeat click.
-    const hour = Math.floor(Date.now() / 3_600_000);
-    const result = await enqueueJob(
-      'deep_search',
-      { contactId: id, actorId: auth.profile.id, ...(focusDate ? { focusDate } : {}) },
-      `deep-search:${id}:${hour}${focusDate ? `:${focusDate}` : ''}`,
-      2
-    );
+    // A repeat click collapses only while a run for this contact is genuinely
+    // LIVE. The old hourly dedupe key survived on finished jobs, so a re-click
+    // after a completed run stamped "queued", created no job, and the amber
+    // icon lied for the rest of the hour with no error anywhere. A focused run
+    // checks against its own date, so branching three arrests back-to-back
+    // still enqueues three jobs.
+    const payload = { contactId: id, actorId: auth.profile.id, ...(focusDate ? { focusDate } : {}) };
+    let activeQuery = createAdminClient()
+      .from('job_queue')
+      .select('id')
+      .eq('kind', 'deep_search')
+      .in('status', ['pending', 'processing'])
+      .eq('payload->>contactId', id)
+      .limit(1);
+    activeQuery = focusDate
+      ? activeQuery.eq('payload->>focusDate', focusDate)
+      : activeQuery.is('payload->>focusDate', null);
+    const { data: active, error: activeError } = await activeQuery.maybeSingle();
+    if (activeError) throw new Error(activeError.message);
+
+    // The minute-resolution key guards the double-click race two concurrent
+    // requests can win past the active check; a deliberate later click lands
+    // in a new minute and runs.
+    const minute = Math.floor(Date.now() / 60_000);
+    const result = active
+      ? { queued: false, duplicate: true }
+      : await enqueueJob(
+          'deep_search',
+          payload,
+          `deep-search:${id}:${minute}${focusDate ? `:${focusDate}` : ''}`,
+          2
+        );
     // The grid's search icon turns amber on this stamp; the run clears it when
-    // it concludes. Set even on a duplicate — either way a run is in flight.
+    // it concludes. Set even on a duplicate — after the active check above, a
+    // duplicate really does mean a run is in flight.
     // Service role, since requireAdmin already gated the caller and a client-
     // side RLS denial here would be silent. Best-effort: a missing stamp must
     // not fail the enqueue.
