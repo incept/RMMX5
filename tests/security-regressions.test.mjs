@@ -314,6 +314,50 @@ test('manual reverse lookup is admin-gated and still only fills blanks', async (
   assert.match(enrichment, /if \(needsLocation && identity\.city && identity\.state\)/);
 });
 
+test('contact merge is admin-gated, atomic, and deletes last', async () => {
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/merge/route.ts', import.meta.url),
+    'utf8'
+  );
+  const migration = await readFile(
+    new URL('../supabase/migrations/0026_merge_contacts.sql', import.meta.url),
+    'utf8'
+  );
+
+  // Merging deletes a contact; deletion is already admin-gated, so this must
+  // be too — and the target id is validated before it reaches SQL.
+  assert.match(route, /requireAdmin/);
+  assert.match(route, /UUID\.test\(mergeId\)/);
+  assert.match(route, /mergeId === id/);
+
+  // One transaction, deterministic lock order, and the duplicate dies LAST —
+  // after every child row has been repointed — so a failure part-way leaves
+  // both contacts intact rather than orphaning a call history.
+  assert.match(migration, /least\(p_winner, p_loser\) for update/);
+  const deleteAt = migration.indexOf('delete from public.contacts where id = p_loser');
+  assert.ok(deleteAt > 0, 'the duplicate must be deleted');
+  for (const table of [
+    'activity_log',
+    'calls',
+    'email_messages',
+    'contact_files',
+    'search_candidates',
+  ]) {
+    const moveAt = migration.indexOf(`public.${table}`, migration.indexOf('begin'));
+    assert.ok(
+      moveAt > 0 && moveAt < deleteAt,
+      `${table} must be repointed before the duplicate is deleted`
+    );
+  }
+  // Survivor's values win; the merged row only fills blanks — same rule as
+  // enrichment. And rejected-candidate tombstones survive the move.
+  assert.match(migration, /coalesce\(nullif\(btrim\(w\.email\), ''\), l\.email\)/);
+  assert.match(migration, /not exists \(\s*select 1 from public\.search_candidates/);
+  // Locked down like every other privileged function.
+  assert.match(migration, /revoke all on function public\.merge_contacts[\s\S]*?authenticated/);
+  assert.match(migration, /grant execute on function public\.merge_contacts[\s\S]*?service_role/);
+});
+
 test('password reset is non-enumerating and has a recovery page', async () => {
   const landing = await readFile(new URL('../app/page.tsx', import.meta.url), 'utf8');
   const reset = await readFile(
