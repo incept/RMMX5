@@ -1,5 +1,4 @@
-# RMMX5 — Crisis Management CRM
-
+# RMMX5 
 Next.js 16 (App Router) + Supabase CRM for crisis/reputation management:
 a spreadsheet-fast contact grid with colored statuses, per-contact link
 tracking (14 slots) with a **Reputation Score** (ported from the ContextAI /
