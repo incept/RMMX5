@@ -1077,6 +1077,26 @@ test('a name assembles from first/last when no full name is given', async () => 
   assert.equal(id.name, 'Gene Beachak');
 });
 
+test('a terminally failed deep search cannot stay amber forever', async () => {
+  // The live failure: two contacts sat "queued" for hours. The job had failed
+  // its final attempt and parked in the job table; nothing told the contact,
+  // so the grid showed a spinner state with the error invisible.
+  const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
+  assert.match(queue, /terminal && job\.kind === 'deep_search'/);
+  assert.match(queue, /deep_search_queued_at: null/);
+  assert.match(queue, /search_flag: /, 'the failure reason must surface in the Link Data banner');
+
+  // Belt and braces: even if that write is lost, the UI treats a queued stamp
+  // older than 30 minutes as expired (a live run cannot outlast two 95s
+  // attempts plus backoff) and offers the re-run instead of eternal amber.
+  const grid = await readFile(new URL('../app/(app)/contacts/page.tsx', import.meta.url), 'utf8');
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(grid, /30 \* 60_000/);
+  assert.match(grid, /never concluded/);
+  assert.match(panel, /30 \* 60_000/);
+  assert.match(panel, /never concluded/);
+});
+
 test('the trestle key is trimmed and the current API version is called', async () => {
   // A trailing space pasted into the key is a documented cause of HTTP 403,
   // and a key provisioned today may not be enabled for the retired 3.0 path.
@@ -1514,8 +1534,9 @@ test('a link a human removed stays removed', async () => {
 test('the grid shows deep-search state and can start a run from it', async () => {
   const page = await readFile(new URL('../app/(app)/contacts/page.tsx', import.meta.url), 'utf8');
   // Three states from two stamps: amber while queued, green when done, red
-  // when never run. Amber is a state, not a button.
-  assert.match(page, /const running = !!contact\.deep_search_queued_at/);
+  // when never run. Amber is a state, not a button — and it expires after 30
+  // minutes rather than hiding a dead run forever.
+  assert.match(page, /const running = queuedAge < 30 \* 60_000/);
   assert.match(page, /text-amber-500/);
   assert.match(page, /text-red-500/);
   assert.match(page, /queueDeepSearch\(contact\)/);
