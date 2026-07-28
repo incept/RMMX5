@@ -68,6 +68,7 @@ export default function ContactPanel({
   const [compose, setCompose] = useState({ subject: '', html: '', accountId: '' });
   const [confirmUrlValue, setConfirmUrlValue] = useState('');
   const [countyValue, setCountyValue] = useState('');
+  const [reverseResult, setReverseResult] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<any[]>([]);
 
   const load = useCallback(async () => {
@@ -198,6 +199,40 @@ export default function ContactPanel({
       onChanged();
     } else {
       alert((await res.json()).error ?? 'Save failed');
+    }
+  }
+
+  // Admin-pressed Trestle lookup. Forces the provider call — the point of the
+  // button is to SEE what the provider says about the number — but the server
+  // still only ever fills blank fields; nothing a human typed is overwritten.
+  async function runReverseLookup() {
+    setBusy('reverse');
+    setReverseResult(null);
+    try {
+      const res = await fetch(`/api/contacts/${contactId}/enrich`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}) as any);
+      if (data.error) {
+        setReverseResult(data.error);
+      } else if (!data.identity) {
+        setReverseResult(data.reason ?? 'No result from provider');
+      } else {
+        const who = data.identity.name ?? 'no name on record';
+        const where =
+          data.identity.city && data.identity.state
+            ? `${data.identity.city}, ${data.identity.state}`
+            : 'no location';
+        const line = data.identity.lineType ? ` · ${data.identity.lineType}` : '';
+        const applied = data.filled?.length
+          ? ` — filled ${data.filled.join(', ')}`
+          : ' — nothing filled (fields already set)';
+        setReverseResult(`Trestle: ${who} · ${where}${line}${applied}`);
+        if (data.filled?.length) {
+          await load();
+          onChanged();
+        }
+      }
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -641,6 +676,30 @@ export default function ContactPanel({
                 )}
                 {customInputs('contact')}
               </div>
+
+              {/* Reverse phone lookup — admin only, because every press is a
+                  billed Trestle call (metered against the same monthly cap as
+                  the automatic enrichment). Shows the raw answer; only blank
+                  fields are ever written. */}
+              {isAdmin && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    className="btn"
+                    disabled={busy === 'reverse' || !contact.phone?.trim()}
+                    title={
+                      contact.phone?.trim()
+                        ? 'Ask Trestle who owns this number. Billed per press; only ever fills blank fields.'
+                        : 'Needs a phone number first'
+                    }
+                    onClick={runReverseLookup}
+                  >
+                    {busy === 'reverse' ? 'Looking up…' : '☎ Reverse # lookup'}
+                  </button>
+                  {reverseResult && (
+                    <span className="text-xs text-gray-600">{reverseResult}</span>
+                  )}
+                </div>
+              )}
 
               {/* Tracking data — where the lead came from. Was its own "Data"
                   tab; folded in here so one save covers the whole record. */}

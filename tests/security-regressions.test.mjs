@@ -263,6 +263,57 @@ test('browser capacity is bounded and idle shutdown cannot kill active work', as
   assert.match(browser, /waiters\.length >= MAX_QUEUED_PAGES/);
 });
 
+test('every integrations-page section can actually be saved, secrets masked', async () => {
+  // The live failure: the Trestle section rendered and accepted an API key, but
+  // 'trestle' was never added to the settings route's KNOWN_KEYS — so every
+  // save returned "Unknown settings key: trestle". The page and the route must
+  // agree, and any field the page marks secret must be masked by the route.
+  const page = await readFile(
+    new URL('../app/(app)/admin/integrations/page.tsx', import.meta.url),
+    'utf8'
+  );
+  const route = await readFile(
+    new URL('../app/api/admin/settings/route.ts', import.meta.url),
+    'utf8'
+  );
+
+  const knownKeys = route.match(/const KNOWN_KEYS = \[([\s\S]*?)\]/)?.[1] ?? '';
+  const secretFields = route.match(/const SECRET_FIELDS[\s\S]*?\n\};/)?.[0] ?? '';
+
+  const sections = [...page.matchAll(/key: '([a-z_]+)',\s*\n\s*title:/g)].map((m) => m[1]);
+  assert.ok(sections.includes('trestle'), 'expected to find the trestle section');
+  for (const key of sections) {
+    assert.ok(knownKeys.includes(`'${key}'`), `settings route must accept saves for '${key}'`);
+  }
+
+  for (const match of page.matchAll(/key: '([a-z_]+)', label:[^\n]*secret: true/g)) {
+    assert.ok(
+      secretFields.includes(`'${match[1]}'`),
+      `secret field '${match[1]}' must be masked by the settings route`
+    );
+  }
+});
+
+test('manual reverse lookup is admin-gated and still only fills blanks', async () => {
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/enrich/route.ts', import.meta.url),
+    'utf8'
+  );
+  const enrichment = await readFile(new URL('../lib/enrichment.ts', import.meta.url), 'utf8');
+
+  // Every press is a billed provider call — workers must not have the button's
+  // endpoint even if they discover its URL.
+  assert.match(route, /requireAdmin/);
+  assert.match(route, /force: true/);
+
+  // Force skips the "already complete" short-circuit (the admin wants to SEE
+  // the answer) but must never widen what gets written: name/city/state writes
+  // stay behind their needsName/needsLocation guards.
+  assert.match(enrichment, /!needsName && !needsLocation && !opts\?\.force/);
+  assert.match(enrichment, /if \(needsName && identity\.name\)/);
+  assert.match(enrichment, /if \(needsLocation && identity\.city && identity\.state\)/);
+});
+
 test('password reset is non-enumerating and has a recovery page', async () => {
   const landing = await readFile(new URL('../app/page.tsx', import.meta.url), 'utf8');
   const reset = await readFile(

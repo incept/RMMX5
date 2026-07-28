@@ -16,6 +16,7 @@ const KNOWN_KEYS = [
   'fluent_forms',
   'callscaler',
   'inbound_email',
+  'trestle',
   'ipapi',
   'anthropic',
   'voicemail',
@@ -42,6 +43,7 @@ const SECRET_FIELDS: Record<string, string[]> = {
   fluent_forms: ['webhook_secret'],
   callscaler: ['api_key', 'webhook_secret'],
   inbound_email: ['webhook_secret'],
+  trestle: ['api_key'],
   ipapi: ['api_key'],
   anthropic: ['api_key'],
   voicemail: ['api_key'],
@@ -135,6 +137,23 @@ export async function PUT(request: Request) {
       ['monthly_limit', 'Monthly Anthropic request limit'],
       ['input_cost_per_million', 'Input-token cost per million'],
       ['output_cost_per_million', 'Output-token cost per million'],
+    ] as const) {
+      if (value[field] === '' || value[field] == null) continue;
+      const amount = Number(value[field]);
+      const valid =
+        field === 'monthly_limit'
+          ? Number.isInteger(amount) && amount >= 1 && amount <= 2_147_483_647
+          : Number.isFinite(amount) && amount >= 0 && amount <= 1000;
+      if (!valid) {
+        return NextResponse.json({ error: `${label} is invalid` }, { status: 400 });
+      }
+      value[field] = amount;
+    }
+  }
+  if (body.key === 'trestle') {
+    for (const [field, label] of [
+      ['monthly_limit', 'Monthly lookup limit'],
+      ['reverse_phone_cost', 'Cost per lookup'],
     ] as const) {
       if (value[field] === '' || value[field] == null) continue;
       const amount = Number(value[field]);

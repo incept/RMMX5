@@ -1088,8 +1088,9 @@ test('enrichment only ever fills blanks', async () => {
   // The "Caller +1919…" label is the one value enrichment may overwrite.
   assert.match(source, /function isPlaceholderName/, 'placeholder names are recognised');
   assert.match(source, /caller/i);
-  // And it returns early rather than spending a lookup it cannot use.
-  assert.match(source, /if \(!needsName && !needsLocation\)/);
+  // And it returns early rather than spending a lookup it cannot use — unless
+  // an admin forced the run to see the provider's answer.
+  assert.match(source, /if \(!needsName && !needsLocation && !opts\?\.force\)/);
 });
 
 test('enrichment runs on the queue, never in the CallScaler webhook', async () => {

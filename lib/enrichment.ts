@@ -1,7 +1,7 @@
 import { createAdminClient } from '@/lib/supabase/server';
 import { logActivity } from '@/lib/activity';
 import { logDebug } from '@/lib/debug-log';
-import { lookupPhoneIdentity } from '@/lib/integrations/trestle';
+import { lookupPhoneIdentity, type PhoneIdentity } from '@/lib/integrations/trestle';
 
 /**
  * Contact enrichment from a phone number.
@@ -27,11 +27,13 @@ export interface EnrichmentResult {
   ok: boolean;
   filled: string[];
   reason?: string;
+  /** What the provider said, verbatim, for a human to read. */
+  identity?: PhoneIdentity | null;
 }
 
 export async function enrichContactFromPhone(
   contactId: string,
-  opts?: { actorId?: string | null }
+  opts?: { actorId?: string | null; force?: boolean }
 ): Promise<EnrichmentResult> {
   const supabase = createAdminClient();
   const { data: contact, error } = await supabase
@@ -44,15 +46,20 @@ export async function enrichContactFromPhone(
   if (!contact.phone) return { ok: false, filled: [], reason: 'Contact has no phone number' };
 
   // Nothing to gain: a real name and a location are already known. Checked
-  // before the request so a re-run costs nothing.
+  // before the request so a re-run costs nothing. A force run (an admin's
+  // explicit button press) skips this and spends the lookup anyway — the
+  // point of that button is to SEE what the provider says, even when every
+  // field is already set. It still only ever writes blanks below.
   const needsName = isPlaceholderName(contact.name);
   const needsLocation = !contact.city?.trim() || !contact.state?.trim();
-  if (!needsName && !needsLocation) {
+  if (!needsName && !needsLocation && !opts?.force) {
     return { ok: true, filled: [], reason: 'Already has a name and location' };
   }
 
   const identity = await lookupPhoneIdentity(contact.phone, { contactId });
-  if (!identity) return { ok: false, filled: [], reason: 'No result from provider' };
+  if (!identity) {
+    return { ok: false, filled: [], reason: 'No result from provider (is the Trestle API key configured?)', identity: null };
+  }
 
   const filled: string[] = [];
 
@@ -99,7 +106,7 @@ export async function enrichContactFromPhone(
       context: { provider_has_name: !!identity.name, provider_has_location: !!(identity.city && identity.state) },
       contactId,
     });
-    return { ok: true, filled: [], reason: 'Provider returned nothing we were missing' };
+    return { ok: true, filled: [], reason: 'Provider returned nothing we were missing', identity };
   }
 
   // Logged against the contact so the origin of a name is auditable. A name
@@ -119,5 +126,5 @@ export async function enrichContactFromPhone(
     contactId,
   });
 
-  return { ok: true, filled };
+  return { ok: true, filled, identity };
 }
