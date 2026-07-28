@@ -1077,6 +1077,20 @@ test('a name assembles from first/last when no full name is given', async () => 
   assert.equal(id.name, 'Gene Beachak');
 });
 
+test('the trestle key is trimmed and the current API version is called', async () => {
+  // A trailing space pasted into the key is a documented cause of HTTP 403,
+  // and a key provisioned today may not be enabled for the retired 3.0 path.
+  const client = await readFile(new URL('../lib/integrations/trestle.ts', import.meta.url), 'utf8');
+  const settings = await readFile(
+    new URL('../app/api/admin/settings/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(client, /cfg\.api_key\?\.trim\(\)/);
+  assert.match(client, /api\.trestleiq\.com\/3\.2\/phone/);
+  assert.doesNotMatch(client, /\/3\.0\/phone/);
+  assert.match(settings, /value\.api_key = value\.api_key\.trim\(\)/);
+});
+
 test('enrichment only ever fills blanks', async () => {
   // A value a person gave you outranks a data provider's guess — the same
   // precedence the search uses for confirmed facts. The lone exception is the

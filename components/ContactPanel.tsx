@@ -69,6 +69,10 @@ export default function ContactPanel({
   const [confirmUrlValue, setConfirmUrlValue] = useState('');
   const [countyValue, setCountyValue] = useState('');
   const [reverseResult, setReverseResult] = useState<string | null>(null);
+  const [duplicates, setDuplicates] = useState<any[]>([]);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeQuery, setMergeQuery] = useState('');
+  const [mergeResults, setMergeResults] = useState<any[]>([]);
   const [profiles, setProfiles] = useState<any[]>([]);
 
   const load = useCallback(async () => {
@@ -91,6 +95,34 @@ export default function ContactPanel({
     ]);
 
     setContact(contactRes.data);
+
+    // Possible duplicates: another contact sharing this one's phone or email.
+    // The classic pair is a call-in lead plus a form submission from the same
+    // person — the caller-ID name and the typed name rarely match, but the
+    // number does. Uses the indexed generated columns, not a JS scan.
+    if (contactRes.data) {
+      const filters: string[] = [];
+      const digits = String(contactRes.data.phone ?? '')
+        .replace(/\D/g, '')
+        .slice(-10);
+      if (digits.length === 10) filters.push(`phone_normalized.eq.${digits}`);
+      const email = String(contactRes.data.email ?? '')
+        .trim()
+        .toLowerCase();
+      if (email && !/[,()]/.test(email)) filters.push(`email_normalized.eq.${email}`);
+      if (filters.length) {
+        const { data: dups } = await supabase
+          .from('contacts')
+          .select('id, name, phone, email, created_at')
+          .or(filters.join(','))
+          .neq('id', contactId)
+          .limit(5);
+        setDuplicates(dups ?? []);
+      } else {
+        setDuplicates([]);
+      }
+    }
+
     setStatuses(statusRes.data ?? []);
     setStages(stageRes.data ?? []);
     setCustomFields(fieldsRes.data ?? []);
@@ -231,6 +263,61 @@ export default function ContactPanel({
           onChanged();
         }
       }
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Type-ahead for the merge picker. Commas and parens are stripped because
+  // they are PostgREST filter syntax, not searchable text.
+  async function searchMergeTargets(q: string) {
+    setMergeQuery(q);
+    const cleaned = q.trim().replace(/[,()]/g, '');
+    if (cleaned.length < 2) {
+      setMergeResults([]);
+      return;
+    }
+    const like = `%${cleaned}%`;
+    const { data } = await supabase
+      .from('contacts')
+      .select('id, name, phone, email, created_at')
+      .neq('id', contactId)
+      .or(`name.ilike.${like},email.ilike.${like},phone.ilike.${like}`)
+      .order('created_at', { ascending: false })
+      .limit(8);
+    setMergeResults(data ?? []);
+  }
+
+  // Merges OTHER into THIS contact: this contact's fields win, blanks fill,
+  // every call/email/link/note moves here, and the duplicate is deleted — all
+  // in one database transaction (a half-merge would be worse than none).
+  async function mergeContact(other: any) {
+    const otherLabel = other.name?.trim() || other.phone || other.email || other.id;
+    if (
+      !confirm(
+        `Merge "${otherLabel}" into "${contact.name || 'this contact'}"?\n\n` +
+          `This contact's fields win; blanks fill from the other. All calls, emails, ` +
+          `links, and history move here, then the duplicate is deleted. This cannot be undone.`
+      )
+    )
+      return;
+    setBusy('merge');
+    try {
+      const res = await fetch(`/api/contacts/${contactId}/merge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mergeId: other.id }),
+      });
+      const data = await res.json().catch(() => ({}) as any);
+      if (!res.ok) {
+        alert(data.error ?? 'Merge failed');
+        return;
+      }
+      setMergeOpen(false);
+      setMergeQuery('');
+      setMergeResults([]);
+      await load();
+      onChanged();
     } finally {
       setBusy(null);
     }
@@ -579,6 +666,32 @@ export default function ContactPanel({
         <div className="flex-1 overflow-y-auto p-5">
           {tab === 'Contact Info' && (
             <div className="space-y-4">
+              {/* Same phone or email as another contact — almost always a
+                  call-in lead plus a form submission from one person. Surfaced
+                  here so nobody has to spot it by eye in the grid. */}
+              {isAdmin && duplicates.length > 0 && (
+                <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  <div className="font-semibold">
+                    Possible duplicate{duplicates.length > 1 ? 's' : ''} — same phone or email:
+                  </div>
+                  {duplicates.map((d) => (
+                    <div key={d.id} className="mt-1 flex flex-wrap items-center gap-2">
+                      <span>
+                        {d.name?.trim() || '(unnamed)'} · {d.phone || d.email || '—'} · added{' '}
+                        {new Date(d.created_at).toLocaleDateString()}
+                      </span>
+                      <button
+                        className="btn btn-ghost text-xs"
+                        disabled={busy === 'merge'}
+                        title="Absorb that contact into this record: this record's fields win, blanks fill, all history moves here, the duplicate is deleted"
+                        onClick={() => mergeContact(d)}
+                      >
+                        ⇄ Merge into this record
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 {input('Name', 'name')}
                 {input('Email', 'email', 'email')}
@@ -697,6 +810,52 @@ export default function ContactPanel({
                   </button>
                   {reverseResult && (
                     <span className="text-xs text-gray-600">{reverseResult}</span>
+                  )}
+                  <button
+                    className="btn"
+                    onClick={() => setMergeOpen(!mergeOpen)}
+                    title="Absorb a duplicate contact into this record"
+                  >
+                    ⇄ Merge duplicate…
+                  </button>
+                </div>
+              )}
+              {isAdmin && mergeOpen && (
+                <div className="space-y-2 rounded-lg border border-gray-200 p-3">
+                  <div className="text-xs text-gray-500">
+                    Find the duplicate to absorb into this record. This contact&apos;s fields win
+                    and blanks fill from the other; all calls, emails, links, and history move
+                    here; the duplicate is then deleted.
+                  </div>
+                  <input
+                    className="input"
+                    placeholder="Search by name, phone, or email"
+                    value={mergeQuery}
+                    onChange={(e) => searchMergeTargets(e.target.value)}
+                  />
+                  {mergeResults.map((r) => (
+                    <div
+                      key={r.id}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded border border-gray-100 px-2 py-1 text-sm"
+                    >
+                      <span>
+                        {r.name?.trim() || '(unnamed)'}{' '}
+                        <span className="text-xs text-gray-400">
+                          {[r.phone, r.email].filter(Boolean).join(' · ')} · added{' '}
+                          {new Date(r.created_at).toLocaleDateString()}
+                        </span>
+                      </span>
+                      <button
+                        className="btn btn-ghost text-xs"
+                        disabled={busy === 'merge'}
+                        onClick={() => mergeContact(r)}
+                      >
+                        {busy === 'merge' ? 'Merging…' : '⇄ Merge'}
+                      </button>
+                    </div>
+                  ))}
+                  {mergeQuery.trim().length >= 2 && !mergeResults.length && (
+                    <div className="text-xs text-gray-400">No matches</div>
                   )}
                 </div>
               )}
