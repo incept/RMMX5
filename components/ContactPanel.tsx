@@ -1083,11 +1083,14 @@ export default function ContactPanel({
                   className="self-center text-[10px] text-gray-400"
                   title="Stamped when a run concludes — a partial run counts; it kept its findings"
                 >
-                  {contact.deep_search_queued_at
+                  {contact.deep_search_queued_at &&
+                  Date.now() - new Date(contact.deep_search_queued_at).getTime() < 30 * 60_000
                     ? 'Deep search queued…'
-                    : contact.deep_searched_at
-                      ? `Last run ${new Date(contact.deep_searched_at).toLocaleString()}`
-                      : 'Never run'}
+                    : contact.deep_search_queued_at
+                      ? 'The last queued run never concluded — run it again'
+                      : contact.deep_searched_at
+                        ? `Last run ${new Date(contact.deep_searched_at).toLocaleString()}`
+                        : 'Never run'}
                 </span>
               </div>
 

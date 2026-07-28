@@ -316,6 +316,32 @@ async function finishJob(job: any, worker: string, failure?: unknown) {
     message,
     context: { job_id: job.id, attempt: job.attempt_count, terminal },
   });
+
+  // A deep search that fails its last attempt must not leave the contact
+  // wearing the amber "queued" icon forever with the error hidden in the job
+  // table. Clear the stamp and raise the search flag so the Link Data banner
+  // says WHY and invites a re-run. Best-effort: this write failing must not
+  // mask the recorded job failure.
+  if (terminal && job.kind === 'deep_search' && job.payload?.contactId) {
+    const { error: stampError } = await supabase
+      .from('contacts')
+      .update({
+        deep_search_queued_at: null,
+        search_flag: `the last deep search failed after ${job.attempt_count} attempt${
+          job.attempt_count === 1 ? '' : 's'
+        } (${message.slice(0, 300)})`,
+        search_flagged_at: new Date().toISOString(),
+      })
+      .eq('id', String(job.payload.contactId));
+    if (stampError) {
+      await logDebug({
+        level: 'warn',
+        source: 'job:deep_search',
+        message: `Could not clear the queued stamp after terminal failure: ${stampError.message}`,
+        contactId: String(job.payload.contactId),
+      }).catch(() => {});
+    }
+  }
 }
 
 async function withJobHeartbeat<T>(

@@ -631,18 +631,28 @@ export default function ContactsPage() {
   }
 
   const searchIcon = (contact: ContactRow) => {
-    const running = !!contact.deep_search_queued_at;
+    // A queued stamp older than 30 minutes cannot be a live run (two 95s
+    // attempts plus backoff fit well inside it): the job died without its
+    // conclusion clearing the stamp. Showing it amber forever would hide a
+    // failure behind a spinner — treat it as expired and clickable instead.
+    const queuedAge = contact.deep_search_queued_at
+      ? Date.now() - new Date(contact.deep_search_queued_at).getTime()
+      : Infinity;
+    const running = queuedAge < 30 * 60_000;
+    const expired = !running && !!contact.deep_search_queued_at;
     const done = !!contact.deep_searched_at;
     const color = running ? 'text-amber-500' : done ? 'text-green-600' : 'text-red-500';
     const title = running
       ? 'Deep search queued — runs on the next worker tick'
-      : done
-        ? `Deep search completed ${new Date(contact.deep_searched_at!).toLocaleString()}${
-            isAdmin ? ' — click to run again' : ''
-          }`
-        : isAdmin
-          ? 'Deep search never run — click to run it'
-          : 'Deep search never run';
+      : expired
+        ? `The last queued deep search never concluded${isAdmin ? ' — click to run it again' : ''}`
+        : done
+          ? `Deep search completed ${new Date(contact.deep_searched_at!).toLocaleString()}${
+              isAdmin ? ' — click to run again' : ''
+            }`
+          : isAdmin
+            ? 'Deep search never run — click to run it'
+            : 'Deep search never run';
     const glyph = (
       <svg
         viewBox="0 0 16 16"
