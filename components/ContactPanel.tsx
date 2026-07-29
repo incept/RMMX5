@@ -750,6 +750,10 @@ export default function ContactPanel({
                     Projected ${Number(contact.revenue_projection).toLocaleString()}
                   </span>
                 )}
+                {/* Deep search from the header, so a run doesn't require a
+                    trip into Link Data. Same stamps and 30-minute staleness
+                    rule as the grid icon: amber = genuinely in flight, green =
+                    completed (click re-runs), red = never run (click runs). */}
                 {(() => {
                   const queuedAge = contact.deep_search_queued_at
                     ? Date.now() - new Date(contact.deep_search_queued_at).getTime()
