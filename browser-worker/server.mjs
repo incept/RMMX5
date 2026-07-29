@@ -34,7 +34,7 @@ import { access } from 'node:fs/promises';
 // BROWSER_UA in lib/deep-search/browser.ts.
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
-  'Chrome/138.0.0.0 Safari/537.36';
+  'Chrome/151.0.0.0 Safari/537.36';
 
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '127.0.0.1';
