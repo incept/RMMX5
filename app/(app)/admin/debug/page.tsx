@@ -21,21 +21,30 @@ export default function DebugLogPage() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [purgeTarget, setPurgeTarget] = useState('email_events');
   const [purgeDays, setPurgeDays] = useState(365);
   const [purging, setPurging] = useState(false);
 
   const load = useCallback(async () => {
-    let query = supabase
-      .from('debug_log')
-      .select('*, contacts ( name )')
-      .order('created_at', { ascending: false })
-      .limit(200);
-    if (level) query = query.eq('level', level);
-    if (source) query = query.ilike('source', `%${source}%`);
-    const { data } = await query;
-    setEntries(data ?? []);
-    setLoading(false);
+    setLoading(true);
+    setLoadError('');
+    try {
+      let query = supabase
+        .from('debug_log')
+        .select('*, contacts ( name )')
+        .order('created_at', { ascending: false })
+        .limit(200);
+      if (level) query = query.eq('level', level);
+      if (source) query = query.ilike('source', `%${source}%`);
+      const { data, error } = await query;
+      if (error) throw error;
+      setEntries(data ?? []);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : 'Network request failed');
+    } finally {
+      setLoading(false);
+    }
   }, [supabase, level, source]);
 
   useEffect(() => {
@@ -110,7 +119,7 @@ export default function DebugLogPage() {
             />
             Auto-refresh
           </label>
-          <button className="btn py-1" onClick={load}>
+          <button className="btn py-1" disabled={loading} onClick={load}>
             Refresh
           </button>
         </div>
@@ -119,6 +128,12 @@ export default function DebugLogPage() {
         Integration and delivery failures, newest first. Entries older than 14 days are pruned
         automatically by the cron tick.
       </p>
+      {loadError && (
+        <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+          Could not load the Admin Debug Log: {loadError}. Check the browser network request and
+          confirm all Supabase migrations and admin RLS policies are installed.
+        </div>
+      )}
 
       <div className="card mb-4">
         <div className="mb-2 text-sm font-semibold">Data retention</div>
@@ -172,7 +187,11 @@ export default function DebugLogPage() {
           ))}
         </select>
         <span className="ml-auto text-xs text-gray-400">
-          {loading ? 'Loading…' : `${entries.length} entries · ${errorCount} errors`}
+          {loading
+            ? 'Loading…'
+            : loadError
+              ? 'Load failed'
+              : `${entries.length} entries · ${errorCount} errors`}
         </span>
       </div>
 
@@ -226,7 +245,7 @@ export default function DebugLogPage() {
                 )}
               </Fragment>
             ))}
-            {!loading && entries.length === 0 && (
+            {!loading && !loadError && entries.length === 0 && (
               <tr>
                 <td colSpan={5} className="px-4 py-12 text-center text-sm text-gray-400">
                   Nothing logged — no failures recorded.
