@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { enqueueDeepSearchJob } from '@/lib/job-queue';
-import { readJsonBody } from '@/lib/request-limits';
+import { readTextBody } from '@/lib/request-limits';
 import { logDebug, errorMessage } from '@/lib/debug-log';
 
 type Params = { params: Promise<{ id: string }> };
@@ -16,9 +16,25 @@ export async function POST(request: Request, { params }: Params) {
 
   try {
     // Optional body: { focusDate: 'yyyy-mm-dd' } branches out one arrest of a
-    // multi-arrest person. No body means an ordinary unfocused run. A present
-    // but malformed body must not silently change the operator's request.
-    const body = request.body ? await readJsonBody(request, 4 * 1024) : {};
+    // multi-arrest person. No body means an ordinary unfocused run — and "no
+    // body" must be judged by CONTENT, not by request.body being null: the
+    // production runtime hands a plain button POST to this handler as a
+    // zero-length stream, which JSON.parse rejects ("Invalid JSON payload")
+    // and which killed every unfocused run. A NON-empty malformed body still
+    // errors; it must not silently change the operator's request.
+    const rawBody = await readTextBody(request, 4 * 1024);
+    let body: any = {};
+    if (rawBody.trim()) {
+      try {
+        body = JSON.parse(rawBody);
+      } catch {
+        const error = new Error('Deep-search payload must be valid JSON') as Error & {
+          status?: number;
+        };
+        error.status = 400;
+        throw error;
+      }
+    }
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       const error = new Error('Deep-search payload must be a JSON object') as Error & {
         status?: number;
