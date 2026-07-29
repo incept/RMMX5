@@ -287,9 +287,17 @@ export async function runDeepSearchForContact(
     signal?: AbortSignal;
     focusDate?: string;
     jobId?: string;
+    jobWorker?: string;
+    jobAttempt?: number;
   }
 ): Promise<DeepSearchResult> {
   const supabase = createAdminClient();
+  if (
+    opts?.jobId &&
+    (!opts.jobWorker || !Number.isInteger(opts.jobAttempt) || Number(opts.jobAttempt) < 1)
+  ) {
+    throw new Error('Deep-search queue attempt identity is incomplete');
+  }
   // A focused run branches out ONE arrest of a multi-arrest person: that date
   // is pinned and every date-built URL and search window uses it alone, so the
   // run digs into this booking instead of re-treading all of them.
@@ -312,11 +320,12 @@ export async function runDeepSearchForContact(
     return deadlineHit;
   };
 
-  const { data: contact } = await supabase
+  const { data: contact, error: contactError } = await supabase
     .from('contacts')
     .select('id, name, city, state, search_facts, confirmed_facts')
     .eq('id', contactId)
     .single();
+  if (contactError) throw new Error(`Could not load contact for deep search: ${contactError.message}`);
   if (!contact?.name) throw new Error('Contact has no name to search for');
 
   const name = splitName(contact.name);
@@ -335,10 +344,13 @@ export async function runDeepSearchForContact(
   // makes the confirmed value the one actually searched rather than merely
   // present. confirmed_facts leads because it is the strongest signal there is:
   // a human said so, and it survives Clear results when search_facts does not.
-  const { data: slotLinks } = await supabase
+  const { data: slotLinks, error: slotLinksError } = await supabase
     .from('contact_links')
     .select('url')
     .eq('contact_id', contactId);
+  if (slotLinksError) {
+    throw new Error(`Could not load confirmed contact links: ${slotLinksError.message}`);
+  }
 
   let pinned: SearchFacts = { ...EMPTY_FACTS };
   // Merged first so a focused run's date takes the front of the variant list.
@@ -393,8 +405,12 @@ export async function runDeepSearchForContact(
     });
   }
 
-  const [{ data: siteRows }, { data: ruleRows }, { data: existing }, { data: confirmedRows }] =
-    await Promise.all([
+  const [
+    { data: siteRows, error: siteRowsError },
+    { data: ruleRows, error: ruleRowsError },
+    { data: existing, error: existingError },
+    { data: confirmedRows, error: confirmedRowsError },
+  ] = await Promise.all([
       supabase.from('probe_sites').select('*').order('scope'),
       supabase.from('url_rules').select('*'),
       supabase
@@ -409,6 +425,14 @@ export async function runDeepSearchForContact(
         .eq('status', 'confirmed')
         .limit(20),
     ]);
+  if (siteRowsError) throw new Error(`Could not load probe sites: ${siteRowsError.message}`);
+  if (ruleRowsError) throw new Error(`Could not load URL rules: ${ruleRowsError.message}`);
+  if (existingError) {
+    throw new Error(`Could not load existing search candidates: ${existingError.message}`);
+  }
+  if (confirmedRowsError) {
+    throw new Error(`Could not load confirmed search candidates: ${confirmedRowsError.message}`);
+  }
 
   // Inactive sites still matter: they are the SERP-fallback and id-pivot
   // targets. Only direct probing is limited to the active ones.
@@ -429,6 +453,17 @@ export async function runDeepSearchForContact(
   const unindexedPrioritySites: string[] = [];
   let derived = 0;
   let siteSearches = 0;
+  // A no-result is trustworthy only when at least one external source actually
+  // answered and was readable. Otherwise a total browser/provider outage looks
+  // exactly like a legitimate search with zero matches.
+  let discoveryAttempts = 0;
+  let discoverySuccesses = 0;
+  const discoveryFailures: string[] = [];
+  const recordDiscoveryFailure = (source: string, reason: string) => {
+    if (discoveryFailures.length < 6) {
+      discoveryFailures.push(`${source}: ${reason}`.slice(0, 500));
+    }
+  };
   // Domains that produced at least one hit, so we know which sites are worth
   // handing the operator a 'see everything on this site' link for.
   const sitesWithHits = new Set<string>();
@@ -465,313 +500,7 @@ export async function runDeepSearchForContact(
   let minedListings = 0;
   for (const pageUrl of confirmedUrls) {
     if (minedPages >= MAX_CONFIRMED_PAGE_FETCHES) break;
-    // Mining is a bonus phase and can cost a browser fetch plus an extraction
-    // call per page; the probe rounds behind it are the core of the run. So it
-    // only runs while a comfortable margin remains — this is what let mining
-    // eat the whole window and starve the probes on its first night out.
-    if (outOfTime() || msLeft() < 60_000) break;
-    const site = sitesAll.find((s) => urlOnDomain(pageUrl, s.domain));
-    if (!site) continue; // a news article or social post has no roster to mine
-    minedPages += 1;
-
-    let outcome: Awaited<ReturnType<typeof fetchProbePage>>;
-    try {
-      outcome = await fetchProbePage(pageUrl, {
-        render: site.needs_render,
-        needsBrowser: site.needs_browser,
-        signal,
-      });
-    } catch (e) {
-      // An abort mid-fetch (deadline, lease loss) concludes the run; it must
-      // never destroy it.
-      outcome = { ok: false, reason: errorMessage(e), blocked: false };
-    }
-    if (!outcome.ok) {
-      await logProbeFailure(site.domain, pageUrl, outcome.reason, contactId);
-      continue;
-    }
-    let rows: RawRow[] = [];
-    try {
-      const pageText = stripToText(outcome.html, pageUrl);
-      const parsed = await rowsFromPage(pageText, pageUrl, site.domain, name, contactId, {
-        signal,
-        requestKey: opts?.requestKey ? `${opts.requestKey}:mine:${minedPages}` : undefined,
-      });
-      rows = parsed.rows;
-      if (parsed.llmFacts) facts = mergeFacts(facts, parsed.llmFacts);
-    } catch (e) {
-      await logDebug({
-        source: 'deep-search:mine',
-        message: `Could not read the confirmed page on ${site.domain}: ${errorMessage(e)}`,
-        context: { url: pageUrl },
-        contactId,
-      });
-      continue;
-    }
-
-    for (const row of rows) {
-      const canonical = canonicalUrl(row.url);
-      if (!canonical || seen.has(canonical)) continue;
-      // A search page or sitemap is never a finding — its URL carrying the
-      // name is the only reason it would score.
-      if (isNonRecordUrl(row.url)) continue;
-      const haystack = `${row.text} ${row.url}`;
-      const rowFacts = mergeFacts(
-        mergeFacts({ ...EMPTY_FACTS }, factsFromUrl(row.url, name)),
-        factsFromText(row.text, name)
-      );
-      if (stateConflicts(rowFacts.state)) continue;
-      const scored = scoreCorroboration(haystack, name, mergeFacts(facts, rowFacts));
-      if (scored.confidence < MIN_CONFIDENCE) continue;
-
-      const rule = matchUrlRule(row.url, rules);
-      await candidateWriter.add({
-        contact_id: contactId,
-        url: row.url,
-        canonical_url: canonical,
-        title: row.text.slice(0, 300) || null,
-        snippet:
-          "listed on a page already confirmed as this person's — usually another arrest of the same person",
-        source: 'probe',
-        source_detail: `${site.domain} (confirmed page)`,
-        round: 0,
-        confidence: scored.confidence,
-        matched_facts: scored.matched,
-        url_rule_id: rule?.id ?? null,
-      });
-      seen.add(canonical);
-      candidates += 1;
-      minedListings += 1;
-      sitesWithHits.add(site.domain);
-      facts = mergeFacts(facts, rowFacts);
-      for (const st of rowFacts.state) statesSeen.add(st);
-      rememberFamilyIds(familyIds, site.family, rowFacts.record_ids);
-    }
-  }
-  if (minedListings) {
-    await logDebug({
-      source: 'deep-search:mine',
-      message: `Confirmed page(s) listed ${minedListings} further record(s) — likely additional arrests of this person. Their dates now carry branch buttons on the Booked row.`,
-      contactId,
-    });
-  }
-
-  for (const round of [0, 1] as const) {
-    // The county round runs on facts round 0 accumulated — under ambiguity
-    // those facts mix two people, so probing them would compound the mix.
-    if (round === 1 && ambiguous()) {
-      await logDebug({
-        source: 'deep-search:facts',
-        message: `Chaining stopped: candidates span ${[...statesSeen].sort().join(', ')} with nothing confirmed — pick the right identity in the panel, then re-run`,
-        contactId,
-      });
-      break;
-    }
-    // Round 0: nothing needed, or the lead's own state. Round 1: county-scoped
-    // sites, now that round 0 has probably supplied a county.
-    const roundSites = sites.filter((s) =>
-      round === 0 ? s.scope !== 'county' : s.scope === 'county'
-    );
-    if (!roundSites.length) continue;
-
-    const window = searchWindow();
-    const targets: { site: ProbeSite; url: string }[] = [];
-    for (const site of roundSites) {
-      const states = site.scope_state
-        ? [site.scope_state]
-        : facts.state.length
-          ? facts.state
-          : [null];
-      const counties = site.scope_county
-        ? [site.scope_county]
-        : facts.county.length
-          ? facts.county
-          : [null];
-
-      for (const state of states) {
-        for (const county of counties) {
-          // A site pinned to one state is irrelevant to a lead in another.
-          if (site.scope_state && stateConflicts([site.scope_state])) continue;
-          const url = buildProbeUrl(site.search_template, name, county, state, window);
-          if (url && !targets.some((t) => t.url === url)) targets.push({ site, url });
-        }
-      }
-    }
-    if (!targets.length) continue;
-    rounds += 1;
-
-    for (const { site, url } of targets) {
-      if (outOfTime()) break;
-      if (probed >= MAX_PROBES_PER_RUN) break;
-      probed += 1;
-      await sleep(PER_DOMAIN_DELAY_MS);
-
-      let outcome: Awaited<ReturnType<typeof fetchProbePage>>;
-      try {
-        outcome = await fetchProbePage(url, {
-          render: site.needs_render,
-          needsBrowser: site.needs_browser,
-          signal,
-        });
-      } catch (e) {
-        outcome = { ok: false, reason: errorMessage(e), blocked: false };
-      }
-      if (!outcome.ok) {
-        blocked += 1;
-        blockedDomains.add(site.domain);
-        await logProbeFailure(site.domain, url, outcome.reason, contactId);
-
-        // A policy refusal is BrightData's standing decision about the domain,
-        // so probing it again next run would waste the same call. Flag the site
-        // for SERP discovery instead of leaving it to fail forever. Additive
-        // only — nothing is disabled behind the operator's back.
-        if (outcome.policyBlocked && !site.serp_fallback) {
-          const { error } = await supabase
-            .from('probe_sites')
-            .update({ serp_fallback: true })
-            .eq('id', site.id);
-          await logDebug({
-            level: 'warn',
-            source: 'deep-search:probe',
-            message: error
-              ? `${site.domain} is policy-blocked by BrightData; could not flag it for SERP fallback: ${error.message}`
-              : `${site.domain} is policy-blocked by BrightData, so it is now flagged for site: SERP discovery instead of direct probing`,
-            context: { url },
-            contactId,
-          });
-        }
-        continue;
-      }
-
-      // One unreadable page must not discard the whole sweep. An unexpected
-      // error inside a single probe previously aborted the run and lost every
-      // candidate the earlier probes had already found.
-      let rows: RawRow[] = [];
-      try {
-        const pageText = stripToText(outcome.html, url);
-        const parsed = await rowsFromPage(pageText, url, site.domain, name, contactId, {
-          signal,
-          requestKey: opts?.requestKey ? `${opts.requestKey}:extract:${probed}` : undefined,
-        });
-        rows = parsed.rows;
-        if (parsed.llmFacts) facts = mergeFacts(facts, parsed.llmFacts);
-      } catch (e) {
-        await logDebug({
-          source: 'deep-search:probe',
-          message: `Could not read results from ${site.domain}: ${errorMessage(e)}`,
-          context: { url },
-          contactId,
-        });
-        continue;
-      }
-
-      for (const row of rows) {
-        const canonical = canonicalUrl(row.url);
-        if (!canonical || seen.has(canonical)) continue;
-        // A search page or sitemap is never a finding; treating one as a hit
-        // is also what made phantom "every arrest" links appear for sites
-        // with no real results.
-        if (isNonRecordUrl(row.url)) continue;
-
-        // Score against everything we know, using the row's own text plus its
-        // URL — the URL alone often carries the county and date.
-        const haystack = `${row.text} ${row.url}`;
-        const urlFacts = factsFromUrl(row.url, name);
-        const textFacts = factsFromText(row.text, name);
-        const rowFacts = mergeFacts(
-          mergeFacts({ ...EMPTY_FACTS }, urlFacts),
-          textFacts
-        );
-        const scored = scoreCorroboration(haystack, name, mergeFacts(facts, rowFacts));
-
-        // Hard reject on a state conflict: a Wake County NC client's record is
-        // not the same-named person booked in Texas.
-        const rowStates = rowFacts.state;
-        if (stateConflicts(rowStates)) continue;
-        if (scored.confidence < MIN_CONFIDENCE) continue;
-
-        const rule = matchUrlRule(row.url, rules);
-        await candidateWriter.add({
-          contact_id: contactId,
-          url: row.url,
-          canonical_url: canonical,
-          title: row.text.slice(0, 300) || null,
-          source: 'probe',
-          source_detail: site.domain,
-          round,
-          confidence: scored.confidence,
-          matched_facts: scored.matched,
-          url_rule_id: rule?.id ?? null,
-        });
-        seen.add(canonical);
-        candidates += 1;
-        sitesWithHits.add(site.domain);
-        // A record's own page teaches us more than the listing row did.
-        facts = mergeFacts(facts, rowFacts);
-        for (const st of rowFacts.state) statesSeen.add(st);
-        rememberFamilyIds(familyIds, site.family, rowFacts.record_ids);
-      }
-    }
-    if (probed >= MAX_PROBES_PER_RUN) break;
-  }
-
-  /* ── SERP fallback for sites we cannot read directly ──────────────────────
-     A challenge-walled site is not a dead end: Google has already crawled it,
-     so a site:-restricted query reaches the same records without touching the
-     host. Costs one SERP request per site, so it is capped and only runs for
-     sites that were blocked this run or are flagged as never readable. */
-  // Slots are scarce, so they go by priority (how often a site actually carries
-  // client records), not by the order rows happen to arrive in. Ordering by
-  // scope previously let arre.st — a 19-link mirror — crowd out arrests.org,
-  // which is a fifth of all historical links.
-  //
-  // One query per NETWORK: mirrors of the same operator return the same records,
-  // so querying siblings separately spends two requests for one set of results.
-  const fallbackCandidates = [
-    ...new Set([
-      ...blockedDomains,
-      ...sitesAll.filter((s) => s.serp_fallback).map((s) => s.domain),
-    ]),
-  ]
-    .map((domain) => ({ domain, site: sitesAll.find((s) => s.domain === domain) }))
-    .sort((a, b) => (a.site?.priority ?? 100) - (b.site?.priority ?? 100));
-
-  const usedFamilies = new Set<string>();
-  const fallbackDomains: string[] = [];
-  for (const { domain, site } of fallbackCandidates) {
-    if (fallbackDomains.length >= MAX_SERP_FALLBACKS) break;
-    if (site?.family) {
-      if (usedFamilies.has(site.family)) continue;
-      usedFamilies.add(site.family);
-    }
-    fallbackDomains.push(domain);
-  }
-
-  for (const domain of fallbackDomains) {
-    // Never start a fallback that cannot finish: both engines run against a
-    // FALLBACK_TIMEOUT_MS deadline, so launching one with less than that on
-    // the clock only manufactures timeout warnings (last night's logs).
-    if (outOfTime() || msLeft() < FALLBACK_TIMEOUT_MS + 5_000) break;
-    // Unquoted on purpose. These sites render "BEACHAK GENE MICHAEL" or
-    // "Beachak, Gene", so an exact-phrase "Gene Beachak" can return nothing at
-    // all. site: already narrows hard, and scoreCorroboration supplies the
-    // precision that the quotes would have.
-    const query = `site:${domain} ${name.first} ${name.last}`.trim();
-    // Both engines at once, and with a shorter deadline than a name search
-    // gets. Sequentially, one slow engine added its whole timeout to the run for
-    // every fallback domain — four domains of that is minutes spent waiting.
-    // Each engine is metered separately, so a timeout costs an attempt that
-    // BrightData does not bill (only successful requests are charged).
-    const engines: SearchEngine[] = ['google', 'bing'];
-    const settled = await Promise.allSettled(
-      engines.map((engine) =>
-        runSerpSearch(query, {
-          engine,
-          numResults: 20,
-          timeoutMs: FALLBACK_TIMEOUT_MS,
-          signal,
-          requestKey: opts?.requestKey ? `${opts.requestKey}:fallback:${domain}:${engine}` : undefined,
-        })
+   …3423 tokens truncated…       })
       )
     );
     serpFallbacks += engines.length;
@@ -780,7 +509,12 @@ export async function runDeepSearchForContact(
     for (const [i, outcome] of settled.entries()) {
       if (outcome.status === 'fulfilled') {
         lists.push(outcome.value);
+        discoverySuccesses += 1;
       } else {
+        recordDiscoveryFailure(
+          `${engines[i]} site search of ${domain}`,
+          errorMessage(outcome.reason)
+        );
         await logDebug({
           level: 'warn',
           source: 'deep-search:serp-fallback',
@@ -981,8 +715,36 @@ export async function runDeepSearchForContact(
     siteSearches += 1;
   }
   await candidateWriter.flush();
+  // Observe a deadline that fired during the final cheap phases even if no loop
+  // happened to call outOfTime() afterward.
+  outOfTime();
   if (opts?.signal?.aborted) {
     throw opts.signal.reason ?? new Error('Deep-search job lease was lost');
+  }
+  // A deadline is a safe partial completion only after at least one source
+  // answered. If every source timed out, there is no trustworthy partial result
+  // to turn green; leave the job failed/retryable and surface the outage.
+  if (discoverySuccesses === 0) {
+    const detail = discoveryFailures.length
+      ? ` ${discoveryFailures.join(' | ')}`
+      : '';
+    const message = discoveryAttempts > 0
+      ? `Deep search could not read any external source (${discoveryAttempts} failed attempt(s)); ` +
+        `the run was not marked complete.${detail}`
+      : `Deep search had no runnable external source (${sites.length} active probe site(s)); ` +
+        'check probe-site configuration and required state/county facts. The run was not marked complete.';
+    await logDebug({
+      level: 'error',
+      source: 'deep-search:health',
+      message,
+      context: {
+        attempts: discoveryAttempts,
+        successes: discoverySuccesses,
+        failures: discoveryFailures,
+      },
+      contactId,
+    }).catch(() => {});
+    throw new Error(message);
   }
 
   // Say plainly that the window closed early. The candidates above were still
@@ -1000,8 +762,8 @@ export async function runDeepSearchForContact(
 
   // The grid's search icon runs on these two stamps: queued ⇒ amber, searched
   // ⇒ green. Stamped at conclusion so a partial run counts — it kept its
-  // findings. Best-effort: before migration 0025 the columns do not exist,
-  // and that must not fail the run.
+  // findings. For queued work, migration 0028 commits these stamps, the exact
+  // queue attempt, and the facts in one transaction.
   // Reuses the existing search_flag, so these land in the contacts grid's
   // Flagged view with the reason on hover — no new surface to learn. Ambiguity
   // outranks index lag: an unresolved identity makes every other follow-up
@@ -1013,15 +775,16 @@ export async function runDeepSearchForContact(
       ? `Not yet indexed on ${unindexedPrioritySites.join(', ')} — re-run deep search in a few days`
       : null;
   if (opts?.jobId) {
-    const { data: committed, error } = await supabase.rpc('finish_deep_search_state', {
+    const { data: committed, error } = await supabase.rpc('finish_deep_search_attempt', {
       p_contact_id: contactId,
       p_job_id: opts.jobId,
+      p_worker: opts.jobWorker!,
+      p_attempt_count: opts.jobAttempt!,
       p_search_facts: merged,
       p_search_flag: nextFlag,
-      p_flag_changed: nextFlag !== null,
     });
     if (error) throw new Error(`Could not finalize deep-search state: ${error.message}`);
-    if (committed !== true) throw new Error('Deep-search generation was superseded before completion');
+    if (committed !== true) throw new Error('Deep-search attempt lost its lease before completion');
   } else if (!factsAreEqual(normalizeFacts(contact.search_facts), merged)) {
     const { error } = await supabase.from('contacts').update({ search_facts: merged }).eq('id', contactId);
     if (error) throw new Error(`Could not persist search facts: ${error.message}`);
