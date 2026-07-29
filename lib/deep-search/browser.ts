@@ -52,6 +52,9 @@ const MAX_RENDERED_HTML_BYTES = 2 * 1024 * 1024;
 const MAX_DOM_NODES = 25_000;
 /** Chrome is only worth launching for pages we cannot get any cheaper way. */
 const LAUNCH_TIMEOUT_MS = 30_000;
+/** Puppeteer control calls occasionally wedge after Chrome has already failed. */
+const LIFECYCLE_TIMEOUT_MS = 10_000;
+const RESOURCE_CLOSE_TIMEOUT_MS = 5_000;
 
 /** Where Chrome usually lives, by platform. Overridden by the setting. */
 const DEFAULT_PATHS = [
@@ -72,7 +75,82 @@ const waiters: {
   resolve: () => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  signal?: AbortSignal;
+  onAbort?: () => void;
 }[] = [];
+
+function abortError(signal?: AbortSignal): Error {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new Error(signal?.aborted ? 'browser operation cancelled' : 'browser operation aborted');
+}
+
+/**
+ * Bounds Puppeteer operations that do not accept an AbortSignal themselves.
+ * `onLateResult` reaps resources created after the caller has already timed out
+ * or been cancelled, so an abandoned createBrowserContext/newPage promise
+ * cannot silently accumulate Chrome resources.
+ */
+function boundedOperation<T>(
+  operation: Promise<T>,
+  label: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+  onLateResult?: (value: T) => void | Promise<void>
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = () => fail(abortError(signal));
+    const timer = setTimeout(
+      () => fail(new Error(`${label} timed out after ${timeoutMs}ms`)),
+      timeoutMs
+    );
+    timer.unref?.();
+    if (signal?.aborted) {
+      fail(abortError(signal));
+    } else {
+      signal?.addEventListener('abort', onAbort, { once: true });
+    }
+
+    operation.then(
+      (value) => {
+        if (settled) {
+          if (onLateResult) void Promise.resolve(onLateResult(value)).catch(() => {});
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      }
+    );
+  });
+}
+
+function looksLikeErrorDocument(title: string, bodyText: string): boolean {
+  const normalizedTitle = title.replace(/\s+/g, ' ').trim();
+  const normalizedBody = bodyText.replace(/\s+/g, ' ').trim().slice(0, 600);
+  const titleError =
+    /^(?:(?:4|5)\d\d(?:\s*[-:|]\s*)?)?(?:error|not found|bad gateway|service unavailable|internal server error|gateway timeout|access denied)(?:\s*[-:|].*)?$/i;
+  const bodyError =
+    /^(?:(?:4|5)\d\d\s*(?:error|not found)\b|(?:error|page not found|bad gateway|service unavailable|internal server error|gateway timeout|upstream connect error|application error|this page (?:isn't|is not) working)\b)/i;
+  return titleError.test(normalizedTitle) || bodyError.test(normalizedBody);
+}
 
 async function resolveExecutable(): Promise<string | null> {
   const cfg = await getSetting<{ executable_path?: string; enabled?: string | boolean }>(
@@ -115,8 +193,26 @@ export async function closeBrowser(reason: string): Promise<void> {
   if (!pending) return;
   let b: Browser | null = null;
   try {
-    b = await pending;
-    await b.close();
+    b = await boundedOperation(
+      pending,
+      'waiting for browser startup before close',
+      LAUNCH_TIMEOUT_MS,
+      undefined,
+      async (lateBrowser) => {
+        // closeBrowser has already released the singleton slot. A launch that
+        // resolves afterward must be reaped rather than becoming an orphan.
+        try {
+          await boundedOperation(
+            lateBrowser.close(),
+            'late browser close',
+            RESOURCE_CLOSE_TIMEOUT_MS
+          );
+        } catch {
+          lateBrowser.process()?.kill('SIGKILL');
+        }
+      }
+    );
+    await boundedOperation(b.close(), 'browser close', RESOURCE_CLOSE_TIMEOUT_MS);
     await logDebug({ source: 'deep-search:browser', message: `browser closed (${reason})` });
   } catch (error: any) {
     // close() occasionally fails while a renderer is wedged. Kill the owned
@@ -180,7 +276,8 @@ async function getBrowser(executablePath: string): Promise<Browser> {
 }
 
 /** Waits for a page slot so a burst of probes cannot open a tab each. */
-async function acquireSlot(): Promise<void> {
+async function acquireSlot(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw abortError(signal);
   if (idleTimer) {
     clearTimeout(idleTimer);
     idleTimer = null;
@@ -199,11 +296,26 @@ async function acquireSlot(): Promise<void> {
       timer: setTimeout(() => {
         const index = waiters.indexOf(waiter);
         if (index >= 0) waiters.splice(index, 1);
+        signal?.removeEventListener('abort', waiter.onAbort!);
         reject(new Error('Timed out waiting for a browser page slot'));
       }, SLOT_WAIT_MS),
+      signal,
+      onAbort: undefined as (() => void) | undefined,
+    };
+    waiter.onAbort = () => {
+      const index = waiters.indexOf(waiter);
+      if (index < 0) return;
+      waiters.splice(index, 1);
+      clearTimeout(waiter.timer);
+      signal?.removeEventListener('abort', waiter.onAbort!);
+      reject(abortError(signal));
     };
     waiter.timer.unref?.();
     waiters.push(waiter);
+    signal?.addEventListener('abort', waiter.onAbort, { once: true });
+    // addEventListener does not replay an abort that happened between the
+    // initial check and listener registration.
+    if (signal?.aborted) waiter.onAbort();
   });
   // No increment here on purpose: releaseSlot hands its slot straight over, so
   // the count already includes this caller. See the note there.
@@ -218,6 +330,7 @@ function releaseSlot(): void {
   const next = waiters.shift();
   if (next) {
     clearTimeout(next.timer);
+    next.signal?.removeEventListener('abort', next.onAbort!);
     next.resolve();
     return;
   }
@@ -258,24 +371,83 @@ export async function fetchWithBrowser(
     };
   }
 
-  await acquireSlot();
+  try {
+    await acquireSlot(signal);
+  } catch (error: any) {
+    // Cancellation belongs to the job lease and must stop the whole fetch.
+    // Capacity/time-limit failures only disable this tier, so the caller can
+    // still fall through to the unlocker instead of losing the probe outright.
+    if (signal?.aborted) throw signal.reason ?? error;
+    return {
+      ok: false,
+      reason: `browser fetch failed: ${error?.message ?? 'could not acquire a page slot'}`,
+    };
+  }
   // An incognito context per fetch means no cookies or storage carry between
   // contacts, so one lead's session can never colour another's results.
   let context: Awaited<ReturnType<Browser['createBrowserContext']>> | null = null;
   let page: Page | null = null;
+  let contextCloseFailed = false;
   const abortPage = () => {
     void page?.close().catch(() => {});
   };
   try {
     if (signal?.aborted) throw signal.reason ?? new Error('browser fetch cancelled');
-    context = await browser.createBrowserContext();
-    page = await context.newPage();
+    context = await boundedOperation(
+      browser.createBrowserContext(),
+      'creating browser context',
+      LIFECYCLE_TIMEOUT_MS,
+      signal,
+      async (lateContext) => {
+        try {
+          await boundedOperation(
+            lateContext.close(),
+            'late browser context close',
+            RESOURCE_CLOSE_TIMEOUT_MS
+          );
+        } catch {
+          browser.process()?.kill('SIGKILL');
+        }
+      }
+    );
+    page = await boundedOperation(
+      context.newPage(),
+      'opening browser page',
+      LIFECYCLE_TIMEOUT_MS,
+      signal,
+      async (latePage) => {
+        try {
+          await boundedOperation(
+            latePage.close(),
+            'late browser page close',
+            RESOURCE_CLOSE_TIMEOUT_MS
+          );
+        } catch {
+          browser.process()?.kill('SIGKILL');
+        }
+      }
+    );
     if (signal?.aborted) throw signal.reason ?? new Error('browser fetch cancelled');
     signal?.addEventListener('abort', abortPage, { once: true });
-    await page.setUserAgent(BROWSER_UA);
-    await page.setViewport({ width: 1366, height: 768 });
+    await boundedOperation(
+      page.setUserAgent(BROWSER_UA),
+      'configuring browser user agent',
+      LIFECYCLE_TIMEOUT_MS,
+      signal
+    );
+    await boundedOperation(
+      page.setViewport({ width: 1366, height: 768 }),
+      'configuring browser viewport',
+      LIFECYCLE_TIMEOUT_MS,
+      signal
+    );
 
-    await page.setRequestInterception(true);
+    await boundedOperation(
+      page.setRequestInterception(true),
+      'configuring browser request interception',
+      LIFECYCLE_TIMEOUT_MS,
+      signal
+    );
     page.on('request', (req) => {
       void (async () => {
         try {
@@ -291,33 +463,82 @@ export async function fetchWithBrowser(
       })();
     });
 
-    const res = await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: PAGE_TIMEOUT_MS,
-    });
+    const res = await boundedOperation(
+      page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: PAGE_TIMEOUT_MS,
+      }),
+      'browser navigation',
+      PAGE_TIMEOUT_MS + 5_000,
+      signal
+    );
+    if (!res) throw new Error('browser navigation returned no HTTP response');
+    const status = res.status();
+    if (status < 200 || status >= 300) throw new Error(`browser HTTP ${status}`);
     const declaredLength = Number(res?.headers()['content-length']);
     if (Number.isFinite(declaredLength) && declaredLength > MAX_RENDERED_HTML_BYTES) {
       throw new Error('browser response exceeded the 2 MB safety limit');
     }
-    const size = await page.evaluate(() => ({
-      nodes: document.getElementsByTagName('*').length,
-      htmlChars: document.documentElement?.outerHTML.length ?? 0,
-    }));
+    const size = await boundedOperation(
+      page.evaluate(() => ({
+        nodes: document.getElementsByTagName('*').length,
+        htmlChars: document.documentElement?.outerHTML.length ?? 0,
+        bodyText: document.body?.innerText ?? document.body?.textContent ?? '',
+        title: document.title ?? '',
+      })),
+      'reading browser document metadata',
+      LIFECYCLE_TIMEOUT_MS,
+      signal
+    );
     if (size.nodes > MAX_DOM_NODES || size.htmlChars > MAX_RENDERED_HTML_BYTES) {
       throw new Error(
         `rendered page exceeded safety limits (${size.nodes} nodes, ${size.htmlChars} characters)`
       );
     }
-    const html = await page.content();
-    return { ok: true, html, status: res?.status() ?? 0 };
+    const html = await boundedOperation(
+      page.content(),
+      'reading rendered browser HTML',
+      LIFECYCLE_TIMEOUT_MS,
+      signal
+    );
+    if (!size.bodyText.trim()) throw new Error('browser returned a blank page');
+    if (looksLikeErrorDocument(size.title, size.bodyText)) {
+      throw new Error('browser returned an error page with a successful HTTP status');
+    }
+    return { ok: true, html, status };
   } catch (e: any) {
     return { ok: false, reason: `browser fetch failed: ${e?.message ?? 'unknown error'}` };
   } finally {
     signal?.removeEventListener('abort', abortPage);
     // Close the context, not just the page: an orphaned context keeps its own
     // renderer process alive, which is exactly the leak this tier must not add.
-    await page?.close().catch(() => {});
-    await context?.close().catch(() => {});
+    if (page) {
+      await boundedOperation(
+        page.close(),
+        'browser page close',
+        RESOURCE_CLOSE_TIMEOUT_MS
+      ).catch(() => {});
+    }
+    if (context) {
+      await boundedOperation(
+        context.close(),
+        'browser context close',
+        RESOURCE_CLOSE_TIMEOUT_MS
+      ).catch(() => {
+        contextCloseFailed = true;
+      });
+    }
+    if (contextCloseFailed) {
+      // A context that cannot close can retain renderer processes forever.
+      // Kill the exact owned browser; its disconnected handler releases the
+      // singleton so a later probe can launch a clean replacement.
+      browser.process()?.kill('SIGKILL');
+      await logDebug({
+        level: 'warn',
+        source: 'deep-search:browser',
+        message: 'Browser context cleanup timed out; killed Chromium to prevent a process leak',
+      }).catch(() => {});
+    }
     releaseSlot();
   }
 }
