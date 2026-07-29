@@ -37,6 +37,7 @@ const READONLY_KEYS = ['usage'] as const;
 const SECRET_FIELDS: Record<string, string[]> = {
   brightdata: ['api_key', 'proxy_password'],
   probe_proxy: ['password'],
+  probe_browser: ['remote_secret'],
   emailit: ['api_key', 'webhook_signing_secret'],
   textlink: ['api_key'],
   stripe: ['secret_key'],
@@ -209,6 +210,19 @@ export async function PUT(request: Request) {
       (typeof value.executable_path !== 'string' || value.executable_path.length > 500)
     ) {
       return NextResponse.json({ error: 'Browser executable path is invalid' }, { status: 400 });
+    }
+    // The remote worker receives URLs that carry client names, so its address
+    // must be public HTTPS — never plaintext, never a loopback/private target.
+    if (typeof value.remote_secret === 'string') value.remote_secret = value.remote_secret.trim();
+    if (value.remote_url) {
+      try {
+        value.remote_url = parsePublicHttpsUrl(String(value.remote_url)).toString();
+      } catch {
+        return NextResponse.json(
+          { error: 'Remote worker URL must be a public https:// address' },
+          { status: 400 }
+        );
+      }
     }
     if (value.enabled !== '' && value.enabled != null) {
       if (![true, false, 'true', 'false'].includes(value.enabled)) {
