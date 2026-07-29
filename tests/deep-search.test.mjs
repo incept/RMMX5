@@ -446,7 +446,1034 @@ test('the migration routes arrests.org through SERP rather than the unlocker', a
 
 test('SERP fallback slots go by priority, not row order', async () => {
   // The bug this pins: ordering by scope put 'national' ahead of 'state', so
-  // arre.st (19 links) consume…13398 tokens truncated…words next to the row.
+  // arre.st (19 links) consumed a slot while arrests.org (20.5% of every
+  // historical link) was cut off by the per-run cap.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /\.sort\(\(a, b\) => \(a\.site\?\.priority \?\? 100\) - \(b\.site\?\.priority \?\? 100\)\)/);
+  // One query per network: mirrors return the same records.
+  assert.match(source, /usedFamilies/);
+});
+
+test('a priority site missing from both indexes is recorded as unindexed', async () => {
+  // Index lag is the SERP route's real weakness. Both engines now run on every
+  // fallback, so an empty result means neither index has the page.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /!results\.length && \(site\?\.priority \?\? 100\) <= 20/);
+  assert.match(source, /unindexedPrioritySites\.push\(domain\)/);
+});
+
+test('a page missing from both indexes flags the contact for a later re-run', async () => {
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /unindexedPrioritySites/);
+  // Reuses search_flag, so it appears in the grid's existing Flagged view.
+  assert.match(source, /Not yet indexed on/);
+});
+
+test('arre.st is no longer searched separately from arrests.org', async () => {
+  const sql = await readFile(
+    new URL('../supabase/migrations/0015_fallback_priority.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(sql, /set serp_fallback = false[\s\S]*?where domain = 'arre\.st'/);
+  // arrests.org must outrank everything for the scarce slots.
+  assert.match(sql, /set priority = 10 where domain = 'arrests\.org'/);
+});
+
+test('date-addressed pages are derived from county and booking date', async () => {
+  // northcarolina.arrests.org/Wake/2026/April/22/ is a daily county ROSTER, so a
+  // name search can miss it even when Google has it indexed. County plus date
+  // names the URL outright, which is the only route on a host BrightData will
+  // not fetch — and it costs no request at all.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /buildDateUrl/);
+  assert.match(source, /MONTH_NAMES/);
+  const sql = await readFile(
+    new URL('../supabase/migrations/0016_date_url_derivation.sql', import.meta.url),
+    'utf8'
+  );
+  // The exact observed shape: state subdomain, capitalised county, month name.
+  assert.match(sql, /\{state_name\}\.arrests\.org\/\{county\}\/\{yyyy\}\/\{month_name\}\/\{dd\}/);
+});
+
+test('every SERP fallback queries both engines and merges them', async () => {
+  // The two crawl these sites on different schedules, so each holds records the
+  // other misses — the same reason the auto-search queries both.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /const engines: SearchEngine\[\] = \['google', 'bing'\]/);
+  assert.match(source, /mergeSerpResults\(lists\)/);
+});
+
+test('arrests.org indexes BOTH a per-person record and a daily roster', () => {
+  // Google returns either shape, and they need different routes:
+  //   /Arrests/Gene_Beachak_67642359/  -> the name is in the URL, so the
+  //     site: name search finds it, and the numeric id parses out
+  //   /Wake/2026/April/22/             -> addressed by county and date, so it
+  //     is derived from facts rather than searched for
+  const GENE = splitName('Gene Beachak');
+
+  const record = factsFromUrl(
+    'https://northcarolina.arrests.org/Arrests/Gene_Beachak_67642359/',
+    GENE
+  );
+  assert.deepEqual(record.state, ['NC']);
+  assert.deepEqual(record.record_ids, ['67642359']);
+  // Surname + first name in the URL clears the corroboration floor on their own,
+  // before any help from the SERP title or snippet.
+  const scored = scoreCorroboration(
+    'https://northcarolina.arrests.org/Arrests/Gene_Beachak_67642359/',
+    GENE,
+    normalizeFacts({ county: ['Wake'], state: ['NC'] })
+  );
+  assert.ok(scored.confidence >= 0.55, 'a record URL must clear the floor unaided');
+
+  const roster = factsFromUrl('https://northcarolina.arrests.org/Wake/2026/April/22/', GENE);
+  assert.deepEqual(roster.county, ['Wake']);
+  assert.deepEqual(roster.booking_dates, ['2026-04-22']);
+  // No name anywhere in a roster URL, which is exactly why it is derived from
+  // county + date instead of scored like a search hit.
+  assert.equal(roster.middle, undefined);
+});
+
+test('a site that had a hit also yields its "all arrests" search link', async () => {
+  // A record page proves ONE booking; the site's own search shows whether the
+  // person has more. Derivable from the name alone, so it works even on a host
+  // we cannot fetch — the operator's browser has no policy problem.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /sitesWithHits/);
+  assert.match(source, /kind: 'site_search'/);
+  // Only for sites that actually produced evidence, so it is not noise.
+  assert.match(source, /!sitesWithHits\.has\(site\.domain\)\) continue/);
+  // Zero confidence: a tool link, not a scored finding, so it sorts last.
+  assert.match(source, /confidence: 0,/);
+});
+
+test('a search view cannot be accepted into a removal link slot', async () => {
+  // Link slots hold pages to be REMOVED. A search URL is not removable content,
+  // so those rows offer Done instead of Add.
+  const source = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(source, /c\.matched_facts\?\.kind === 'site_search'/);
+  assert.match(source, /search view/);
+});
+
+test('the arrests.org search link is the short human-facing form', async () => {
+  const sql = await readFile(
+    new URL('../supabase/migrations/0017_site_search_links.sql', import.meta.url),
+    'utf8'
+  );
+  // The TEMPLATE must be the short form. The surrounding comment mentions
+  // fpartial deliberately, to record why it was dropped.
+  const template = /set search_template = '([^']+)'/.exec(sql)?.[1];
+  assert.equal(template, 'https://{state_name}.arrests.org/search.php?fname={first}&lname={last}');
+});
+
+test('fallback engines run in parallel on a tighter deadline', async () => {
+  // Sequentially, a Bing timeout added its full 60s to the run for every
+  // fallback domain — four domains of that is minutes spent waiting.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /Promise\.allSettled\(\s*engines\.map/);
+  assert.match(source, /FALLBACK_TIMEOUT_MS/);
+  // One engine surviving is enough.
+  assert.match(source, /if \(!lists\.length\) continue;/);
+
+  const brightdata = await readFile(
+    new URL('../lib/integrations/brightdata.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(brightdata, /AbortSignal\.timeout\(opts\?\.timeoutMs \?\? 60_000\)/);
+});
+
+test('the proxy tier sits between the free fetch and the paid unlocker', async () => {
+  // Measured: mugshots.zone and bustednewspaper.com (35.4% of historical client
+  // links between them) drop the socket from a datacentre IP but serve real
+  // search results through an ISP-classified exit. Direct still runs first
+  // because it is free and routes through nobody else.
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  const direct = source.indexOf("browserFetch(url, 'direct'");
+  const proxy = source.indexOf("browserFetch(url, 'proxy'");
+  const unlocker = source.indexOf('reserveUsage({');
+  assert.ok(direct > -1 && proxy > -1 && unlocker > -1, 'all three tiers present');
+  assert.ok(direct < proxy, 'direct is attempted before the proxy');
+  assert.ok(proxy < unlocker, 'the proxy is attempted before the billable unlocker');
+});
+
+test('the proxy tier uses undici fetch, not the global one', async () => {
+  // Node's global fetch runs on its INTERNAL undici and rejects a dispatcher
+  // built by the npm package with UND_ERR_INVALID_ARG, so every proxied request
+  // fails while looking like a proxy fault.
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  assert.match(source, /import \{ ProxyAgent, fetch as undiciFetch \} from 'undici'/);
+  assert.match(source, /await undiciFetch\(url, \{[\s\S]*?dispatcher,/);
+});
+
+test('a misconfigured proxy cannot take down the unlocker fallback', async () => {
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  assert.match(source, /proxy tier unavailable/);
+});
+
+test('the proxy is not offered as a fix for arrests.org', async () => {
+  // arrests.org refuses on the TLS fingerprint, which a CONNECT tunnel does not
+  // change: measured 403 both direct and proxied, from every browser UA tried.
+  // Recording it so the proxy is not mistaken for a route to that host.
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  assert.match(source, /JA3\/JA4|fingerprints the handshake/);
+  // The route to that host is real Chrome, not the proxy.
+  assert.match(source, /which is why the browser tier exists/);
+});
+
+test('the browser tier runs before the billable unlocker', async () => {
+  // Chrome costs CPU and memory, not money, so it goes ahead of the unlocker —
+  // and it is the only tier that reaches a host blocking on TLS fingerprint.
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  const browser = source.indexOf('fetchWithBrowser(url');
+  const unlocker = source.indexOf('reserveUsage({');
+  assert.ok(browser > -1 && unlocker > -1);
+  assert.ok(browser < unlocker, 'browser is tried before the billable unlocker');
+});
+
+test('a TLS-fingerprinted host skips the two tiers that always fail it', async () => {
+  // Both HTTP tiers cost two attempts on a 20s timeout, every time, for nothing.
+  const source = await readFile(new URL('../lib/deep-search/fetch-page.ts', import.meta.url), 'utf8');
+  assert.match(source, /if \(!opts\?\.needsBrowser\) \{/);
+  const index = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(index, /needsBrowser: site\.needs_browser/);
+});
+
+test('the headless User-Agent is overridden, which is what makes the tier work', async () => {
+  // Chrome's own headless UA says "HeadlessChrome" and is refused on sight:
+  // measured 403 with the default UA and 200 with a real one, same browser.
+  const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  assert.match(source, /setUserAgent\(BROWSER_UA\)/);
+  assert.doesNotMatch(source, /HeadlessChrome\/\d/, 'must not ship a headless UA');
+});
+
+test('the browser tier cannot leak processes', async () => {
+  // This host was taken down once by processes that were started and never
+  // reaped, and a stray Chrome is heavier than a stray fetch.
+  const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  assert.match(source, /IDLE_SHUTDOWN_MS/, 'closes itself when idle');
+  assert.match(source, /MAX_CONCURRENT_PAGES/, 'bounds concurrent tabs');
+  assert.match(source, /} finally \{/, 'pages are closed on the failure path too');
+  assert.match(
+    source,
+    /boundedOperation\(\s*context\.close\(\),\s*'browser context close'/,
+    'contexts are closed with a watchdog, not just pages'
+  );
+  // A single shared browser, not one per call.
+  assert.match(source, /if \(!browserPromise\)/);
+});
+
+test('subresources are refused so probe pages stay cheap', async () => {
+  // Mugshot pages are mostly photographs; we only ever read the markup.
+  const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  assert.match(source, /\['image', 'font', 'media', 'stylesheet'\]/);
+});
+
+test('the page cap holds when a slot is released and taken in the same tick', async () => {
+  // Regression: releaseSlot used to decrement and then resolve a waiter, but
+  // resolve() only queues the continuation. Anything calling acquireSlot before
+  // that microtask ran saw a free slot and took it, so both proceeded and a cap
+  // of 2 was reachable at 3. The slot is now handed over without the count ever
+  // dipping. Asserted on source because the module needs Supabase settings.
+  const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  const release = source.slice(source.indexOf('function releaseSlot'));
+  const shift = release.indexOf('waiters.shift()');
+  const decrement = release.indexOf('activePages = Math.max(0, activePages - 1)');
+  assert.ok(shift > -1 && decrement > -1);
+  assert.ok(shift < decrement, 'the waiter handoff must come before any decrement');
+  // And the waiter must not re-increment on resume.
+  const acquire = source.slice(
+    source.indexOf('async function acquireSlot'),
+    source.indexOf('function releaseSlot')
+  );
+  assert.doesNotMatch(
+    acquire.slice(acquire.indexOf('waiters.push')),
+    /activePages \+= 1/,
+    'a resumed waiter must not add to the count again'
+  );
+});
+
+test('a failed launch only clears the browser slot if it still owns it', async () => {
+  // Otherwise closeBrowser during a pending launch lets a late rejection discard
+  // a newer, live browser and start a third — two Chrome processes at once.
+  const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  assert.match(source, /if \(browserPromise === launching\) browserPromise = null;\s*\n\s*throw e;/);
+});
+
+test('one confirmed link seeds the facts a run would otherwise have to discover', () => {
+  // A URL only reaches a link slot when a human accepted it, so it is a verified
+  // sighting. This one carries everything round B needs, at no cost.
+  const seeded = factsFromUrl(
+    'https://wakenc.mugshots.zone/beachak-gene-michael-mugshot-04-22-2026/',
+    GENE
+  );
+  assert.deepEqual(seeded.county, ['Wake']);
+  assert.deepEqual(seeded.state, ['NC']);
+  assert.deepEqual(seeded.middle, ['Michael']);
+  assert.deepEqual(seeded.booking_dates, ['2026-04-22']);
+});
+
+test('confirmed facts outrank scraped ones for the value actually searched', () => {
+  // Probe URLs are built from facts.county[0] / facts.state[0] and each key is
+  // capped, so precedence here IS precedence in what gets requested.
+  let pinned = mergeFacts({ ...EMPTY_FACTS }, { state: ['NC'] });
+  pinned = mergeFacts(
+    pinned,
+    factsFromUrl('https://wakenc.mugshots.zone/beachak-gene-michael-mugshot-04-22-2026/', GENE)
+  );
+  const facts = mergeFacts(pinned, normalizeFacts({ county: ['Durham'], middle: ['Micheal'] }));
+
+  assert.equal(facts.county[0], 'Wake', 'the confirmed county is the one probed');
+  assert.equal(facts.middle[0], 'Michael', 'the confirmed spelling leads');
+  // The disagreeing values survive as alternatives rather than being discarded:
+  // sites really do spell the middle name both ways.
+  assert.deepEqual(facts.county, ['Wake', 'Durham']);
+  assert.deepEqual(facts.middle, ['Michael', 'Micheal']);
+});
+
+test('a confirmed out-of-state link legitimises records from that state', () => {
+  // The old check compared against one seed state, so a client with a real West
+  // Virginia link had their WV records thrown away as a same-name stranger.
+  let pinned = mergeFacts({ ...EMPTY_FACTS }, { state: ['NC'] });
+  pinned = mergeFacts(
+    pinned,
+    factsFromUrl('https://westvirginia.arrests.org/Kanawha/2025/June/03/', GENE)
+  );
+  const pinnedStates = pinned.state;
+  const conflicts = (rows) =>
+    pinnedStates.length > 0 && rows.length > 0 && !rows.some((s) => pinnedStates.includes(s));
+
+  assert.deepEqual(pinnedStates, ['NC', 'WV']);
+  assert.equal(conflicts(['WV']), false, 'a state we have a confirmed link in is accepted');
+  assert.equal(conflicts(['TX']), true, 'an unrelated state is still rejected');
+  assert.equal(conflicts([]), false, 'no state on the row is not a conflict');
+});
+
+test('empty link slots contribute nothing', async () => {
+  // contact_links rows exist from creation with url = '', so most are blank.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /if \(!slotUrl\) continue;/);
+  assert.match(source, /mergeFacts\(pinned, normalizeFacts\(contact\.search_facts\)\)/);
+});
+
+test('a rejected enqueue is logged before it is thrown', async () => {
+  // The database rejected deep_search with 23514 (kind missing from
+  // job_queue_kind_check) and it left no row, no debug entry, and a 500 with an
+  // unparseable body. The clear error existed the whole time; three layers hid
+  // it. Only 23505 may be swallowed, and only as the duplicate case.
+  const source = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
+  const enqueue = source.slice(source.indexOf('export async function enqueueJob'));
+  const body = enqueue.slice(0, enqueue.indexOf('\n}'));
+  const logAt = body.indexOf('logDebug');
+  const throwAt = body.indexOf('throw new Error');
+  assert.ok(logAt > -1, 'a failed enqueue is logged');
+  assert.ok(logAt < throwAt, 'it is logged BEFORE throwing, so the trace survives');
+  // The constraint case names itself, because "violates check constraint" alone
+  // does not tell an operator that a migration is missing.
+  assert.match(body, /23514/);
+  assert.match(body, /job_queue_kind_check/);
+  // A logging failure must not replace the error being reported.
+  assert.match(body, /\}\)\.catch\(\(\) => \{\}\);/);
+});
+
+test('the deep search button always stops spinning', async () => {
+  // setBusy(null) sat after `await res.json()`, so a non-JSON error body threw
+  // first and the spinner never cleared: a failed request presented as a hang.
+  const source = await readFile(
+    new URL('../components/ContactPanel.tsx', import.meta.url),
+    'utf8'
+  );
+  const fn = source.slice(source.indexOf('async function runDeepSearch'));
+  const body = fn.slice(0, fn.indexOf('\n  }\n'));
+  assert.match(body, /finally \{\s*setBusy\(null\);/);
+  assert.match(body, /res\.json\(\)\.catch\(/, 'an unparseable error body is tolerated');
+  assert.match(body, /HTTP \$\{res\.status\}/, 'the status is shown when there is no message');
+});
+
+test('migration numbers are unique', async () => {
+  // Two 0020s shipped from parallel branches. A prefix-tracking tool can skip
+  // one, and the skipped one here was what disabled deep search entirely.
+  const { readdir } = await import('node:fs/promises');
+  const files = await readdir(new URL('../supabase/migrations/', import.meta.url));
+  const numbers = files.filter((f) => f.endsWith('.sql')).map((f) => f.slice(0, 4));
+  const dupes = numbers.filter((n, i) => numbers.indexOf(n) !== i);
+  assert.deepEqual(dupes, [], `duplicate migration prefixes: ${dupes.join(', ')}`);
+});
+
+test('a failed deep-search enqueue answers with JSON the operator can read', async () => {
+  // A bare 500 carries no body, so the UI could only say "HTTP 500" while the
+  // cause sat in a server log nobody can reach from the CRM. The route now
+  // reports its own failure and logs it against the contact.
+  const source = await readFile(
+    new URL('../app/api/contacts/[id]/deep-search/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(source, /catch \(e\) \{/);
+  assert.match(source, /source: 'deep-search:enqueue'/);
+  assert.match(source, /contactId: id/, 'the log is attributable to the contact');
+  assert.match(
+    source,
+    /NextResponse\.json\(\s*\{ error: `Could not start deep search: \$\{message\}` \}/,
+    'the real message reaches the client'
+  );
+  // The enqueue itself must be inside the guarded region.
+  const tryAt = source.indexOf('try {');
+  const enqueueAt = source.indexOf('await enqueueDeepSearchJob(');
+  const catchAt = source.indexOf('} catch (e) {');
+  assert.ok(
+    tryAt < enqueueAt && enqueueAt < catchAt,
+    'atomic deep-search enqueue runs inside the try'
+  );
+});
+
+test('every API route records its own failures', async () => {
+  // The gap that hid the deep-search outage: routes caught errors and returned
+  // a message while recording nothing, so a fault left a status code and no
+  // trace. Tracking endpoints are exempt from RETURNING an error — they must
+  // still answer with a pixel or redirect — but not from logging one.
+  const { readdir } = await import('node:fs/promises');
+  const dir = new URL('../app/api/', import.meta.url);
+  const walk = async (d) => {
+    const out = [];
+    for (const entry of await readdir(d, { withFileTypes: true })) {
+      const child = new URL(entry.name + (entry.isDirectory() ? '/' : ''), d);
+      if (entry.isDirectory()) out.push(...(await walk(child)));
+      else if (entry.name === 'route.ts') out.push(child);
+    }
+    return out;
+  };
+  const routes = await walk(dir);
+  assert.ok(routes.length >= 20, 'found the routes');
+
+  const silent = [];
+  for (const route of routes) {
+    const source = await readFile(route, 'utf8');
+    const reports = source.includes('apiFailure(') || source.includes('logDebug(');
+    if (!reports) silent.push(route.pathname.split('/app/api/')[1]);
+  }
+  assert.deepEqual(silent, [], `routes that can fail silently: ${silent.join(', ')}`);
+});
+
+test('logDebug notices when its own insert is rejected', async () => {
+  // The client RETURNS errors instead of throwing, so an unchecked insert would
+  // slip past the catch and log nothing, forever, with no symptom at all.
+  const source = await readFile(new URL('../lib/debug-log.ts', import.meta.url), 'utf8');
+  assert.match(source, /const \{ error \} = await createAdminClient\(\)/);
+  assert.match(source, /INSERT FAILED/);
+  // The fallback must be the console: the database is the thing that just failed.
+  assert.match(source, /console\.error\(\s*`\[debug-log\] INSERT FAILED/);
+});
+
+test('deliberate 4xx are not logged as faults', async () => {
+  // A rejected form submission is not a fault, and logging every one would bury
+  // the errors that matter.
+  const source = await readFile(new URL('../lib/api-errors.ts', import.meta.url), 'utf8');
+  assert.match(source, /const deliberate = typeof \(error as \{ status\?: number \} \| null\)\?\.status === 'number'/);
+  assert.match(source, /if \(!deliberate \|\| response\.status >= 500\)/);
+  // Postgres codes are the usual answer, so they must survive into the log.
+  assert.match(source, /code: \(error as \{ code\?: string \}/);
+});
+
+test('puppeteer-core is never a static import', async () => {
+  // A top-level import put a heavy optional dependency in the module graph of
+  // everything downstream — including the queue, and so the route that only
+  // wanted to insert a row. When the bundler could not materialise it on the
+  // host ("open EEXIST") the chain died at LOAD time, before any handler ran,
+  // where no try/catch could reach it and nothing could be logged.
+  const source = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(
+    source,
+    /^import puppeteer[ ,]/m,
+    'puppeteer-core must not be imported for value at module scope'
+  );
+  assert.match(source, /import \{ type Browser, type Page \} from 'puppeteer-core'/);
+  assert.match(source, /await import\('puppeteer-core'\)/, 'loaded lazily, where it is used');
+
+  // The singleton must still be claimed synchronously: awaiting the import
+  // before assigning would let two callers each launch their own Chrome.
+  assert.match(source, /const launching = \(async \(\) => \{/, 'wrapped so assignment is synchronous');
+  const fn = source.slice(source.indexOf('async function getBrowser'));
+  const body = fn.slice(0, fn.indexOf('\n}'));
+  assert.ok(
+    body.indexOf('browserPromise = launching;') > body.indexOf("await import('puppeteer-core')"),
+    'the assignment follows the IIFE rather than awaiting it'
+  );
+});
+
+test('puppeteer-core is declared as a server external package', async () => {
+  // Otherwise the bundler tries to materialise it at runtime, which is the
+  // failure above. nodemailer was already declared for the same reason.
+  const config = await readFile(new URL('../next.config.ts', import.meta.url), 'utf8');
+  assert.match(config, /serverExternalPackages: \[[^\]]*'puppeteer-core'/);
+});
+
+test('clearing links removes what actually makes a re-run repeat itself', async () => {
+  // The visible list is not what causes a repeat. Two things persist and must go
+  // with it: dismissed candidates suppress their URL forever, and the hourly
+  // dedupe key blocks a fresh enqueue. Facts are NOT among them any more — they
+  // are cleared per field, so a wrong county can go without taking a correct
+  // middle name and date with it.
+  const source = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  const fn = source.slice(source.indexOf('export async function DELETE'));
+  const body = fn.slice(0, fn.indexOf('\nexport async function PATCH'));
+
+  assert.match(body, /\.in\('status', \['new', 'rejected'\]\)/, 'clears dismissed rows too');
+  assert.match(body, /\.eq\('kind', 'deep_search'\)[\s\S]*?\.neq\('status', 'processing'\)/, 'frees the dedupe key');
+  // Accepted candidates are the provenance for filled slots and must survive.
+  assert.doesNotMatch(body, /'accepted'/, 'accepted rows are never in the delete filter');
+  assert.doesNotMatch(body, /contact_links/, 'link slots are never touched');
+});
+
+test('clearing is refused while a deep search is running', async () => {
+  // Otherwise the live run inserts candidates after the delete and reinstates
+  // the facts just reset, leaving a half-state nobody asked for.
+  const source = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  const fn = source.slice(source.indexOf('export async function DELETE'));
+  const body = fn.slice(0, fn.indexOf('\nexport async function PATCH'));
+  assert.match(body, /\.eq\('status', 'processing'\)/);
+  assert.match(body, /status: 409/);
+  // And it is admin-only, matching the deep-search route that creates the data.
+  assert.match(body, /await requireAdmin\(\)/);
+});
+
+// --- Human-confirmed truth (facts + links) ---------------------------------
+
+test('confirming a fact stores it in the normalised form the engine compares', async () => {
+  const { addConfirmedFact } = await import('../lib/deep-search/confirmed.ts');
+  // State is uppercased, a date is coerced to ISO — same normalisation the
+  // scraped facts go through, so a confirmed value actually matches.
+  assert.deepEqual(addConfirmedFact({}, 'state', 'nc').state, ['NC']);
+  assert.deepEqual(addConfirmedFact({}, 'booking_dates', '04/22/2026').booking_dates, ['2026-04-22']);
+  // Empty input is a no-op, not a blank entry.
+  assert.deepEqual(addConfirmedFact({ county: ['Wake'] }, 'county', '   ').county, ['Wake']);
+});
+
+test('unconfirming a fact evicts the wrong value case-insensitively', async () => {
+  const { removeConfirmedFact } = await import('../lib/deep-search/confirmed.ts');
+  // This is the eviction the old accumulate-only model lacked: correcting a
+  // fact drops it instead of leaving it to keep steering probes.
+  const after = removeConfirmedFact({ county: ['Wake', 'Durham'] }, 'county', 'wake');
+  assert.deepEqual(after.county, ['Durham']);
+  // Removing something not present changes nothing.
+  assert.deepEqual(removeConfirmedFact({ state: ['NC'] }, 'state', 'TX').state, ['NC']);
+});
+
+test('confirming a link folds its URL facts into the same store as a fact', async () => {
+  const { confirmFactsFromUrl } = await import('../lib/deep-search/confirmed.ts');
+  // Both origins converge: a confirmed link is worth exactly the facts its URL
+  // encodes, so it lands where a confirmed fact would.
+  const facts = confirmFactsFromUrl(
+    {},
+    'https://wakenc.mugshots.zone/beachak-gene-michael-mugshot-04-22-2026/',
+    GENE
+  );
+  assert.deepEqual(facts.county, ['Wake']);
+  assert.deepEqual(facts.state, ['NC']);
+  assert.deepEqual(facts.middle, ['Michael']);
+  assert.deepEqual(facts.booking_dates, ['2026-04-22']);
+});
+
+test('only real fact fields can be confirmed', async () => {
+  const { isConfirmableKey } = await import('../lib/deep-search/confirmed.ts');
+  assert.equal(isConfirmableKey('county'), true);
+  assert.equal(isConfirmableKey('state'), true);
+  assert.equal(isConfirmableKey('name'), false, 'name is on the contact, not a search fact');
+  assert.equal(isConfirmableKey('__proto__'), false);
+  assert.equal(isConfirmableKey(undefined), false);
+});
+
+test('a run seeds confirmed facts at the very top of precedence', async () => {
+  // Highest authority: a human said so. Merged before the contact state and slot
+  // links, so facts.county[0]/state[0] — which build the probe URLs — come from
+  // the confirmed set when one exists.
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  const seedAt = source.indexOf('pinned = mergeFacts(pinned, normalizeFacts(contact.confirmed_facts))');
+  const stateAt = source.indexOf('if (seedState) pinned = mergeFacts(pinned, { state: [seedState] })');
+  assert.ok(seedAt > -1, 'confirmed_facts is seeded');
+  assert.ok(seedAt < stateAt, 'confirmed facts merge before the contact-record state');
+  // Both entry points (a full run and the SERP classifier) must agree.
+  assert.equal(
+    (source.match(/normalizeFacts\(contact\??\.confirmed_facts\)/g) ?? []).length,
+    2,
+    'both seed paths merge confirmed_facts'
+  );
+});
+
+test('confirmed things are exempt from Clear results', async () => {
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  const del = route.slice(route.indexOf('export async function DELETE'), route.indexOf('export async function PATCH'));
+  // Clear deletes only new/rejected candidates — confirmed and accepted survive.
+  assert.match(del, /\.in\('status', \['new', 'rejected'\]\)/);
+  // It touches neither fact store: confirmed is truth, and learned facts now
+  // have their own per-field controls.
+  assert.doesNotMatch(del, /confirmed_facts/, 'Clear must not touch confirmed_facts');
+  assert.doesNotMatch(del, /search_facts/, 'Clear is scoped to links now');
+});
+
+test('confirm actions are admin-only and a search view cannot be confirmed', async () => {
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  // Each confirm branch re-checks admin (asserting durable truth, like Clear).
+  for (const marker of ["action === 'confirm_fact'", "action === 'confirm_url'", "action === 'confirm'"]) {
+    const at = route.indexOf(marker);
+    assert.ok(at > -1, `${marker} exists`);
+    assert.match(route.slice(at, at + 400), /requireAdmin\(\)/, `${marker} is admin-gated`);
+  }
+  assert.match(route, /A search view is not a record page and cannot be confirmed/);
+});
+
+// --- Trestle reverse-phone enrichment --------------------------------------
+
+test('a Trestle response yields a name and a city/state pair', async () => {
+  const { parsePhoneIdentity } = await import('../lib/integrations/trestle-parse.ts');
+  const id = parsePhoneIdentity({
+    is_valid: true,
+    line_type: 'Mobile',
+    owners: [
+      {
+        name: 'Gene Beachak',
+        firstname: 'Gene',
+        lastname: 'Beachak',
+        addresses: [{ city: 'Raleigh', state_code: 'NC', postal_code: '27601' }],
+      },
+    ],
+  });
+  assert.equal(id.name, 'Gene Beachak');
+  assert.equal(id.city, 'Raleigh');
+  assert.equal(id.state, 'NC');
+});
+
+test('a half-address is treated as no address', async () => {
+  // A city without its state cannot narrow a search, and can point it at the
+  // wrong state entirely — worse than having no location at all.
+  const { parsePhoneIdentity } = await import('../lib/integrations/trestle-parse.ts');
+  const id = parsePhoneIdentity({
+    owners: [{ name: 'Gene Beachak', addresses: [{ city: 'Raleigh' }] }],
+  });
+  assert.equal(id.name, 'Gene Beachak');
+  assert.equal(id.city, null);
+  assert.equal(id.state, null);
+});
+
+test('parsing never throws on an unexpected shape', async () => {
+  // This runs inside a queue worker: a field rename must degrade to "no result",
+  // not take the job down.
+  const { parsePhoneIdentity } = await import('../lib/integrations/trestle-parse.ts');
+  for (const shape of [{}, { owners: [] }, { owners: null }, { owners: [{}] }, null, undefined]) {
+    const id = parsePhoneIdentity(shape);
+    assert.equal(id.name, null);
+    assert.equal(id.city, null);
+  }
+});
+
+test('a name assembles from first/last when no full name is given', async () => {
+  const { parsePhoneIdentity } = await import('../lib/integrations/trestle-parse.ts');
+  const id = parsePhoneIdentity({
+    owners: [{ firstname: 'Gene', lastname: 'Beachak', addresses: [] }],
+  });
+  assert.equal(id.name, 'Gene Beachak');
+});
+
+test('a terminally failed deep search cannot stay amber forever', async () => {
+  // The live failure: two contacts sat "queued" for hours. The job had failed
+  // its final attempt and parked in the job table; nothing told the contact,
+  // so the grid showed a spinner state with the error invisible.
+  const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
+  const migration = await readFile(
+    new URL('../supabase/migrations/0028_deep_search_attempt_state.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(queue, /terminal && job\.kind === 'deep_search'/);
+  assert.match(queue, /fail_deep_search_attempt/);
+  assert.match(queue, /finalized !== true/);
+  assert.match(migration, /when v_next_job_id is null then null/);
+  assert.match(migration, /search_flag = left/, 'the failure reason must surface in the Link Data banner');
+
+  // Belt and braces: even if that write is lost, the UI treats a queued stamp
+  // older than 30 minutes as expired (a live run cannot outlast two 95s
+  // attempts plus backoff) and offers the re-run instead of eternal amber.
+  const grid = await readFile(new URL('../app/(app)/contacts/page.tsx', import.meta.url), 'utf8');
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(grid, /30 \* 60_000/);
+  assert.match(grid, /never concluded/);
+  assert.match(panel, /30 \* 60_000/);
+  assert.match(panel, /never concluded/);
+});
+
+test('the trestle key is trimmed and the current API version is called', async () => {
+  // A trailing space pasted into the key is a documented cause of HTTP 403,
+  // and a key provisioned today may not be enabled for the retired 3.0 path.
+  const client = await readFile(new URL('../lib/integrations/trestle.ts', import.meta.url), 'utf8');
+  const settings = await readFile(
+    new URL('../app/api/admin/settings/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(client, /cfg\.api_key\?\.trim\(\)/);
+  assert.match(client, /api\.trestleiq\.com\/3\.2\/phone/);
+  assert.doesNotMatch(client, /\/3\.0\/phone/);
+  assert.match(settings, /value\.api_key = value\.api_key\.trim\(\)/);
+});
+
+test('enrichment only ever fills blanks', async () => {
+  // A value a person gave you outranks a data provider's guess — the same
+  // precedence the search uses for confirmed facts. The lone exception is the
+  // "Caller +1919…" placeholder, which is a label rather than information.
+  const source = await readFile(new URL('../lib/enrichment.ts', import.meta.url), 'utf8');
+  assert.match(source, /if \(needsName && identity\.name\)/);
+  assert.match(source, /if \(!contact\.city\?\.trim\(\)\)/);
+  assert.match(source, /if \(!contact\.state\?\.trim\(\)\)/);
+  // The "Caller +1919…" label is the one value enrichment may overwrite.
+  assert.match(source, /function isPlaceholderName/, 'placeholder names are recognised');
+  assert.match(source, /caller/i);
+  // And it returns early rather than spending a lookup it cannot use — unless
+  // an admin forced the run to see the provider's answer.
+  assert.match(source, /if \(!needsName && !needsLocation && !opts\?\.force\)/);
+});
+
+test('enrichment runs on the queue, never in the CallScaler webhook', async () => {
+  // CallScaler retries a slow delivery, and a retried webhook is how one
+  // submission became several contacts.
+  const route = await readFile(
+    new URL('../app/api/webhooks/callscaler/route.ts', import.meta.url),
+    'utf8'
+  );
+  const callscaler = await readFile(
+    new URL('../lib/integrations/callscaler.ts', import.meta.url),
+    'utf8'
+  );
+  const migration = await readFile(
+    new URL('../supabase/migrations/0024_comprehensive_hardening.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(callscaler, /\.rpc\('complete_call_processing'/);
+  assert.match(migration, /complete_call_processing[\s\S]*?'contact_enrichment'/);
+  assert.doesNotMatch(route, /lookupPhoneIdentity|enrichContactFromPhone/);
+});
+
+test('every job kind in the TypeScript union is allowed by the database', async () => {
+  // deep_search shipped in the union without the constraint and every enqueue
+  // failed with 23514 — no row, no log, and a 500 that read as a hang. This
+  // fails the build instead of production.
+  const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
+  const union = queue.slice(queue.indexOf('export type JobKind'), queue.indexOf(';', queue.indexOf('export type JobKind')));
+  const kinds = [...union.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  assert.ok(kinds.length >= 6, 'found the union members');
+
+  // The newest constraint definition wins, so scan every migration in order.
+  const { readdir } = await import('node:fs/promises');
+  const dir = new URL('../supabase/migrations/', import.meta.url);
+  const files = (await readdir(dir)).filter((f) => f.endsWith('.sql')).sort();
+  let allowed = null;
+  for (const f of files) {
+    const sql = await readFile(new URL(f, dir), 'utf8');
+    for (const m of sql.matchAll(/job_queue_kind_check check \(\s*kind in \(([^)]*)\)/g)) {
+      allowed = [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]);
+    }
+  }
+  assert.ok(allowed, 'found a kind constraint in the migrations');
+  const missing = kinds.filter((k) => !allowed.includes(k));
+  assert.deepEqual(missing, [], `kinds the database would reject: ${missing.join(', ')}`);
+});
+
+test('clearing one fact field leaves the others intact', async () => {
+  // Facts are not interchangeable. A wrong county should go without taking a
+  // correct middle name and booking date with it — which the old all-or-nothing
+  // reset could not do.
+  const { clearLearnedFact } = await import('../lib/deep-search/confirmed.ts');
+  const before = {
+    county: ['Durham'],
+    middle: ['Michael'],
+    booking_dates: ['2026-04-22'],
+    state: ['NC'],
+  };
+  const after = clearLearnedFact(before, 'county');
+  assert.deepEqual(after.county, []);
+  assert.deepEqual(after.middle, ['Michael'], 'middle survives');
+  assert.deepEqual(after.booking_dates, ['2026-04-22'], 'booking date survives');
+  assert.deepEqual(after.state, ['NC'], 'state survives');
+});
+
+test('clearing a fact field does not touch confirmed values', async () => {
+  // Discarding a machine guess and retracting something a human vouched for are
+  // different intentions; they must not share a control.
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  const at = route.indexOf("action === 'clear_fact'");
+  assert.ok(at > -1, 'the clear_fact branch exists');
+  const branch = route.slice(at, at + 1200);
+  assert.match(branch, /select\('search_facts'\)/, 'reads only the learned store');
+  assert.match(branch, /update\(\{ search_facts: next \}\)/, 'writes only the learned store');
+  assert.doesNotMatch(branch, /confirmed_facts/, 'confirmed values are untouched');
+  assert.match(branch, /requireAdmin\(\)/);
+});
+
+test('clearing links no longer wipes the facts', async () => {
+  // The button is scoped to links now; facts have their own per-field controls.
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  const del = route.slice(route.indexOf('export async function DELETE'), route.indexOf('export async function PATCH'));
+  assert.doesNotMatch(del, /search_facts: \{\}/, 'DELETE must not reset facts');
+  // The parts that still have to go, or a re-run would rebuild the same set.
+  assert.match(del, /\.in\('status', \['new', 'rejected'\]\)/);
+  assert.match(del, /\.eq\('kind', 'deep_search'\)/);
+});
+
+test('the status filter is a single dropdown, not a chip per status', async () => {
+  // Sixteen statuses wrapped over multiple lines and pushed the grid below the
+  // fold. The colour dot stays, because that cue is shared with the rows.
+  const page = await readFile(new URL('../app/(app)/contacts/page.tsx', import.meta.url), 'utf8');
+  assert.match(page, /aria-label="Filter by status"/);
+  assert.match(page, /<option value="">Any<\/option>/);
+  assert.match(page, /statuses\.map\(\(s\) => \(\s*<option/);
+  // The old row of buttons is gone.
+  assert.doesNotMatch(page, /onClick=\{\(\) => setStatusFilter\(statusFilter === s\.id \? '' : s\.id\)\}/);
+});
+
+test('the toolbar is tightened: short labels, no owner view, green New button', async () => {
+  const page = await readFile(new URL('../app/(app)/contacts/page.tsx', import.meta.url), 'utf8');
+  // Contacts aren't assigned to owners at this time, so the view chip is gone
+  // (the ViewId type keeps 'mine' because the counts RPC still returns it).
+  assert.doesNotMatch(page, /label: 'My contacts'/);
+  // The flag view is icon-only and 'New this week' is just 'New'; the title
+  // attribute carries what the longer labels used to say.
+  assert.match(page, /label: '⚑', title:/);
+  assert.match(page, /label: 'New', title:/);
+  assert.doesNotMatch(page, /New this week/);
+  // The primary button is a translucent green pill labelled New — red was the
+  // one saturated fill on the page and read as a warning, not an invitation.
+  assert.match(page, /bg-green-600\/15/);
+  assert.doesNotMatch(page, /bg-red-600/);
+});
+
+/* ── Identity profiles: which PERSON is each candidate about? ────────────────
+   Fixtures are the real Gabriel Lopez queue: three Florida pages (Collier and
+   Lee counties, middle Alexander) and one unrelated Arkansas hit that the
+   engine chained into before anything was pinned. */
+
+const LOPEZ = splitName('Gabriel Lopez');
+const lopezCandidates = [
+  {
+    id: 'c-rb',
+    url: 'https://recentlybooked.com/fl/collier/gabriel-lopez~11_202600005441',
+    confidence: 0.75,
+    matched_facts: { last: 'Lopez', county: 'collier' },
+  },
+  {
+    id: 'c-mz',
+    url: 'https://leefl.mugshots.zone/lopez-gabriel-alexander-mugshot-12-10-2023/',
+    confidence: 0.9,
+    matched_facts: { last: 'Lopez', middle: 'alexander' },
+  },
+  {
+    id: 'c-ao',
+    url: 'https://florida.arrests.org/Arrests/Gabriel_Lopez_63297364/',
+    confidence: 0.7,
+    matched_facts: { last: 'Lopez', record_id: '63297364' },
+  },
+  {
+    id: 'c-bn',
+    url: 'https://bustednewspaper.com/arkansas/lopez-gabriel/20260725/',
+    confidence: 0.7,
+    matched_facts: { last: 'Lopez' },
+  },
+];
+
+test('the Gabriel Lopez case: candidates cluster into per-state identities', () => {
+  const profiles = profilesFor(lopezCandidates, LOPEZ);
+  assert.equal(profiles.length, 2);
+  const [fl, ar] = profiles;
+  assert.equal(fl.key, 'FL', 'most evidence leads');
+  assert.equal(fl.link_count, 3);
+  assert.deepEqual(
+    fl.counties.map((c) => c.toLowerCase()).sort(),
+    ['collier', 'lee'],
+    'both of his counties aggregate onto one person'
+  );
+  assert.ok(fl.middles.map((m) => m.toLowerCase()).includes('alexander'));
+  assert.equal(ar.key, 'AR');
+  assert.equal(ar.link_count, 1);
+  assert.ok(isAmbiguous(profiles), 'two states means two people until someone decides');
+});
+
+test('a candidate with no state joins a profile only through shared evidence', () => {
+  const profiles = profilesFor(
+    [
+      ...lopezCandidates,
+      // A page whose URL says nothing about where — but it shares a record id
+      // with the Florida group, and shared evidence is what attaches.
+      {
+        id: 'c-shared',
+        url: 'https://example.net/view-full-profile.php?id=63297364',
+        confidence: 0.7,
+        matched_facts: { record_id: '63297364' },
+      },
+      // One that shares nothing is parked as unknown, never guessed onto a person.
+      { id: 'c-mystery', url: 'https://example.net/some-page', confidence: 0.65, matched_facts: {} },
+    ],
+    LOPEZ
+  );
+  const fl = profiles.find((p) => p.key === 'FL');
+  assert.ok(fl.candidate_ids.includes('c-shared'), 'the shared record id attaches it');
+  const unknown = profiles.find((p) => p.key === 'unknown');
+  assert.ok(unknown && unknown.candidate_ids.includes('c-mystery'));
+  assert.ok(!unknown.candidate_ids.includes('c-shared'));
+});
+
+test('search views never join an identity profile', () => {
+  // A site-search link is BUILT from the current fact pool — it is not
+  // independent evidence of anyone, so it cannot tip the grouping.
+  const profiles = profilesFor(
+    [
+      ...lopezCandidates,
+      {
+        id: 'c-view',
+        url: 'https://leefl.mugshots.zone/?s=LOPEZ+GABRIEL+ALEXANDER',
+        confidence: 0,
+        matched_facts: { kind: 'site_search' },
+      },
+    ],
+    LOPEZ
+  );
+  for (const p of profiles) {
+    assert.ok(!p.candidate_ids.includes('c-view'), `${p.key} must not hold the search view`);
+  }
+});
+
+test('one state means one person — no ambiguity, nothing to decide', () => {
+  const profiles = profilesFor(
+    lopezCandidates.filter((c) => c.id !== 'c-bn'),
+    LOPEZ
+  );
+  assert.equal(profiles.length, 1);
+  assert.ok(!isAmbiguous(profiles));
+});
+
+test('choosing a profile confirms its place and dismisses the other states', async () => {
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  const at = route.indexOf("action === 'choose_profile'");
+  assert.ok(at > -1, 'the profile decision branch exists');
+  const branch = route.slice(at, at + 6000);
+  assert.match(branch, /requireAdmin\(\)/);
+  // The server regroups the stored rows itself — candidate ids arriving from
+  // the client are never trusted.
+  assert.match(branch, /profilesFor\(/);
+  // The identity decision confirms PLACE: state and counties, nothing more.
+  assert.match(branch, /state: \[key\],\s+county: chosen\.counties/);
+  assert.match(branch, /update\(\{ status: 'rejected' \}\)/);
+  // Choosing resolves the run's ambiguity flag rather than leaving it stale.
+  assert.match(branch, /startsWith\('Multiple identities'\)/);
+});
+
+test('an ambiguous run stops compounding and flags the contact', async () => {
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  // The guard needs BOTH nothing pinned and two states seen — a confirmed
+  // state (or a seeded county's state) keeps the run chaining as before.
+  assert.match(
+    engine,
+    /const ambiguous = \(\) => pinnedStates\.length === 0 && statesSeen\.size >= 2/
+  );
+  // The county round, derived date pages, and id pivots are all fact-chaining,
+  // and all three are gated.
+  assert.match(engine, /round === 1 && ambiguous\(\)/);
+  const derivedAt = engine.indexOf('Date-addressed pages, derived rather than searched');
+  const pivotsAt = engine.indexOf('Record-id pivots across a network');
+  assert.ok(derivedAt > -1 && pivotsAt > -1);
+  assert.match(engine.slice(derivedAt, derivedAt + 800), /if \(ambiguous\(\)\) break;/);
+  assert.match(engine.slice(pivotsAt, pivotsAt + 800), /if \(ambiguous\(\)\) break;/);
+  // And the operator is pointed at the decision, in the existing Flagged view.
+  assert.match(engine, /Multiple identities found \(\$\{\[\.\.\.statesSeen\]\.sort\(\)\.join\(', '\)\}\)/);
+});
+
+test('the panel shows identity groups with one decision per person', async () => {
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(panel, /This is them/);
+  assert.match(panel, /Not them/);
+  assert.match(panel, /'choose_profile'/);
+  assert.match(panel, /'reject_profile'/);
+  // Grouping only appears when the queue actually mixes people.
+  assert.match(panel, /stateProfiles\.length >= 2/);
+});
+
+/* ── Multi-arrest: mine confirmed pages, branch a focused search per arrest ── */
+
+test("confirmed pages are mined for the person's other arrests", async () => {
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  const at = engine.indexOf('Mine the pages we KNOW are this person');
+  assert.ok(at > -1, 'the mining block exists');
+  const block = engine.slice(at, at + 6000);
+  // Trusted sources only: pages on configured probe-site domains, fetched by
+  // us. SERP titles and snippets are never mined — they mix people too freely.
+  assert.match(block, /urlOnDomain\(pageUrl, s\.domain\)/);
+  assert.match(block, /MAX_CONFIRMED_PAGE_FETCHES = 3/);
+  // Mined listings pass the same gates as probe rows — the confirmed page
+  // vouches for its rows, but corroboration still decides.
+  assert.match(block, /scoreCorroboration/);
+  assert.match(block, /stateConflicts/);
+  assert.match(block, /\(confirmed page\)/);
+  // Mining runs BEFORE the probe rounds so what it learns steers them.
+  assert.ok(at < engine.indexOf('for (const round of [0, 1] as const)'));
+});
+
+test('a focused run drives every date-built URL from the one arrest', async () => {
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  // Site-search windows: an ordinary run passes NO dates (rolling seven-year
+  // window); a focused run passes only its one date. Learned dates never
+  // reach a window either way.
+  assert.match(engine, /const searchWindow = \(\) => dateWindow\(focusDate \? \[focusDate\] : \[\]\)/);
+  const windows = engine.match(/searchWindow\(\)/g) ?? [];
+  assert.ok(windows.length >= 2, `both window call sites use it; saw ${windows.length}`);
+  assert.doesNotMatch(engine, /dateWindow\(facts\.booking_dates\)/);
+  assert.doesNotMatch(engine, /dateWindow\(dateList\(\)\)/);
+  // Derived date-addressed pages still iterate the learned dates (or the one
+  // focus date) — those are exact roster URLs, not search windows.
+  assert.match(
+    engine,
+    /const dateList = \(\) => \(focusDate \? \[focusDate\] : facts\.booking_dates\)/
+  );
+  assert.match(engine, /dateList\(\)\.slice\(0, 3\)/);
+  // The date is validated before use, and pinned at the front of the variants
+  // so probe URLs are built from it.
+  assert.ok(engine.includes('/^\\d{4}-\\d{2}-\\d{2}$/.test(String(opts?.focusDate'));
+  assert.match(engine, /if \(focusDate\) pinned = mergeFacts\(pinned, \{ booking_dates: \[focusDate\] \}\)/);
+});
+
+test('the deep-search route accepts a focus date and keys the queue on it', async () => {
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/deep-search/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.ok(route.includes('/^\\d{4}-\\d{2}-\\d{2}$/.test(body.focusDate)'));
+  // Branching three arrests back-to-back is the intended use, not a repeat
+  // click, so the hourly dedupe key includes the date.
+  assert.ok(route.includes("`deep-search:${id}:${hour}${focusDate ? `:${focusDate}` : ''}`"));
+  // And the worker hands it through to the run.
+  const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
+  assert.match(queue, /focusDate,/);
+  assert.match(queue, /deep_search job payload has an invalid focusDate/);
+});
+
+test('each booking date carries a branch button for a focused search', async () => {
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(panel, /JSON\.stringify\(\{ focusDate \}\)/);
+  assert.match(panel, /onClick=\{\(\) => runDeepSearch\(v\)\}/);
+  // Two dates = two arrests, said in words next to the row.
   assert.match(panel, /arrests on record/);
   // The plain button must not leak its click event into the focus parameter.
   assert.match(panel, /onClick=\{\(\) => runDeepSearch\(\)\}/);
