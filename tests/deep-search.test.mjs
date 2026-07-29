@@ -1128,6 +1128,29 @@ test('deep search can start from the panel header', async () => {
   assert.match(panel, /onClick=\{\(\) => runDeepSearch\(\)\}/);
 });
 
+test('the routine queued deep search does not raise a modal', async () => {
+  // A popup fired on every deep-search click; the inline status line and the
+  // amber icon already say a run is queued. The alert is gone from the queued
+  // path — but the error paths must still alert.
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(panel, /Results will appear after the next worker tick/);
+  assert.doesNotMatch(panel, /alert\(queuedMessage\)/);
+  assert.match(panel, /alert\(data\.error/, 'a failed enqueue still tells the operator');
+});
+
+test('the status dropdown escapes the grid overflow via a portal', async () => {
+  // In the contacts grid the pill sits inside an overflow-auto scroll
+  // container; an absolutely-positioned menu was clipped, which made changing
+  // a status from the grid the reported "dropdown issue". A portal to
+  // document.body escapes every overflow and stacking context.
+  const pill = await readFile(new URL('../components/StatusPill.tsx', import.meta.url), 'utf8');
+  assert.match(pill, /createPortal\(/);
+  assert.match(pill, /document\.body/);
+  // Fixed positioning anchored to the trigger rect, repositioned on scroll.
+  assert.match(pill, /getBoundingClientRect\(\)/);
+  assert.match(pill, /addEventListener\('scroll', onScroll, true\)/);
+});
+
 test('a failed read can never masquerade as an empty result', async () => {
   // Both files defaulted failed reads to [] and kept going. The worst cases:
   // scoring an empty link list writes reputation 100 (a wrong perfect score

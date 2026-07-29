@@ -440,17 +440,16 @@ export default function ContactPanel({
         }
 
         const alreadyQueued = data.status === 'already queued' || data.duplicate;
-        const queuedMessage = alreadyQueued
-          ? 'Deep search is already queued.'
-          : focusDate
-            ? `Deep search queued, focused on the ${focusDate} arrest.`
-            : 'Deep search queued. Results will appear after the next worker tick.';
+        // No modal for the routine queued case — the inline status line and the
+        // amber search icon already say a run is in flight, and a popup on every
+        // click was just noise. Errors below still alert.
         setDeepSearchStatus(
           alreadyQueued
             ? 'Deep search already queued — waiting for the worker.'
-            : 'Deep search queued — waiting for the worker.'
+            : focusDate
+              ? `Deep search queued, focused on the ${focusDate} arrest — waiting for the worker.`
+              : 'Deep search queued — waiting for the worker.'
         );
-        alert(queuedMessage);
         // Pick up the authoritative queue stamp immediately, then monitor the
         // background job until it completes/fails or this bounded poll expires.
         await Promise.allSettled([load()]);

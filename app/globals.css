@@ -13,9 +13,13 @@
 
   /* Page background and raised surfaces (cards, panels, menus). Referenced by
      the primitives below instead of literal bg-white / bg-gray-50 so both
-     themes are defined in exactly one place. */
+     themes are defined in exactly one place.
+
+     Canvas is a clear medium grey rather than near-white: cards/panels stay
+     white (surface), so raised content reads as raised instead of blending
+     into the page. Nudge this pair together to dial the contrast. */
   --color-surface: #ffffff;
-  --color-canvas: #f9fafb;
+  --color-canvas: #e4e7ec;
 }
 
 /* ---------------------------------------------------------------------------
@@ -38,14 +42,17 @@
    panel on the login page, which should stay dark in both themes.
 --------------------------------------------------------------------------- */
 :root.dark {
-  --color-surface: #1c1f25;
-  --color-canvas: #16181d;
+  /* Lifted a couple of steps off near-black: the page reads as a soft dark
+     grey rather than a black void, and raised surfaces separate more clearly
+     from the canvas. Text shades (400–900) are unchanged so contrast holds. */
+  --color-surface: #282c34;
+  --color-canvas: #1e2127;
 
-  --color-gray-50: #16181d;
-  --color-gray-100: #24272e;
-  --color-gray-200: #2f333b;
-  --color-gray-300: #3d424c;
-  --color-gray-400: #6b7078;
+  --color-gray-50: #1e2127;
+  --color-gray-100: #2c303a;
+  --color-gray-200: #383d48;
+  --color-gray-300: #474d59;
+  --color-gray-400: #767c86;
   --color-gray-500: #9aa0aa;
   --color-gray-600: #b4bac3;
   --color-gray-700: #ccd1d9;
@@ -170,7 +177,7 @@ body {
   background-clip: content-box;
 }
 :root.dark ::-webkit-scrollbar-thumb {
-  background: #3d424c;
+  background: #474d59;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-track {
