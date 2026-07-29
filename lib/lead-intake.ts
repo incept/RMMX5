@@ -68,6 +68,8 @@ export async function runAutoSearchForContact(
     .select('*')
     .eq('id', contactId)
     .single();
+  // Distinguish "could not read" from "has no name" — the old combined check
+  // blamed the contact for what was actually a database error.
   if (contactError) throw new Error(`Could not read contact to search: ${contactError.message}`);
   if (!contact?.name) throw new Error('Contact has no name to search for');
 
@@ -180,6 +182,9 @@ export async function runAutoSearchForContact(
 
   const results = mergeSerpResults(lists);
 
+  // A failed rules read must abort, not default to []: with no rules every
+  // result is "not relevant", so the search would silently report zero links
+  // found while sending the whole SERP to the paid classifier.
   const { data: rules, error: rulesError } = await supabase.from('url_rules').select('*');
   if (rulesError) throw new Error(`Could not read url_rules: ${rulesError.message}`);
   const ruleRows = (rules ?? []) as UrlRule[];
@@ -221,6 +226,9 @@ export async function runAutoSearchForContact(
     .from('contact_links')
     .select('position, url')
     .eq('contact_id', contactId);
+  // THE most dangerous silent failure in this file: if this read fails and
+  // defaults to [], every slot looks free and the position-keyed upsert below
+  // OVERWRITES hand-entered links starting at slot 1. Abort instead.
   if (existingError) {
     throw new Error(`Could not read existing link slots: ${existingError.message}`);
   }
@@ -238,6 +246,8 @@ export async function runAutoSearchForContact(
     .eq('contact_id', contactId)
     .eq('status', 'rejected')
     .limit(5_000);
+  // Tombstones are human decisions; running without them re-places links the
+  // operator deliberately deleted. Abort and let the job retry.
   if (rejectedError) {
     throw new Error(`Could not read rejected-link tombstones: ${rejectedError.message}`);
   }
