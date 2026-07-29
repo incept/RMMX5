@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
-import { createAdminClient } from '@/lib/supabase/server';
-import { enqueueJob } from '@/lib/job-queue';
+import { enqueueDeepSearchJob } from '@/lib/job-queue';
 import { readJsonBody } from '@/lib/request-limits';
 import { logDebug, errorMessage } from '@/lib/debug-log';
 
@@ -16,54 +15,50 @@ export async function POST(request: Request, { params }: Params) {
   const { id } = await params;
 
   try {
-    // Optional body: { focusDate: 'yyyy-mm-dd' } branches out ONE arrest of a
-    // multi-arrest person — that date drives every window and date-built URL.
-    // The body is absent on a plain run, so a parse failure means unfocused.
-    const body = await readJsonBody(request, 4 * 1024).catch(() => ({}) as any);
-    const focusDate =
-      typeof body?.focusDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.focusDate)
-        ? body.focusDate
-        : null;
+    // Optional body: { focusDate: 'yyyy-mm-dd' } branches out one arrest of a
+    // multi-arrest person. No body means an ordinary unfocused run. A present
+    // but malformed body must not silently change the operator's request.
+    const body = request.body ? await readJsonBody(request, 4 * 1024) : {};
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      const error = new Error('Deep-search payload must be a JSON object') as Error & {
+        status?: number;
+      };
+      error.status = 400;
+      throw error;
+    }
+    if (
+      'focusDate' in body &&
+      (typeof body.focusDate !== 'string' ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(body.focusDate))
+    ) {
+      const error = new Error('focusDate must use yyyy-mm-dd') as Error & { status?: number };
+      error.status = 400;
+      throw error;
+    }
+    const focusDate = typeof body.focusDate === 'string' ? body.focusDate : null;
 
-    const { data: contact } = await auth.supabase
+    const { data: contact, error: contactError } = await auth.supabase
       .from('contacts')
       .select('id')
       .eq('id', id)
       .maybeSingle();
+    if (contactError) throw new Error(`Could not verify contact: ${contactError.message}`);
     if (!contact) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
 
-    // Collapse repeat clicks while still allowing a fresh sweep in a later
-    // hour. A focused run keys on its date too: branching three arrests
-    // back-to-back is the intended use, not a repeat click.
+    // Collapse repeat clicks while allowing a fresh sweep in a later hour.
+    // Focused runs include the date because branching several arrests
+    // back-to-back is intentional.
     const hour = Math.floor(Date.now() / 3_600_000);
-    const result = await enqueueJob(
-      'deep_search',
-      { contactId: id, actorId: auth.profile.id, ...(focusDate ? { focusDate } : {}) },
-      `deep-search:${id}:${hour}${focusDate ? `:${focusDate}` : ''}`,
-      2
-    );
-    // The grid's search icon turns amber on this stamp; the run clears it when
-    // it concludes. Set even on a duplicate — either way a run is in flight.
-    // Service role, since requireAdmin already gated the caller and a client-
-    // side RLS denial here would be silent. Best-effort: a missing stamp must
-    // not fail the enqueue.
-    const shouldStamp = result.queued || ['pending', 'processing'].includes(result.status ?? '');
-    const { error: stampError } = shouldStamp
-      ? await createAdminClient()
-          .from('contacts')
-          .update({
-            deep_search_queued_at: new Date().toISOString(),
-            deep_search_job_id: result.id ?? null,
-          })
-          .eq('id', id)
-      : { error: null };
-    if (stampError) {
-      await logDebug({
-        source: 'deep-search:enqueue',
-        message: `Could not stamp the queue time (migration 0025 run?): ${stampError.message}`,
-        contactId: id,
-      });
-    }
+    const result = await enqueueDeepSearchJob({
+      contactId: id,
+      actorId: auth.profile.id,
+      focusDate,
+      dedupeKey: `deep-search:${id}:${hour}${focusDate ? `:${focusDate}` : ''}`,
+      maxAttempts: 2,
+    });
+
+    // Queue insertion and the contact's amber stamp are one transaction. The
+    // route never acknowledges work whose visible state failed to persist.
     return NextResponse.json(
       {
         ...result,
@@ -77,20 +72,21 @@ export async function POST(request: Request, { params }: Params) {
       { status: result.duplicate ? 200 : 202 }
     );
   } catch (e) {
-    // Without this, a throw here returns a bare 500 carrying no JSON, so the
-    // operator sees "HTTP 500" and the cause exists only in a server log they
-    // cannot reach. Deep search was dead for a day behind exactly that gap:
-    // the database had said precisely what was wrong the whole time.
     const message = errorMessage(e);
+    const explicitStatus = Number((e as { status?: number } | null)?.status);
+    const status =
+      Number.isInteger(explicitStatus) && explicitStatus >= 400 && explicitStatus < 500
+        ? explicitStatus
+        : 500;
     await logDebug({
-      level: 'error',
+      level: status < 500 ? 'warn' : 'error',
       source: 'deep-search:enqueue',
       message: `Could not start deep search: ${message}`,
       contactId: id,
-    }).catch(() => {});
+    });
     return NextResponse.json(
       { error: `Could not start deep search: ${message}` },
-      { status: 500 }
+      { status }
     );
   }
 }
