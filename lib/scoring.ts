@@ -119,9 +119,6 @@ export async function applyScores(contactId: string) {
     supabase.from('contact_links').select('*').eq('contact_id', contactId),
     supabase.from('url_rules').select('*'),
   ]);
-  // A failed read must ABORT, never default to empty: scoring an empty list
-  // writes reputation 100 — a wrong perfect score born from a network blip —
-  // and empty rules mis-weights every link. Throwing lets the job retry.
   if (linksRes.error) {
     throw new Error(`Could not read links to score: ${linksRes.error.message}`);
   }
@@ -166,8 +163,6 @@ export async function applyScores(contactId: string) {
     .update({ link_score: linkScore, reputation_score: reputation, revenue_projection: revenue })
     .eq('id', contactId);
   if (scoreError) {
-    // Silently returning here reported a scoring "success" whose numbers were
-    // never persisted — the grid kept showing the stale score forever.
     throw new Error(`Could not persist scores: ${scoreError.message}`);
   }
 
