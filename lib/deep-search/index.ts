@@ -500,7 +500,322 @@ export async function runDeepSearchForContact(
   let minedListings = 0;
   for (const pageUrl of confirmedUrls) {
     if (minedPages >= MAX_CONFIRMED_PAGE_FETCHES) break;
-   …3423 tokens truncated…       })
+    // Mining is a bonus phase and can cost a browser fetch plus an extraction
+    // call per page; the probe rounds behind it are the core of the run. So it
+    // only runs while a comfortable margin remains — this is what let mining
+    // eat the whole window and starve the probes on its first night out.
+    if (outOfTime() || msLeft() < 60_000) break;
+    const site = sitesAll.find((s) => urlOnDomain(pageUrl, s.domain));
+    if (!site) continue; // a news article or social post has no roster to mine
+    minedPages += 1;
+    discoveryAttempts += 1;
+
+    let outcome: Awaited<ReturnType<typeof fetchProbePage>>;
+    try {
+      outcome = await fetchProbePage(pageUrl, {
+        render: site.needs_render,
+        needsBrowser: site.needs_browser,
+        signal,
+      });
+    } catch (e) {
+      // An abort mid-fetch (deadline, lease loss) concludes the run; it must
+      // never destroy it.
+      outcome = { ok: false, reason: errorMessage(e), blocked: false };
+    }
+    if (!outcome.ok) {
+      recordDiscoveryFailure(`${site.domain} confirmed page`, outcome.reason);
+      await logProbeFailure(site.domain, pageUrl, outcome.reason, contactId);
+      continue;
+    }
+    let rows: RawRow[] = [];
+    try {
+      const pageText = stripToText(outcome.html, pageUrl);
+      const parsed = await rowsFromPage(pageText, pageUrl, site.domain, name, contactId, {
+        signal,
+        requestKey: opts?.requestKey ? `${opts.requestKey}:mine:${minedPages}` : undefined,
+      });
+      rows = parsed.rows;
+      if (parsed.llmFacts) facts = mergeFacts(facts, parsed.llmFacts);
+    } catch (e) {
+      recordDiscoveryFailure(`${site.domain} confirmed page parser`, errorMessage(e));
+      await logDebug({
+        source: 'deep-search:mine',
+        message: `Could not read the confirmed page on ${site.domain}: ${errorMessage(e)}`,
+        context: { url: pageUrl },
+        contactId,
+      });
+      continue;
+    }
+    discoverySuccesses += 1;
+
+    for (const row of rows) {
+      const canonical = canonicalUrl(row.url);
+      if (!canonical || seen.has(canonical)) continue;
+      // A search page or sitemap is never a finding — its URL carrying the
+      // name is the only reason it would score.
+      if (isNonRecordUrl(row.url)) continue;
+      const haystack = `${row.text} ${row.url}`;
+      const rowFacts = mergeFacts(
+        mergeFacts({ ...EMPTY_FACTS }, factsFromUrl(row.url, name)),
+        factsFromText(row.text, name)
+      );
+      if (stateConflicts(rowFacts.state)) continue;
+      const scored = scoreCorroboration(haystack, name, mergeFacts(facts, rowFacts));
+      if (scored.confidence < MIN_CONFIDENCE) continue;
+
+      const rule = matchUrlRule(row.url, rules);
+      await candidateWriter.add({
+        contact_id: contactId,
+        url: row.url,
+        canonical_url: canonical,
+        title: row.text.slice(0, 300) || null,
+        snippet:
+          "listed on a page already confirmed as this person's — usually another arrest of the same person",
+        source: 'probe',
+        source_detail: `${site.domain} (confirmed page)`,
+        round: 0,
+        confidence: scored.confidence,
+        matched_facts: scored.matched,
+        url_rule_id: rule?.id ?? null,
+      });
+      seen.add(canonical);
+      candidates += 1;
+      minedListings += 1;
+      sitesWithHits.add(site.domain);
+      facts = mergeFacts(facts, rowFacts);
+      for (const st of rowFacts.state) statesSeen.add(st);
+      rememberFamilyIds(familyIds, site.family, rowFacts.record_ids);
+    }
+  }
+  if (minedListings) {
+    await logDebug({
+      source: 'deep-search:mine',
+      message: `Confirmed page(s) listed ${minedListings} further record(s) — likely additional arrests of this person. Their dates now carry branch buttons on the Booked row.`,
+      contactId,
+    });
+  }
+
+  for (const round of [0, 1] as const) {
+    // The county round runs on facts round 0 accumulated — under ambiguity
+    // those facts mix two people, so probing them would compound the mix.
+    if (round === 1 && ambiguous()) {
+      await logDebug({
+        source: 'deep-search:facts',
+        message: `Chaining stopped: candidates span ${[...statesSeen].sort().join(', ')} with nothing confirmed — pick the right identity in the panel, then re-run`,
+        contactId,
+      });
+      break;
+    }
+    // Round 0: nothing needed, or the lead's own state. Round 1: county-scoped
+    // sites, now that round 0 has probably supplied a county.
+    const roundSites = sites.filter((s) =>
+      round === 0 ? s.scope !== 'county' : s.scope === 'county'
+    );
+    if (!roundSites.length) continue;
+
+    const window = searchWindow();
+    const targets: { site: ProbeSite; url: string }[] = [];
+    for (const site of roundSites) {
+      const states = site.scope_state
+        ? [site.scope_state]
+        : facts.state.length
+          ? facts.state
+          : [null];
+      const counties = site.scope_county
+        ? [site.scope_county]
+        : facts.county.length
+          ? facts.county
+          : [null];
+
+      for (const state of states) {
+        for (const county of counties) {
+          // A site pinned to one state is irrelevant to a lead in another.
+          if (site.scope_state && stateConflicts([site.scope_state])) continue;
+          const url = buildProbeUrl(site.search_template, name, county, state, window);
+          if (url && !targets.some((t) => t.url === url)) targets.push({ site, url });
+        }
+      }
+    }
+    if (!targets.length) continue;
+    rounds += 1;
+
+    for (const { site, url } of targets) {
+      if (outOfTime()) break;
+      if (probed >= MAX_PROBES_PER_RUN) break;
+      probed += 1;
+      discoveryAttempts += 1;
+      await sleep(PER_DOMAIN_DELAY_MS);
+
+      let outcome: Awaited<ReturnType<typeof fetchProbePage>>;
+      try {
+        outcome = await fetchProbePage(url, {
+          render: site.needs_render,
+          needsBrowser: site.needs_browser,
+          signal,
+        });
+      } catch (e) {
+        outcome = { ok: false, reason: errorMessage(e), blocked: false };
+      }
+      if (!outcome.ok) {
+        blocked += 1;
+        blockedDomains.add(site.domain);
+        recordDiscoveryFailure(site.domain, outcome.reason);
+        await logProbeFailure(site.domain, url, outcome.reason, contactId);
+
+        // A policy refusal is BrightData's standing decision about the domain,
+        // so probing it again next run would waste the same call. Flag the site
+        // for SERP discovery instead of leaving it to fail forever. Additive
+        // only — nothing is disabled behind the operator's back.
+        if (outcome.policyBlocked && !site.serp_fallback) {
+          const { error } = await supabase
+            .from('probe_sites')
+            .update({ serp_fallback: true })
+            .eq('id', site.id);
+          await logDebug({
+            level: 'warn',
+            source: 'deep-search:probe',
+            message: error
+              ? `${site.domain} is policy-blocked by BrightData; could not flag it for SERP fallback: ${error.message}`
+              : `${site.domain} is policy-blocked by BrightData, so it is now flagged for site: SERP discovery instead of direct probing`,
+            context: { url },
+            contactId,
+          });
+        }
+        continue;
+      }
+
+      // One unreadable page must not discard the whole sweep. An unexpected
+      // error inside a single probe previously aborted the run and lost every
+      // candidate the earlier probes had already found.
+      let rows: RawRow[] = [];
+      try {
+        const pageText = stripToText(outcome.html, url);
+        const parsed = await rowsFromPage(pageText, url, site.domain, name, contactId, {
+          signal,
+          requestKey: opts?.requestKey ? `${opts.requestKey}:extract:${probed}` : undefined,
+        });
+        rows = parsed.rows;
+        if (parsed.llmFacts) facts = mergeFacts(facts, parsed.llmFacts);
+      } catch (e) {
+        recordDiscoveryFailure(`${site.domain} parser`, errorMessage(e));
+        await logDebug({
+          source: 'deep-search:probe',
+          message: `Could not read results from ${site.domain}: ${errorMessage(e)}`,
+          context: { url },
+          contactId,
+        });
+        continue;
+      }
+      discoverySuccesses += 1;
+
+      for (const row of rows) {
+        const canonical = canonicalUrl(row.url);
+        if (!canonical || seen.has(canonical)) continue;
+        // A search page or sitemap is never a finding; treating one as a hit
+        // is also what made phantom "every arrest" links appear for sites
+        // with no real results.
+        if (isNonRecordUrl(row.url)) continue;
+
+        // Score against everything we know, using the row's own text plus its
+        // URL — the URL alone often carries the county and date.
+        const haystack = `${row.text} ${row.url}`;
+        const urlFacts = factsFromUrl(row.url, name);
+        const textFacts = factsFromText(row.text, name);
+        const rowFacts = mergeFacts(
+          mergeFacts({ ...EMPTY_FACTS }, urlFacts),
+          textFacts
+        );
+        const scored = scoreCorroboration(haystack, name, mergeFacts(facts, rowFacts));
+
+        // Hard reject on a state conflict: a Wake County NC client's record is
+        // not the same-named person booked in Texas.
+        const rowStates = rowFacts.state;
+        if (stateConflicts(rowStates)) continue;
+        if (scored.confidence < MIN_CONFIDENCE) continue;
+
+        const rule = matchUrlRule(row.url, rules);
+        await candidateWriter.add({
+          contact_id: contactId,
+          url: row.url,
+          canonical_url: canonical,
+          title: row.text.slice(0, 300) || null,
+          source: 'probe',
+          source_detail: site.domain,
+          round,
+          confidence: scored.confidence,
+          matched_facts: scored.matched,
+          url_rule_id: rule?.id ?? null,
+        });
+        seen.add(canonical);
+        candidates += 1;
+        sitesWithHits.add(site.domain);
+        // A record's own page teaches us more than the listing row did.
+        facts = mergeFacts(facts, rowFacts);
+        for (const st of rowFacts.state) statesSeen.add(st);
+        rememberFamilyIds(familyIds, site.family, rowFacts.record_ids);
+      }
+    }
+    if (probed >= MAX_PROBES_PER_RUN) break;
+  }
+
+  /* ── SERP fallback for sites we cannot read directly ──────────────────────
+     A challenge-walled site is not a dead end: Google has already crawled it,
+     so a site:-restricted query reaches the same records without touching the
+     host. Costs one SERP request per site, so it is capped and only runs for
+     sites that were blocked this run or are flagged as never readable. */
+  // Slots are scarce, so they go by priority (how often a site actually carries
+  // client records), not by the order rows happen to arrive in. Ordering by
+  // scope previously let arre.st — a 19-link mirror — crowd out arrests.org,
+  // which is a fifth of all historical links.
+  //
+  // One query per NETWORK: mirrors of the same operator return the same records,
+  // so querying siblings separately spends two requests for one set of results.
+  const fallbackCandidates = [
+    ...new Set([
+      ...blockedDomains,
+      ...sitesAll.filter((s) => s.serp_fallback).map((s) => s.domain),
+    ]),
+  ]
+    .map((domain) => ({ domain, site: sitesAll.find((s) => s.domain === domain) }))
+    .sort((a, b) => (a.site?.priority ?? 100) - (b.site?.priority ?? 100));
+
+  const usedFamilies = new Set<string>();
+  const fallbackDomains: string[] = [];
+  for (const { domain, site } of fallbackCandidates) {
+    if (fallbackDomains.length >= MAX_SERP_FALLBACKS) break;
+    if (site?.family) {
+      if (usedFamilies.has(site.family)) continue;
+      usedFamilies.add(site.family);
+    }
+    fallbackDomains.push(domain);
+  }
+
+  for (const domain of fallbackDomains) {
+    // Never start a fallback that cannot finish: both engines run against a
+    // FALLBACK_TIMEOUT_MS deadline, so launching one with less than that on
+    // the clock only manufactures timeout warnings (last night's logs).
+    if (outOfTime() || msLeft() < FALLBACK_TIMEOUT_MS + 5_000) break;
+    // Unquoted on purpose. These sites render "BEACHAK GENE MICHAEL" or
+    // "Beachak, Gene", so an exact-phrase "Gene Beachak" can return nothing at
+    // all. site: already narrows hard, and scoreCorroboration supplies the
+    // precision that the quotes would have.
+    const query = `site:${domain} ${name.first} ${name.last}`.trim();
+    // Both engines at once, and with a shorter deadline than a name search
+    // gets. Sequentially, one slow engine added its whole timeout to the run for
+    // every fallback domain — four domains of that is minutes spent waiting.
+    // Each engine is metered separately, so a timeout costs an attempt that
+    // BrightData does not bill (only successful requests are charged).
+    const engines: SearchEngine[] = ['google', 'bing'];
+    discoveryAttempts += engines.length;
+    const settled = await Promise.allSettled(
+      engines.map((engine) =>
+        runSerpSearch(query, {
+          engine,
+          numResults: 20,
+          timeoutMs: FALLBACK_TIMEOUT_MS,
+          signal,
+          requestKey: opts?.requestKey ? `${opts.requestKey}:fallback:${domain}:${engine}` : undefined,
+        })
       )
     );
     serpFallbacks += engines.length;
