@@ -115,13 +115,22 @@ export function computeRevenueProjection(links: LinkLike[], rules: UrlRule[]): n
 export async function applyScores(contactId: string) {
   const supabase = createAdminClient();
 
-  const [{ data: links }, { data: rules }] = await Promise.all([
+  const [linksRes, rulesRes] = await Promise.all([
     supabase.from('contact_links').select('*').eq('contact_id', contactId),
     supabase.from('url_rules').select('*'),
   ]);
+  // A failed read must ABORT, never default to empty: scoring an empty list
+  // writes reputation 100 — a wrong perfect score born from a network blip —
+  // and empty rules mis-weights every link. Throwing lets the job retry.
+  if (linksRes.error) {
+    throw new Error(`Could not read links to score: ${linksRes.error.message}`);
+  }
+  if (rulesRes.error) {
+    throw new Error(`Could not read url_rules to score: ${rulesRes.error.message}`);
+  }
 
-  const linkRows = (links ?? []) as any[];
-  const ruleRows = (rules ?? []) as UrlRule[];
+  const linkRows = (linksRes.data ?? []) as any[];
+  const ruleRows = (rulesRes.data ?? []) as UrlRule[];
 
   // Stamp each link with its matched rule (id, difficulty, weight) so the UI
   // can show per-link difficulty without re-matching client-side.
@@ -138,7 +147,13 @@ export async function applyScores(contactId: string) {
       patch.difficulty !== link.difficulty ||
       Number(patch.score_weight) !== Number(link.score_weight)
     ) {
-      await supabase.from('contact_links').update(patch).eq('id', link.id);
+      const { error: patchError } = await supabase
+        .from('contact_links')
+        .update(patch)
+        .eq('id', link.id);
+      if (patchError) {
+        throw new Error(`Could not stamp link ${link.position} with its rule: ${patchError.message}`);
+      }
     }
   }
 
@@ -146,10 +161,15 @@ export async function applyScores(contactId: string) {
   const reputation = computeReputationScore(linkScore);
   const revenue = computeRevenueProjection(linkRows, ruleRows);
 
-  await supabase
+  const { error: scoreError } = await supabase
     .from('contacts')
     .update({ link_score: linkScore, reputation_score: reputation, revenue_projection: revenue })
     .eq('id', contactId);
+  if (scoreError) {
+    // Silently returning here reported a scoring "success" whose numbers were
+    // never persisted — the grid kept showing the stale score forever.
+    throw new Error(`Could not persist scores: ${scoreError.message}`);
+  }
 
   return { linkScore, reputation, revenue };
 }

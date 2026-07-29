@@ -750,6 +750,44 @@ export default function ContactPanel({
                     Projected ${Number(contact.revenue_projection).toLocaleString()}
                   </span>
                 )}
+                {/* Deep search from the header, so a run doesn't require a
+                    trip into Link Data. Same stamps and 30-minute staleness
+                    rule as the grid icon: amber = genuinely in flight, green =
+                    completed (click re-runs), red = never run (click runs). */}
+                {(() => {
+                  const queuedAge = contact.deep_search_queued_at
+                    ? Date.now() - new Date(contact.deep_search_queued_at).getTime()
+                    : Infinity;
+                  const inFlight = busy === 'deep' || queuedAge < 30 * 60_000;
+                  const done = !!contact.deep_searched_at;
+                  return (
+                    <button
+                      type="button"
+                      className={`rounded-full px-2.5 py-0.5 text-xs font-medium transition ${
+                        inFlight
+                          ? 'cursor-default bg-amber-100 text-amber-700'
+                          : done
+                            ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                            : 'bg-red-100 text-red-700 hover:bg-red-200'
+                      } ${!isAdmin && !inFlight ? 'cursor-default' : ''}`}
+                      disabled={inFlight || !isAdmin}
+                      title={
+                        inFlight
+                          ? 'Deep search queued — runs on the next worker tick'
+                          : done
+                            ? `Completed ${new Date(contact.deep_searched_at).toLocaleString()}${
+                                isAdmin ? ' — click to run again' : ''
+                              }`
+                            : isAdmin
+                              ? 'Deep search never run — click to run it'
+                              : 'Deep search never run'
+                      }
+                      onClick={() => runDeepSearch()}
+                    >
+                      {inFlight ? '🕵 Searching…' : '🕵 Deep search'}
+                    </button>
+                  );
+                })()}
               </div>
             </div>
             <button className="btn btn-ghost" onClick={onClose}>

@@ -1118,6 +1118,33 @@ test('a branched run cannot be killed by a sibling stealing the stamp', async ()
   assert.doesNotMatch(migration, /where id = p_contact_id and deep_search_job_id = p_job_id/);
 });
 
+test('deep search can start from the panel header', async () => {
+  // The button lived only on the Link Data tab; the header chip beside the
+  // name runs it from anywhere in the panel, wearing the same three states
+  // and the same 30-minute staleness rule as the grid icon.
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(panel, /'🕵 Searching…' : '🕵 Deep search'/);
+  assert.match(panel, /disabled=\{inFlight \|\| !isAdmin\}/);
+  assert.match(panel, /onClick=\{\(\) => runDeepSearch\(\)\}/);
+});
+
+test('a failed read can never masquerade as an empty result', async () => {
+  // Both files defaulted failed reads to [] and kept going. The worst cases:
+  // scoring an empty link list writes reputation 100 (a wrong perfect score
+  // born from a network blip), and a failed slot read makes every position
+  // look free so the upsert overwrites hand-entered links from slot 1.
+  const scoring = await readFile(new URL('../lib/scoring.ts', import.meta.url), 'utf8');
+  assert.match(scoring, /Could not read links to score/);
+  assert.match(scoring, /Could not read url_rules to score/);
+  assert.match(scoring, /Could not persist scores/);
+
+  const intake = await readFile(new URL('../lib/lead-intake.ts', import.meta.url), 'utf8');
+  assert.match(intake, /Could not read contact to search/);
+  assert.match(intake, /Could not read url_rules:/);
+  assert.match(intake, /Could not read existing link slots/);
+  assert.match(intake, /Could not read rejected-link tombstones/);
+});
+
 test('a terminally failed deep search cannot stay amber forever', async () => {
   // The live failure: two contacts sat "queued" for hours. The job had failed
   // its final attempt and parked in the job table; nothing told the contact,
