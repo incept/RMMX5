@@ -799,6 +799,22 @@ test('migration numbers are unique', async () => {
   assert.deepEqual(dupes, [], `duplicate migration prefixes: ${dupes.join(', ')}`);
 });
 
+test('a plain deep-search click with an empty body enqueues, not 400s', async () => {
+  // The live failure: "Could not start deep search: Invalid JSON payload" on
+  // every unfocused run. The route judged "no body" by request.body being
+  // null, but the production runtime delivers a bodyless button POST as a
+  // zero-length stream — non-null, and JSON.parse('') throws. Emptiness must
+  // be judged by content; a NON-empty malformed body still 400s.
+  const source = await readFile(
+    new URL('../app/api/contacts/[id]/deep-search/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.doesNotMatch(source, /request\.body \?/);
+  assert.match(source, /readTextBody\(request, 4 \* 1024\)/);
+  assert.match(source, /if \(rawBody\.trim\(\)\)/);
+  assert.match(source, /must be valid JSON/);
+});
+
 test('a failed deep-search enqueue answers with JSON the operator can read', async () => {
   // A bare 500 carries no body, so the UI could only say "HTTP 500" while the
   // cause sat in a server log nobody can reach from the CRM. The route now
@@ -1082,6 +1098,51 @@ test('a name assembles from first/last when no full name is given', async () => 
     owners: [{ firstname: 'Gene', lastname: 'Beachak', addresses: [] }],
   });
   assert.equal(id.name, 'Gene Beachak');
+});
+
+test('a branched run cannot be killed by a sibling stealing the stamp', async () => {
+  // 0027 guarded the finalize on contacts.deep_search_job_id — one slot the
+  // route rewrote per click. Branch a multi-arrest contact and every run but
+  // the last swept for 95s, found the slot naming a different job, threw
+  // "superseded", retried, and parked as failed: a stuck-looking queue that
+  // discarded finished work. The attempt-state migration guards on the JOB
+  // ROW instead — worker, attempt, and processing status — so a run commits
+  // while ITS claim is live and only a genuine lease-lost zombie is refused.
+  const migration = await readFile(
+    new URL('../supabase/migrations/0028_deep_search_attempt_state.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /and j\.status = 'processing'\s*and j\.locked_by = p_worker/);
+  assert.match(migration, /and j\.attempt_count = p_attempt_count/);
+  // The finalize's contact update carries no deep_search_job_id equality gate.
+  assert.doesNotMatch(migration, /where id = p_contact_id and deep_search_job_id = p_job_id/);
+});
+
+test('deep search can start from the panel header', async () => {
+  // The button lived only on the Link Data tab; the header chip beside the
+  // name runs it from anywhere in the panel, wearing the same three states
+  // and the same 30-minute staleness rule as the grid icon.
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(panel, /'🕵 Searching…' : '🕵 Deep search'/);
+  assert.match(panel, /disabled=\{inFlight \|\| !isAdmin\}/);
+  assert.match(panel, /onClick=\{\(\) => runDeepSearch\(\)\}/);
+});
+
+test('a failed read can never masquerade as an empty result', async () => {
+  // Both files defaulted failed reads to [] and kept going. The worst cases:
+  // scoring an empty link list writes reputation 100 (a wrong perfect score
+  // born from a network blip), and a failed slot read makes every position
+  // look free so the upsert overwrites hand-entered links from slot 1.
+  const scoring = await readFile(new URL('../lib/scoring.ts', import.meta.url), 'utf8');
+  assert.match(scoring, /Could not read links to score/);
+  assert.match(scoring, /Could not read url_rules to score/);
+  assert.match(scoring, /Could not persist scores/);
+
+  const intake = await readFile(new URL('../lib/lead-intake.ts', import.meta.url), 'utf8');
+  assert.match(intake, /Could not read contact to search/);
+  assert.match(intake, /Could not read url_rules:/);
+  assert.match(intake, /Could not read existing link slots/);
+  assert.match(intake, /Could not read rejected-link tombstones/);
 });
 
 test('a terminally failed deep search cannot stay amber forever', async () => {
@@ -1849,46 +1910,6 @@ test('runtime setup documents the current migration and Node requirements', asyn
   assert.match(readme, /highest-numbered migration shipped/);
   assert.match(readme, /0029_deep_search_partial_state\.sql/);
   assert.match(readme, /22\.19\.0 or newer/);
-});
-
-test('a bodyless deep-search click is accepted while malformed JSON stays visible', async () => {
-  const route = await readFile(
-    new URL('../app/api/contacts/[id]/deep-search/route.ts', import.meta.url),
-    'utf8'
-  );
-  assert.match(route, /readTextBody\(request, 4 \* 1024\)/);
-  assert.match(route, /if \(rawBody\.trim\(\)\)/);
-  assert.match(route, /Deep-search payload must be valid JSON/);
-});
-
-test('a branched run finalizes against its exact worker attempt, not a sibling stamp', async () => {
-  const migration = await readFile(
-    new URL('../supabase/migrations/0028_deep_search_attempt_state.sql', import.meta.url),
-    'utf8'
-  );
-  assert.match(migration, /and j\.status = 'processing'\s*and j\.locked_by = p_worker/);
-  assert.match(migration, /and j\.attempt_count = p_attempt_count/);
-  assert.doesNotMatch(migration, /where id = p_contact_id and deep_search_job_id = p_job_id/);
-});
-
-test('deep search can start from the panel header', async () => {
-  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
-  assert.match(panel, /'🕵 Searching…' : '🕵 Deep search'/);
-  assert.match(panel, /disabled=\{inFlight \|\| !isAdmin\}/);
-  assert.match(panel, /onClick=\{\(\) => runDeepSearch\(\)\}/);
-});
-
-test('scoring and intake reads never default failed database calls to empty data', async () => {
-  const scoring = await readFile(new URL('../lib/scoring.ts', import.meta.url), 'utf8');
-  assert.match(scoring, /Could not read links to score/);
-  assert.match(scoring, /Could not read url_rules to score/);
-  assert.match(scoring, /Could not persist scores/);
-
-  const intake = await readFile(new URL('../lib/lead-intake.ts', import.meta.url), 'utf8');
-  assert.match(intake, /Could not read contact to search/);
-  assert.match(intake, /Could not read url_rules:/);
-  assert.match(intake, /Could not read existing link slots/);
-  assert.match(intake, /Could not read rejected-link tombstones/);
 });
 
 test('provider error envelopes cannot become successful empty discovery', async () => {
