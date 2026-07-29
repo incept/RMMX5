@@ -27,7 +27,7 @@ export async function POST(request: Request) {
   let accountId: string | null = null;
   if (body.accountId) {
     const { data: accessibleAccount } = await auth.supabase
-      .from('email_accounts')
+      .from('email_accounts_safe')
       .select('id')
       .eq('id', body.accountId)
       .maybeSingle();
@@ -37,7 +37,7 @@ export async function POST(request: Request) {
     accountId = accessibleAccount.id;
   } else {
     const { data: defaultAccount } = await auth.supabase
-      .from('email_accounts')
+      .from('email_accounts_safe')
       .select('id')
       .eq('is_default', true)
       .limit(1)

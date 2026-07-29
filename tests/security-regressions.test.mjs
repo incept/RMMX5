@@ -369,3 +369,100 @@ test('password reset is non-enumerating and has a recovery page', async () => {
   assert.match(reset, /exchangeCodeForSession/);
   assert.match(reset, /updateUser\(\{ password \}\)/);
 });
+
+test('selected audit hardening protects credentials and marketing mutations', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/0027_selected_audit_hardening.sql', import.meta.url),
+    'utf8'
+  );
+  const inbox = await readFile(new URL('../app/(app)/inbox/page.tsx', import.meta.url), 'utf8');
+  const enroll = await readFile(
+    new URL('../app/api/email/sequences/[id]/enroll/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /create or replace view public\.email_accounts_safe/);
+  const safeView = migration.slice(
+    migration.indexOf('create or replace view public.email_accounts_safe'),
+    migration.indexOf('revoke all on table public.email_accounts')
+  );
+  assert.doesNotMatch(safeView, /smtp_password/);
+  assert.match(
+    migration,
+    /revoke all on table public\.email_accounts from public, anon, authenticated/
+  );
+  assert.match(inbox, /from\('email_accounts_safe'\)/);
+  assert.match(inbox, /\/api\/admin\/email-accounts/);
+  assert.match(enroll, /requireAdmin/);
+  assert.match(migration, /"sequences admin write"/);
+  assert.match(migration, /"enrollments admin write"/);
+});
+
+test('sequence and deep-search workers use stable generation identities', async () => {
+  const sequence = await readFile(new URL('../lib/sequence-runner.ts', import.meta.url), 'utf8');
+  const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(sequence, /deliveryKey: `sequence:\$\{enrollment\.id\}:step:\$\{nextStep\.id\}`/);
+  assert.match(sequence, /if \(advanceError\) throw new Error/);
+  assert.match(queue, /jobId: String\(job\.id\)/);
+  assert.match(engine, /if \(opts\?\.signal\?\.aborted\)/);
+  assert.match(engine, /finish_deep_search_state/);
+});
+
+test('voicemail lifecycle is quota-bound and deletion cancels delivery', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/0027_selected_audit_hardening.sql', import.meta.url),
+    'utf8'
+  );
+  const drops = await readFile(
+    new URL('../app/api/voicemail/drops/route.ts', import.meta.url),
+    'utf8'
+  );
+  const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
+  assert.match(drops, /requireAdmin/);
+  assert.match(drops, /size_bytes: file\.size/);
+  assert.match(drops, /prepare_voicemail_drop_delete/);
+  assert.match(migration, /Voicemail storage is limited to 500 MB/);
+  assert.match(migration, /status in \('pending', 'processing'\)/);
+  assert.match(queue, /lifecycle_status/);
+  assert.match(queue, /existing\.status !== 'queued'/);
+});
+
+test('growth paths are paged, indexed, and pruned in bounded batches', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/0027_selected_audit_hardening.sql', import.meta.url),
+    'utf8'
+  );
+  const sms = await readFile(new URL('../app/(app)/sms/page.tsx', import.meta.url), 'utf8');
+  const voicemail = await readFile(
+    new URL('../app/(app)/voicemail/page.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /from paged p/);
+  assert.match(migration, /job_queue_contact_payload_idx/);
+  assert.match(migration, /before insert or update of contact_id, size_bytes/);
+  assert.match(migration, /limit 5000/g);
+  assert.doesNotMatch(sms, /sms_messages \( id, status \)/);
+  assert.match(sms, /\.limit\(100\)/);
+  assert.match(voicemail, /voicemail_drop_summaries/);
+});
+
+test('contact mutations commit durable side effects instead of partial request chains', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/0027_selected_audit_hardening.sql', import.meta.url),
+    'utf8'
+  );
+  const contactRoute = await readFile(
+    new URL('../app/api/contacts/[id]/route.ts', import.meta.url),
+    'utf8'
+  );
+  const linksRoute = await readFile(
+    new URL('../app/api/contacts/[id]/links/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /update_contact_status_atomic/);
+  assert.match(migration, /'contact_side_effects'/);
+  assert.match(migration, /replace_contact_links_atomic/);
+  assert.match(migration, /'event', 'link_status_change'/);
+  assert.match(contactRoute, /p_expected_updated_at: before\.updated_at/);
+  assert.match(linksRoute, /replace_contact_links_atomic/);
+});

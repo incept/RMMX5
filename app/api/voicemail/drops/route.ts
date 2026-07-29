@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requireUser } from '@/lib/api-auth';
+import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { randomUUID } from 'crypto';
 import {
@@ -14,7 +14,7 @@ const BUCKET = 'voicemail-audio';
 
 /** POST multipart { file, name } — uploads a voicemail recording. */
 export async function POST(request: Request) {
-  const auth = await requireUser();
+  const auth = await requireAdmin();
   if ('error' in auth) return auth.error;
 
   try {
@@ -46,7 +46,7 @@ export async function POST(request: Request) {
 
   const { data: drop, error } = await admin
     .from('voicemail_drops')
-    .insert({ name, audio_path: path, created_by: auth.profile.id })
+    .insert({ name, audio_path: path, size_bytes: file.size, created_by: auth.profile.id })
     .select('*')
     .single();
   if (error) {
@@ -55,4 +55,30 @@ export async function POST(request: Request) {
   }
 
   return NextResponse.json({ drop });
+}
+
+/** Cancels pending deliveries before removing the backing storage object. */
+export async function DELETE(request: Request) {
+  const auth = await requireAdmin();
+  if ('error' in auth) return auth.error;
+  const id = new URL(request.url).searchParams.get('id');
+  if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
+
+  const admin = createAdminClient();
+  const { data: path, error: prepareError } = await admin.rpc('prepare_voicemail_drop_delete', {
+    p_drop_id: id,
+  });
+  if (prepareError) return NextResponse.json({ error: prepareError.message }, { status: 400 });
+  if (!path) return NextResponse.json({ error: 'Recording not found' }, { status: 404 });
+
+  const { error: storageError } = await admin.storage.from(BUCKET).remove([path]);
+  if (storageError) {
+    return NextResponse.json(
+      { error: `Deliveries were cancelled, but storage removal failed: ${storageError.message}` },
+      { status: 500 }
+    );
+  }
+  const { error: deleteError } = await admin.from('voicemail_drops').delete().eq('id', id);
+  if (deleteError) return NextResponse.json({ error: deleteError.message }, { status: 500 });
+  return NextResponse.json({ ok: true });
 }

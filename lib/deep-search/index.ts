@@ -281,7 +281,13 @@ async function rowsFromPage(
 export async function runDeepSearchForContact(
   contactId: string,
   actorId?: string | null,
-  opts?: { deadlineMs?: number; requestKey?: string; signal?: AbortSignal; focusDate?: string }
+  opts?: {
+    deadlineMs?: number;
+    requestKey?: string;
+    signal?: AbortSignal;
+    focusDate?: string;
+    jobId?: string;
+  }
 ): Promise<DeepSearchResult> {
   const supabase = createAdminClient();
   // A focused run branches out ONE arrest of a multi-arrest person: that date
@@ -975,6 +981,9 @@ export async function runDeepSearchForContact(
     siteSearches += 1;
   }
   await candidateWriter.flush();
+  if (opts?.signal?.aborted) {
+    throw opts.signal.reason ?? new Error('Deep-search job lease was lost');
+  }
 
   // Say plainly that the window closed early. The candidates above were still
   // flushed and the facts below still persist — a partial run is a shorter
@@ -993,69 +1002,29 @@ export async function runDeepSearchForContact(
   // ⇒ green. Stamped at conclusion so a partial run counts — it kept its
   // findings. Best-effort: before migration 0025 the columns do not exist,
   // and that must not fail the run.
-  {
-    const { error } = await supabase
-      .from('contacts')
-      .update({ deep_searched_at: new Date().toISOString(), deep_search_queued_at: null })
-      .eq('id', contactId);
-    if (error) {
-      await logDebug({
-        source: 'deep-search',
-        message: `Could not stamp run completion (migration 0025 run?): ${error.message}`,
-        contactId,
-      });
-    }
-  }
-
   // Reuses the existing search_flag, so these land in the contacts grid's
   // Flagged view with the reason on hover — no new surface to learn. Ambiguity
   // outranks index lag: an unresolved identity makes every other follow-up
   // premature, and choosing a profile in the panel clears this flag.
-  if (ambiguous()) {
-    const { error } = await supabase
-      .from('contacts')
-      .update({
-        search_flag: `Multiple identities found (${[...statesSeen].sort().join(', ')}) — pick the right one in the panel, then re-run`,
-        search_flagged_at: new Date().toISOString(),
-      })
-      .eq('id', contactId);
-    if (error) {
-      await logDebug({
-        source: 'deep-search:facts',
-        message: `Could not flag the identity ambiguity: ${error.message}`,
-        contactId,
-      });
-    }
-  } else if (unindexedPrioritySites.length) {
-    const { error } = await supabase
-      .from('contacts')
-      .update({
-        search_flag: `Not yet indexed on ${unindexedPrioritySites.join(', ')} — re-run deep search in a few days`,
-        search_flagged_at: new Date().toISOString(),
-      })
-      .eq('id', contactId);
-    if (error) {
-      await logDebug({
-        source: 'deep-search:facts',
-        message: `Could not flag unindexed sites: ${error.message}`,
-        contactId,
-      });
-    }
-  }
-
   const merged = normalizeFacts(facts);
-  if (!factsAreEqual(normalizeFacts(contact.search_facts), merged)) {
-    const { error } = await supabase
-      .from('contacts')
-      .update({ search_facts: merged })
-      .eq('id', contactId);
-    if (error) {
-      await logDebug({
-        source: 'deep-search:facts',
-        message: `Could not persist search facts: ${error.message}`,
-        contactId,
-      });
-    }
+  const nextFlag = ambiguous()
+    ? `Multiple identities found (${[...statesSeen].sort().join(', ')}) — pick the right one in the panel, then re-run`
+    : unindexedPrioritySites.length
+      ? `Not yet indexed on ${unindexedPrioritySites.join(', ')} — re-run deep search in a few days`
+      : null;
+  if (opts?.jobId) {
+    const { data: committed, error } = await supabase.rpc('finish_deep_search_state', {
+      p_contact_id: contactId,
+      p_job_id: opts.jobId,
+      p_search_facts: merged,
+      p_search_flag: nextFlag,
+      p_flag_changed: nextFlag !== null,
+    });
+    if (error) throw new Error(`Could not finalize deep-search state: ${error.message}`);
+    if (committed !== true) throw new Error('Deep-search generation was superseded before completion');
+  } else if (!factsAreEqual(normalizeFacts(contact.search_facts), merged)) {
+    const { error } = await supabase.from('contacts').update({ search_facts: merged }).eq('id', contactId);
+    if (error) throw new Error(`Could not persist search facts: ${error.message}`);
   }
 
   const learned = [

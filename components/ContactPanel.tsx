@@ -157,7 +157,7 @@ export default function ContactPanel({
         .select('id, list_id, email_lists ( name )')
         .eq('contact_id', contactId),
       supabase.from('email_lists').select('id, name').order('name'),
-      supabase.from('email_accounts').select('id, name, from_email').order('name'),
+      supabase.from('email_accounts_safe').select('id, name, from_email').order('name'),
     ]);
     setMessages(messagesRes.data ?? []);
     setEnrollments(enrollRes.data ?? []);
@@ -1520,6 +1520,7 @@ export default function ContactPanel({
                       className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2.5 py-0.5 text-xs"
                     >
                       {m.email_lists?.name}
+                      {isAdmin && (
                       <button
                         className="text-gray-400 hover:text-red-600"
                         onClick={async () => {
@@ -1529,9 +1530,10 @@ export default function ContactPanel({
                       >
                         ✕
                       </button>
+                      )}
                     </span>
                   ))}
-                  <select
+                  {isAdmin && <select
                     className="input w-44"
                     value=""
                     onChange={async (e) => {
@@ -1550,7 +1552,7 @@ export default function ContactPanel({
                           {l.name}
                         </option>
                       ))}
-                  </select>
+                  </select>}
                 </div>
               </div>
 

@@ -13,11 +13,8 @@ export default function VoicemailPage() {
 
   const load = useCallback(async () => {
     const [d, l] = await Promise.all([
-      supabase
-        .from('voicemail_drops')
-        .select('*, voicemail_sends ( id, status )')
-        .order('created_at', { ascending: false }),
-      supabase.from('email_lists').select('id, name, email_list_members ( id )').order('name'),
+      supabase.rpc('voicemail_drop_summaries', { p_limit: 50, p_offset: 0 }),
+      supabase.from('email_lists').select('id, name').order('name').limit(200),
     ]);
     setDrops(d.data ?? []);
     setLists(l.data ?? []);
@@ -79,8 +76,8 @@ export default function VoicemailPage() {
 
       <div className="space-y-2">
         {drops.map((d) => {
-          const sent = d.voicemail_sends?.filter((s: any) => s.status === 'sent').length ?? 0;
-          const failed = d.voicemail_sends?.filter((s: any) => s.status === 'failed').length ?? 0;
+          const sent = Number(d.sent_count ?? 0);
+          const failed = Number(d.failed_count ?? 0);
           return (
             <div key={d.id} className="card flex items-center gap-4">
               <span className="text-xl">🎙</span>
@@ -102,7 +99,14 @@ export default function VoicemailPage() {
                 className="btn text-red-600"
                 onClick={async () => {
                   if (!confirm(`Delete "${d.name}"?`)) return;
-                  await supabase.from('voicemail_drops').delete().eq('id', d.id);
+                  const res = await fetch(
+                    `/api/voicemail/drops?id=${encodeURIComponent(d.id)}`,
+                    { method: 'DELETE' }
+                  );
+                  if (!res.ok) {
+                    alert((await res.json()).error ?? 'Delete failed');
+                    return;
+                  }
                   load();
                 }}
               >
@@ -130,7 +134,7 @@ export default function VoicemailPage() {
               <option value="">Choose list…</option>
               {lists.map((l) => (
                 <option key={l.id} value={l.id}>
-                  {l.name} ({l.email_list_members?.length ?? 0} members)
+                  {l.name}
                 </option>
               ))}
             </select>

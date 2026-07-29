@@ -30,23 +30,25 @@ export async function sendCrmEmail(opts: {
 
   let account: any = null;
   if (opts.accountId) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('email_accounts')
       .select('*')
       .eq('id', opts.accountId)
       .maybeSingle();
+    if (error) throw new Error(`Could not load SMTP account: ${error.message}`);
     account = data;
   }
   // Only trusted background jobs may fall back to a service-role lookup of
   // the global default. User-triggered routes resolve an RLS-visible account
   // before calling this function and otherwise fall back to Emailit.
   if (!account && opts.actorId == null) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('email_accounts')
       .select('*')
       .eq('is_default', true)
       .limit(1)
       .maybeSingle();
+    if (error) throw new Error(`Could not load default SMTP account: ${error.message}`);
     account = data;
   }
 
@@ -148,7 +150,7 @@ export async function sendCrmEmail(opts: {
     error = e.message;
   }
 
-  await supabase
+  const { error: statusError } = await supabase
     .from('email_messages')
     .update({
       status: ok ? 'sent' : 'failed',
@@ -157,6 +159,20 @@ export async function sendCrmEmail(opts: {
       sent_at: ok ? new Date().toISOString() : null,
     })
     .eq('id', row.id);
+  if (statusError) {
+    await logDebug({
+      level: 'error',
+      source: 'email-send:ledger',
+      message: `Provider result could not be recorded: ${statusError.message}`,
+      context: { email_message_id: row.id, delivery_key: opts.deliveryKey ?? null, ok },
+      contactId: opts.contactId ?? null,
+    }).catch(() => {});
+    return {
+      ok: false,
+      messageRowId: row.id,
+      error: `Email provider result could not be recorded: ${statusError.message}`,
+    };
+  }
 
   if (!ok) {
     await logDebug({

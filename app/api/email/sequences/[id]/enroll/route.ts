@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requireUser } from '@/lib/api-auth';
+import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { enrollContact } from '@/lib/sequence-runner';
 import { MAX_BULK_RECIPIENTS } from '@/lib/bulk-delivery';
@@ -14,7 +14,7 @@ type Params = { params: Promise<{ id: string }> };
  * wholeList enrolls every member of the sequence's list.
  */
 export async function POST(request: Request, { params }: Params) {
-  const auth = await requireUser();
+  const auth = await requireAdmin();
   if ('error' in auth) return auth.error;
   const { id } = await params;
   let body: any;
