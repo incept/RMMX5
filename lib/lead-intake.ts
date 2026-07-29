@@ -38,16 +38,21 @@ async function setSearchFlag(
 ) {
   const { error } = await supabase
     .from('contacts')
-    .update({ search_flag: flag, search_flagged_at: flag ? new Date().toISOString() : null })
+    .update({
+      search_flag: flag?.slice(0, 500) ?? null,
+      search_flagged_at: flag ? new Date().toISOString() : null,
+    })
     .eq('id', contactId);
   if (error) {
     // A flag that fails to persist means a broken search nobody will re-run.
     await logDebug({
+      level: 'error',
       source: 'lead-intake:search-flag',
       message: `Failed to persist search flag: ${error.message}`,
       context: { flag },
       contactId,
     });
+    throw new Error(`Failed to persist search flag: ${error.message}`);
   }
 }
 
@@ -63,8 +68,6 @@ export async function runAutoSearchForContact(
     .select('*')
     .eq('id', contactId)
     .single();
-  // Distinguish "could not read" from "has no name" — the old combined check
-  // blamed the contact for what was actually a database error.
   if (contactError) throw new Error(`Could not read contact to search: ${contactError.message}`);
   if (!contact?.name) throw new Error('Contact has no name to search for');
 
@@ -177,9 +180,6 @@ export async function runAutoSearchForContact(
 
   const results = mergeSerpResults(lists);
 
-  // A failed rules read must abort, not default to []: with no rules every
-  // result is "not relevant", so the search would silently report zero links
-  // found while sending the whole SERP to the paid classifier.
   const { data: rules, error: rulesError } = await supabase.from('url_rules').select('*');
   if (rulesError) throw new Error(`Could not read url_rules: ${rulesError.message}`);
   const ruleRows = (rules ?? []) as UrlRule[];
@@ -196,6 +196,7 @@ export async function runAutoSearchForContact(
   // the candidate queue for review rather than into a link slot. Best-effort —
   // a classification failure must not lose the search.
   let unruledCandidates = 0;
+  const partialFailures: string[] = [];
   try {
     unruledCandidates = await captureUnruledSerpCandidates(
       contactId,
@@ -206,6 +207,7 @@ export async function runAutoSearchForContact(
       { requestKey: requestKey ? `${requestKey}:classify` : undefined }
     );
   } catch (e) {
+    partialFailures.push(`unruled-result classification: ${errorMessage(e)}`);
     await logDebug({
       level: 'warn',
       source: 'lead-intake:auto-search',
@@ -219,9 +221,6 @@ export async function runAutoSearchForContact(
     .from('contact_links')
     .select('position, url')
     .eq('contact_id', contactId);
-  // THE most dangerous silent failure in this file: if this read fails and
-  // defaults to [], every slot looks free and the position-keyed upsert below
-  // OVERWRITES hand-entered links starting at slot 1. Abort instead.
   if (existingError) {
     throw new Error(`Could not read existing link slots: ${existingError.message}`);
   }
@@ -239,8 +238,6 @@ export async function runAutoSearchForContact(
     .eq('contact_id', contactId)
     .eq('status', 'rejected')
     .limit(5_000);
-  // Tombstones are human decisions; running without them re-places links the
-  // operator deliberately deleted. Abort and let the job retry.
   if (rejectedError) {
     throw new Error(`Could not read rejected-link tombstones: ${rejectedError.message}`);
   }
@@ -275,6 +272,7 @@ export async function runAutoSearchForContact(
         context: { url: result.link, position },
         contactId,
       });
+      partialFailures.push(`link slot ${position}: ${linkError.message}`);
       continue;
     }
     usedPositions.add(position);
@@ -286,11 +284,18 @@ export async function runAutoSearchForContact(
   // Flag a partial run (one engine failed but the other returned) so it can be
   // re-run once the failing engine recovers; a clean run clears any prior flag.
   const failedEngines = engines.filter((e) => !succeeded.includes(e));
+  const partialReason = [
+    failedEngines.length ? `${failedEngines.join(' + ')} search failed` : '',
+    ...partialFailures,
+  ]
+    .filter(Boolean)
+    .join('; ')
+    .slice(0, 450);
   await setSearchFlag(
     supabase,
     contactId,
-    failedEngines.length
-      ? `${failedEngines.join(' + ')} search failed — results may be incomplete`
+    partialReason
+      ? `Partial search — ${partialReason}. Stored results were kept; confirm useful facts and run a secondary search.`
       : null
   );
 
