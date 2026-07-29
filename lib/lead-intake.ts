@@ -58,7 +58,14 @@ export async function runAutoSearchForContact(
 ) {
   const supabase = createAdminClient();
 
-  const { data: contact } = await supabase.from('contacts').select('*').eq('id', contactId).single();
+  const { data: contact, error: contactError } = await supabase
+    .from('contacts')
+    .select('*')
+    .eq('id', contactId)
+    .single();
+  // Distinguish "could not read" from "has no name" — the old combined check
+  // blamed the contact for what was actually a database error.
+  if (contactError) throw new Error(`Could not read contact to search: ${contactError.message}`);
   if (!contact?.name) throw new Error('Contact has no name to search for');
 
   const searchCfg = await getSetting<{ extra_terms?: string }>('search');
@@ -170,7 +177,11 @@ export async function runAutoSearchForContact(
 
   const results = mergeSerpResults(lists);
 
-  const { data: rules } = await supabase.from('url_rules').select('*');
+  // A failed rules read must abort, not default to []: with no rules every
+  // result is "not relevant", so the search would silently report zero links
+  // found while sending the whole SERP to the paid classifier.
+  const { data: rules, error: rulesError } = await supabase.from('url_rules').select('*');
+  if (rulesError) throw new Error(`Could not read url_rules: ${rulesError.message}`);
   const ruleRows = (rules ?? []) as UrlRule[];
 
   // Keep results from admin-flagged relevant sites, preserve SERP order.
@@ -204,10 +215,16 @@ export async function runAutoSearchForContact(
   }
 
   // Fill empty link slots (don't clobber links someone entered by hand).
-  const { data: existing } = await supabase
+  const { data: existing, error: existingError } = await supabase
     .from('contact_links')
     .select('position, url')
     .eq('contact_id', contactId);
+  // THE most dangerous silent failure in this file: if this read fails and
+  // defaults to [], every slot looks free and the position-keyed upsert below
+  // OVERWRITES hand-entered links starting at slot 1. Abort instead.
+  if (existingError) {
+    throw new Error(`Could not read existing link slots: ${existingError.message}`);
+  }
   const usedPositions = new Set((existing ?? []).filter((l) => l.url).map((l) => l.position));
   const existingUrls = new Set((existing ?? []).map((l) => l.url));
 
@@ -216,12 +233,17 @@ export async function runAutoSearchForContact(
   // the same roster page came back every run no matter how often the operator
   // removed it. A deletion is a decision, and decisions are remembered as
   // rejected candidates (see the links route).
-  const { data: rejectedRows } = await supabase
+  const { data: rejectedRows, error: rejectedError } = await supabase
     .from('search_candidates')
     .select('canonical_url')
     .eq('contact_id', contactId)
     .eq('status', 'rejected')
     .limit(5_000);
+  // Tombstones are human decisions; running without them re-places links the
+  // operator deliberately deleted. Abort and let the job retry.
+  if (rejectedError) {
+    throw new Error(`Could not read rejected-link tombstones: ${rejectedError.message}`);
+  }
   const humanRejected = new Set(
     ((rejectedRows ?? []) as any[]).map((r) => r.canonical_url).filter(Boolean)
   );
