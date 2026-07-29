@@ -154,13 +154,53 @@ export async function runSerpSearch(
     try {
       data = JSON.parse(data.body);
     } catch {
-      // Not JSON inside the envelope — fall through to the empty-results path.
+      await finishUsage(usage.id, 'failed', 'Invalid wrapped SERP response');
+      await logDebug({
+        level: 'error',
+        source: 'brightdata',
+        message: `${engine} SERP returned an envelope whose body was not parsed JSON`,
+        context: { engine, zone: cfg.serp_zone, query, response: snippet },
+      });
+      throw new Error(`BrightData returned an invalid wrapped ${engine} SERP response`);
     }
   }
 
-  const organic = data?.organic ?? data?.organic_results ?? [];
+  const providerError =
+    data?.error ??
+    data?.errors ??
+    (typeof data?.status === 'string' && /^(?:error|failed|failure)$/i.test(data.status)
+      ? data?.message ?? data.status
+      : null);
+  if (providerError) {
+    const detail =
+      typeof providerError === 'string'
+        ? providerError
+        : JSON.stringify(providerError).slice(0, 500);
+    await finishUsage(usage.id, 'failed', detail);
+    await logDebug({
+      level: 'error',
+      source: 'brightdata',
+      message: `${engine} SERP returned a provider error: ${detail}`,
+      context: { engine, zone: cfg.serp_zone, query, top_level_keys: Object.keys(data ?? {}) },
+    });
+    throw new Error(`BrightData ${engine} SERP provider error: ${detail}`);
+  }
 
-  if (!Array.isArray(organic) || organic.length === 0) {
+  const hasOrganic = Object.prototype.hasOwnProperty.call(data ?? {}, 'organic');
+  const hasOrganicResults = Object.prototype.hasOwnProperty.call(data ?? {}, 'organic_results');
+  const organic = hasOrganic ? data.organic : hasOrganicResults ? data.organic_results : undefined;
+  if (!Array.isArray(organic)) {
+    await finishUsage(usage.id, 'failed', 'Unexpected SERP response shape');
+    await logDebug({
+      level: 'error',
+      source: 'brightdata',
+      message: `${engine} SERP response did not contain an organic-results array`,
+      context: { engine, zone: cfg.serp_zone, query, top_level_keys: Object.keys(data ?? {}) },
+    });
+    throw new Error(`BrightData returned an unexpected ${engine} SERP response shape`);
+  }
+
+  if (organic.length === 0) {
     await logDebug({
       level: 'warn',
       source: 'brightdata',
@@ -169,13 +209,15 @@ export async function runSerpSearch(
     });
   }
 
-  const results = organic.map((r: any, i: number) => ({
-    title: r.title ?? '',
-    link: r.link ?? r.url ?? '',
-    snippet: r.description ?? r.snippet ?? '',
-    position: r.rank ?? r.position ?? i + 1,
-    engine,
-  }));
+  const results = organic
+    .filter((r: unknown): r is Record<string, any> => !!r && typeof r === 'object')
+    .map((r: any, i: number) => ({
+      title: r.title ?? '',
+      link: r.link ?? r.url ?? '',
+      snippet: r.description ?? r.snippet ?? '',
+      position: r.rank ?? r.position ?? i + 1,
+      engine,
+    }));
   await finishUsage(usage.id, 'succeeded');
   return results;
 }
