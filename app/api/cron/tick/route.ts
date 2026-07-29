@@ -47,12 +47,23 @@ export async function GET(request: Request) {
       processQueuedJobs(1),
     ]);
     const outcome: Record<string, any> = {};
+    let degraded = false;
     await Promise.all(
       results.map(async (result, index) => {
         const name = names[index];
         if (result.status === 'fulfilled') {
           outcome[name] = result.value;
+          // A durable worker records its own retry, but the scheduler still
+          // needs a non-success status so a failed provider job is observable
+          // outside the application instead of looking like a healthy tick.
+          if (
+            name === 'jobs' &&
+            Number((result.value as { failed?: number } | null)?.failed ?? 0) > 0
+          ) {
+            degraded = true;
+          }
         } else {
+          degraded = true;
           const message = errorMessage(result.reason);
           outcome[name] = { error: message };
           await logDebug({ source: `cron:${name}`, message });
@@ -87,12 +98,15 @@ export async function GET(request: Request) {
       }
     }
 
-    return NextResponse.json({
-      ok: true,
-      ...outcome,
-      retention,
-      at: new Date().toISOString(),
-    });
+    return NextResponse.json(
+      {
+        ok: !degraded,
+        ...outcome,
+        retention,
+        at: new Date().toISOString(),
+      },
+      { status: degraded ? 500 : 200 }
+    );
   } finally {
     const { error: releaseError } = await admin
       .from('app_leases')
