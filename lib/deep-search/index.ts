@@ -1039,6 +1039,10 @@ export async function runDeepSearchForContact(
   // A deadline is a safe partial completion only after at least one source
   // answered. If every source timed out, there is no trustworthy partial result
   // to turn green; leave the job failed/retryable and surface the outage.
+  const merged = normalizeFacts(facts);
+  const factsChanged = !factsAreEqual(normalizeFacts(contact.search_facts), merged);
+  const hasPartialResults = candidates > 0 || factsChanged;
+  let healthWarning: string | null = null;
   if (discoverySuccesses === 0) {
     const detail = discoveryFailures.length
       ? ` ${discoveryFailures.join(' | ')}`
@@ -1048,18 +1052,31 @@ export async function runDeepSearchForContact(
         `the run was not marked complete.${detail}`
       : `Deep search had no runnable external source (${sites.length} active probe site(s)); ` +
         'check probe-site configuration and required state/county facts. The run was not marked complete.';
+    if (hasPartialResults) {
+      healthWarning =
+        `Partial deep search: no external source completed, but ${candidates} candidate(s) ` +
+        `${factsChanged ? 'and newly learned facts were' : 'were'} retained. ` +
+        'Confirm the useful facts, then run a secondary search.';
+    }
     await logDebug({
-      level: 'error',
+      level: hasPartialResults ? 'warn' : 'error',
       source: 'deep-search:health',
-      message,
+      message: healthWarning ? `${message} ${healthWarning}` : message,
       context: {
         attempts: discoveryAttempts,
         successes: discoverySuccesses,
         failures: discoveryFailures,
+        partial_candidates: candidates,
+        facts_changed: factsChanged,
       },
       contactId,
     }).catch(() => {});
-    throw new Error(message);
+    if (!hasPartialResults) throw new Error(message);
+  } else if (discoveryFailures.length || deadlineHit) {
+    healthWarning =
+      `Partial deep search: ${discoverySuccesses} of ${discoveryAttempts} external source ` +
+      `attempt(s) completed${deadlineHit ? ' before the time window closed' : ''}. ` +
+      'All candidates and learned facts were retained; confirm them, then run a secondary search.';
   }
 
   // Say plainly that the window closed early. The candidates above were still
@@ -1083,12 +1100,19 @@ export async function runDeepSearchForContact(
   // Flagged view with the reason on hover — no new surface to learn. Ambiguity
   // outranks index lag: an unresolved identity makes every other follow-up
   // premature, and choosing a profile in the panel clears this flag.
-  const merged = normalizeFacts(facts);
-  const nextFlag = ambiguous()
-    ? `Multiple identities found (${[...statesSeen].sort().join(', ')}) — pick the right one in the panel, then re-run`
-    : unindexedPrioritySites.length
-      ? `Not yet indexed on ${unindexedPrioritySites.join(', ')} — re-run deep search in a few days`
-      : null;
+  const nextFlag =
+    [
+      ambiguous()
+        ? `Multiple identities found (${[...statesSeen].sort().join(', ')}) — pick the right one in the panel, then re-run`
+        : null,
+      unindexedPrioritySites.length
+        ? `Not yet indexed on ${unindexedPrioritySites.join(', ')} — re-run deep search in a few days`
+        : null,
+      healthWarning,
+    ]
+      .filter(Boolean)
+      .join(' | ')
+      .slice(0, 500) || null;
   if (opts?.jobId) {
     const { data: committed, error } = await supabase.rpc('finish_deep_search_attempt', {
       p_contact_id: contactId,
@@ -1127,7 +1151,8 @@ export async function runDeepSearchForContact(
       `${siteSearches ? `, ${siteSearches} site search link(s) to check for further arrests` : ''}` +
       `: ${candidates} new candidate(s) for review${learned ? `. Learned: ${learned}` : ''}` +
       `${ambiguous() ? `. Candidates span ${[...statesSeen].sort().join(', ')} — pick the right identity in the panel` : ''}` +
-      `${deadlineHit ? '. Hit the time limit — partial results; re-run to continue' : ''}`,
+      `${deadlineHit ? '. Hit the time limit — partial results; re-run to continue' : ''}` +
+      `${healthWarning ? `. ${healthWarning}` : ''}`,
     meta: {
       probed,
       blocked,
@@ -1140,6 +1165,7 @@ export async function runDeepSearchForContact(
       minedPages,
       minedListings,
       focusDate,
+      partialWarning: healthWarning,
       facts: merged,
     },
   });
@@ -1198,17 +1224,25 @@ export async function captureUnruledSerpCandidates(
   if (!unruled.length) return 0;
 
   const supabase = createAdminClient();
-  const { data: contact } = await supabase
+  const { data: contact, error: contactError } = await supabase
     .from('contacts')
     .select('search_facts, confirmed_facts, state')
     .eq('id', contactId)
     .maybeSingle();
+  if (contactError) {
+    throw new Error(`Could not load contact facts for SERP classification: ${contactError.message}`);
+  }
   // Same precedence as a full run: confirmed facts and links first, so the
   // classifier judges against what a human has actually verified.
-  const { data: slotLinks } = await supabase
+  const { data: slotLinks, error: slotLinksError } = await supabase
     .from('contact_links')
     .select('url')
     .eq('contact_id', contactId);
+  if (slotLinksError) {
+    throw new Error(
+      `Could not load confirmed links for SERP classification: ${slotLinksError.message}`
+    );
+  }
 
   let pinned: SearchFacts = { ...EMPTY_FACTS };
   pinned = mergeFacts(pinned, normalizeFacts(contact?.confirmed_facts));
@@ -1285,10 +1319,12 @@ export async function captureUnruledSerpCandidates(
     .eq('id', contactId);
   if (factError) {
     await logDebug({
+      level: 'error',
       source: 'deep-search:facts',
       message: `Could not persist facts learned from SERP results: ${factError.message}`,
       contactId,
     });
+    throw new Error(`Could not persist facts learned from SERP results: ${factError.message}`);
   }
   return stored;
 }
