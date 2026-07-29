@@ -799,6 +799,22 @@ test('migration numbers are unique', async () => {
   assert.deepEqual(dupes, [], `duplicate migration prefixes: ${dupes.join(', ')}`);
 });
 
+test('a plain deep-search click with an empty body enqueues, not 400s', async () => {
+  // The live failure: "Could not start deep search: Invalid JSON payload" on
+  // every unfocused run. The route judged "no body" by request.body being
+  // null, but the production runtime delivers a bodyless button POST as a
+  // zero-length stream — non-null, and JSON.parse('') throws. Emptiness must
+  // be judged by content; a NON-empty malformed body still 400s.
+  const source = await readFile(
+    new URL('../app/api/contacts/[id]/deep-search/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.doesNotMatch(source, /request\.body \?/);
+  assert.match(source, /readTextBody\(request, 4 \* 1024\)/);
+  assert.match(source, /if \(rawBody\.trim\(\)\)/);
+  assert.match(source, /must be valid JSON/);
+});
+
 test('a failed deep-search enqueue answers with JSON the operator can read', async () => {
   // A bare 500 carries no body, so the UI could only say "HTTP 500" while the
   // cause sat in a server log nobody can reach from the CRM. The route now
@@ -1086,20 +1102,19 @@ test('a name assembles from first/last when no full name is given', async () => 
 
 test('a branched run cannot be killed by a sibling stealing the stamp', async () => {
   // 0027 guarded the finalize on contacts.deep_search_job_id — one slot the
-  // route rewrites per click. Branch a multi-arrest contact and every run but
+  // route rewrote per click. Branch a multi-arrest contact and every run but
   // the last swept for 95s, found the slot naming a different job, threw
   // "superseded", retried, and parked as failed: a stuck-looking queue that
-  // discarded finished work. 0028 asks the job row instead — a run commits
-  // while ITS claim is live, and only a genuine lease-lost zombie is refused.
+  // discarded finished work. The attempt-state migration guards on the JOB
+  // ROW instead — worker, attempt, and processing status — so a run commits
+  // while ITS claim is live and only a genuine lease-lost zombie is refused.
   const migration = await readFile(
-    new URL('../supabase/migrations/0028_deep_search_finalize_guard.sql', import.meta.url),
+    new URL('../supabase/migrations/0028_deep_search_attempt_state.sql', import.meta.url),
     'utf8'
   );
-  assert.match(migration, /where j\.id = p_job_id and j\.status = 'processing'/);
-  // The amber stamp survives while any OTHER live run still owns it, in both
-  // the success and the terminal-failure path.
-  assert.ok((migration.match(/j\.id <> p_job_id/g) ?? []).length >= 2);
-  // The single-slot guard is gone from the WHERE clause.
+  assert.match(migration, /and j\.status = 'processing'\s*and j\.locked_by = p_worker/);
+  assert.match(migration, /and j\.attempt_count = p_attempt_count/);
+  // The finalize's contact update carries no deep_search_job_id equality gate.
   assert.doesNotMatch(migration, /where id = p_contact_id and deep_search_job_id = p_job_id/);
 });
 
