@@ -254,6 +254,21 @@ function pageFailure(status: number, html: string): string | null {
     .trim();
   if (!html.trim() || !bodyText) return `HTTP ${status} (empty body)`;
   if (looksBlocked(status, html)) return `HTTP ${status} (challenge page)`;
+  if (/^\s*[{[]/.test(html)) {
+    try {
+      const parsed = JSON.parse(html);
+      if (
+        parsed?.error ||
+        parsed?.errors ||
+        (typeof parsed?.status === 'string' &&
+          /^(?:error|failed|failure)$/i.test(parsed.status))
+      ) {
+        return `HTTP ${status} (provider error envelope)`;
+      }
+    } catch {
+      // Ordinary HTML can begin with a script or text containing these bytes.
+    }
+  }
 
   const title =
     /<title\b[^>]*>([\s\S]*?)<\/title>/i
@@ -331,8 +346,6 @@ async function unlockerRequest(
     const debug = res.headers.get('x-brd-debug');
     last = { res, body, debug };
 
-    if (res.ok && body.trim()) return { res, body, attempts: attempt, debug };
-
     const failureSignal = [
       res.headers.get('x-brd-err-code'),
       res.headers.get('x-brd-err-msg'),
@@ -341,6 +354,32 @@ async function unlockerRequest(
       .filter(Boolean)
       .join(' ')
       .toLowerCase();
+    let jsonError = '';
+    if (/^\s*[{[]/.test(body)) {
+      try {
+        const parsed = JSON.parse(body);
+        const candidate =
+          parsed?.error ??
+          parsed?.errors ??
+          (typeof parsed?.status === 'string' && /^(?:error|failed|failure)$/i.test(parsed.status)
+            ? parsed?.message ?? parsed.status
+            : null);
+        if (candidate) {
+          jsonError =
+            typeof candidate === 'string'
+              ? candidate
+              : JSON.stringify(candidate).slice(0, 500);
+        }
+      } catch {
+        // A target page can legally begin with "[" or "{". Only a parsed
+        // provider error envelope changes the outcome.
+      }
+    }
+    const providerHeaders =
+      res.headers.get('x-brd-err-code') || res.headers.get('x-brd-err-msg');
+    if (res.ok && body.trim() && !providerHeaders && !jsonError) {
+      return { res, body, attempts: attempt, debug };
+    }
 
     if (POLICY_ERROR.test(failureSignal)) break; // settled, not retryable
     const transient = TRANSIENT_UNLOCKER_ERRORS.some((e) => failureSignal.includes(e));
@@ -504,7 +543,7 @@ export async function fetchProbePage(
       .join(' ');
 
     const unlockerPageFailure = pageFailure(res.status, body);
-    if (!res.ok || unlockerPageFailure) {
+    if (!res.ok || unlockerPageFailure || brdError) {
       const signal = `${brdError} ${body.slice(0, 300)}`.toLowerCase();
       const detail = POLICY_ERROR.test(signal)
         ? `BrightData refused this target by policy (${brdError || 'policy error'}). ` +
