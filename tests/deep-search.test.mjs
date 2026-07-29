@@ -1077,6 +1077,25 @@ test('a name assembles from first/last when no full name is given', async () => 
   assert.equal(id.name, 'Gene Beachak');
 });
 
+test('a branched run cannot be killed by a sibling stealing the stamp', async () => {
+  // 0027 guarded the finalize on contacts.deep_search_job_id — one slot the
+  // route rewrites per click. Branch a multi-arrest contact and every run but
+  // the last swept for 95s, found the slot naming a different job, threw
+  // "superseded", retried, and parked as failed: a stuck-looking queue that
+  // discarded finished work. 0028 asks the job row instead — a run commits
+  // while ITS claim is live, and only a genuine lease-lost zombie is refused.
+  const migration = await readFile(
+    new URL('../supabase/migrations/0028_deep_search_finalize_guard.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /where j\.id = p_job_id and j\.status = 'processing'/);
+  // The amber stamp survives while any OTHER live run still owns it, in both
+  // the success and the terminal-failure path.
+  assert.ok((migration.match(/j\.id <> p_job_id/g) ?? []).length >= 2);
+  // The single-slot guard is gone from the WHERE clause.
+  assert.doesNotMatch(migration, /where id = p_contact_id and deep_search_job_id = p_job_id/);
+});
+
 test('a terminally failed deep search cannot stay amber forever', async () => {
   // The live failure: two contacts sat "queued" for hours. The job had failed
   // its final attempt and parked in the job table; nothing told the contact,
