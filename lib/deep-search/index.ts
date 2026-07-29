@@ -664,6 +664,10 @@ export async function runDeepSearchForContact(
         // spend the remaining budget on sites that can actually answer.
         if (outcome.browserUnavailable) {
           browserOnlySkips += 1;
+          // Skipped is still unread: the domain joins this run's SERP-fallback
+          // pool, or the promise in the log line below would only hold for
+          // sites that happen to carry the standing serp_fallback flag.
+          blockedDomains.add(site.domain);
           if (browserOnlySkips === 1) {
             await logDebug({
               level: 'warn',

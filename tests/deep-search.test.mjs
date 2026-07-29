@@ -1162,6 +1162,17 @@ test('a browser-only site on a Chrome-less host is skipped, never billed', async
     skipBranch > 0 && skipBranch < blockedTally,
     'the skip must divert before the blocked tally'
   );
+
+  // Skipped is still unread. The domain must join the run's SERP-fallback pool,
+  // or a browser-only site WITHOUT the standing serp_fallback flag gets neither
+  // a probe nor a site: query — the run quietly loses the record candidates and
+  // the learned facts (middle name, county, state) that refine the next run.
+  const skipBody = engine.slice(skipBranch, engine.indexOf('continue;', skipBranch));
+  assert.match(
+    skipBody,
+    /blockedDomains\.add\(site\.domain\)/,
+    'a skipped browser-only site keeps its site: SERP fallback for the run'
+  );
 });
 
 test('the routine queued deep search does not raise a modal', async () => {
