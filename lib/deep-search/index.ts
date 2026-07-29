@@ -444,6 +444,7 @@ export async function runDeepSearchForContact(
 
   let probed = 0;
   let blocked = 0;
+  let browserOnlySkips = 0;
   let candidates = 0;
   let rounds = 0;
   let serpFallbacks = 0;
@@ -657,6 +658,23 @@ export async function runDeepSearchForContact(
         outcome = { ok: false, reason: errorMessage(e), blocked: false };
       }
       if (!outcome.ok) {
+        // A browser-only site on a Chrome-less host is a standing condition of
+        // the HOST, not a blocked probe: log it once per run, keep it out of
+        // the blocked tally (its discovery arrives via SERP fallback), and
+        // spend the remaining budget on sites that can actually answer.
+        if (outcome.browserUnavailable) {
+          browserOnlySkips += 1;
+          if (browserOnlySkips === 1) {
+            await logDebug({
+              level: 'warn',
+              source: 'deep-search:probe',
+              message: `${site.domain} is browser-only and this host has no Chrome — direct probes skipped for the run; site: SERP fallback still covers it`,
+              context: { url },
+              contactId,
+            });
+          }
+          continue;
+        }
         blocked += 1;
         blockedDomains.add(site.domain);
         recordDiscoveryFailure(site.domain, outcome.reason);

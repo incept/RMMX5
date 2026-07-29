@@ -3,7 +3,7 @@
 // with UND_ERR_INVALID_ARG, so the proxy tier has to go through undici's fetch
 // for the dispatcher to be accepted at all.
 import { ProxyAgent, fetch as undiciFetch } from 'undici';
-import { fetchWithBrowser } from './browser.ts';
+import { browserAvailable, fetchWithBrowser } from './browser.ts';
 import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
 import { finishUsage, reserveUsage } from '@/lib/usage';
@@ -226,8 +226,16 @@ async function getProxyAgent(): Promise<{ agent: ProxyAgent; label: string } | n
 export type FetchOutcome =
   | { ok: true; html: string; via: 'direct' | 'proxy' | 'browser' | 'unlocker' }
   // policyBlocked means BrightData will refuse this host every time, which the
-  // caller uses to stop spending unlocker calls on it.
-  | { ok: false; reason: string; blocked: boolean; policyBlocked?: boolean };
+  // caller uses to stop spending unlocker calls on it. browserUnavailable
+  // means a browser-only site was skipped because this host has no Chrome —
+  // a standing condition of the host, not a per-URL failure.
+  | {
+      ok: false;
+      reason: string;
+      blocked: boolean;
+      policyBlocked?: boolean;
+      browserUnavailable?: boolean;
+    };
 
 /** Signatures of an interstitial rather than the page we asked for. */
 function looksBlocked(status: number, html: string): boolean {
@@ -441,6 +449,23 @@ export async function fetchProbePage(
 ): Promise<FetchOutcome> {
   const notes: string[] = [];
   await assertPublicWebUrl(url);
+
+  // A browser-only site on a host with no Chrome has NO working tier: the free
+  // tiers are skipped by design (the TLS fingerprint fails them every time),
+  // and the unlocker refuses the domain by policy. Before this check, every
+  // such URL fell through to a guaranteed-failure unlocker attempt — up to
+  // three tries with timeouts — burning the run's 95s budget on a site that
+  // cannot answer and starving the sites that can. Skip instantly instead;
+  // SERP fallback carries the domain's discovery.
+  if (opts?.needsBrowser && !(await browserAvailable())) {
+    return {
+      ok: false,
+      blocked: true,
+      browserUnavailable: true,
+      reason:
+        'browser-only site and no Chrome on this host — skipped before any billable attempt (site: SERP fallback still covers it)',
+    };
+  }
 
   // Hosts that fingerprint the TLS handshake refuse both HTTP tiers every time,
   // and each one costs two attempts on a 20s timeout. Skip straight to Chrome.

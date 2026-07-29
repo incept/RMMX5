@@ -1128,6 +1128,42 @@ test('deep search can start from the panel header', async () => {
   assert.match(panel, /onClick=\{\(\) => runDeepSearch\(\)\}/);
 });
 
+test('a browser-only site on a Chrome-less host is skipped, never billed', async () => {
+  // The production regression: needs_browser sites skip the free HTTP tiers by
+  // design, Chrome does not exist on the shared host, and the fall-through
+  // unlocker refuses the domain by policy — so every arrests.org URL burned up
+  // to three timed-out billable attempts per run and starved the sites that
+  // work. The availability check must come BEFORE any unlocker spend.
+  const browser = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  assert.match(browser, /export async function browserAvailable/);
+  assert.match(browser, /availabilityCache/, 'availability is cached, not re-statted per URL');
+
+  const fetchPage = await readFile(
+    new URL('../lib/deep-search/fetch-page.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(fetchPage, /opts\?\.needsBrowser && !\(await browserAvailable\(\)\)/);
+  assert.match(fetchPage, /browserUnavailable: true/);
+  const skipAt = fetchPage.indexOf('browserUnavailable: true');
+  const unlockerAt = fetchPage.indexOf('await reserveUsage({');
+  assert.ok(
+    skipAt > 0 && unlockerAt > 0 && skipAt < unlockerAt,
+    'the skip must run before the billable unlocker path'
+  );
+
+  // The engine treats the skip as a host condition: logged once per run, kept
+  // out of the blocked tally, and the budget moves on to sites that answer.
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(engine, /if \(outcome\.browserUnavailable\)/);
+  assert.match(engine, /browserOnlySkips === 1/);
+  const skipBranch = engine.indexOf('if (outcome.browserUnavailable)');
+  const blockedTally = engine.indexOf('blocked += 1', skipBranch);
+  assert.ok(
+    skipBranch > 0 && skipBranch < blockedTally,
+    'the skip must divert before the blocked tally'
+  );
+});
+
 test('the routine queued deep search does not raise a modal', async () => {
   // A popup fired on every deep-search click; the inline status line and the
   // amber icon already say a run is queued. The alert is gone from the queued
