@@ -90,6 +90,8 @@ const DEFAULT_ORDER: ColKey[] = [
 const DEFAULT_HIDDEN: ColKey[] = ['owner', 'location'];
 
 const PAGE_SIZE = 50;
+const DEEP_SEARCH_POLL_INTERVAL_MS = 30_000;
+const DEEP_SEARCH_POLL_WINDOW_MS = 20 * 60_000;
 // v2: the shape changed from a visibility map to { order, hidden } when columns
 // became reorderable. A fresh key means old prefs are ignored, not misread.
 const COLS_LS = 'rmmx5-contact-columns-v2';
@@ -147,7 +149,21 @@ export default function ContactsPage() {
   const [newContact, setNewContact] = useState<NewContactDraft | null>(null);
   const [creating, setCreating] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const deepSearchWatches = useRef<
+    Map<string, { contact: ContactRow; expiresAt: number; refreshFailures: number }>
+  >(new Map());
+  const deepSearchPollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const deepSearchPollInFlight = useRef(false);
   const { isAdmin } = useMyRole();
+
+  useEffect(
+    () => () => {
+      deepSearchWatches.current.clear();
+      if (deepSearchPollTimer.current) clearTimeout(deepSearchPollTimer.current);
+      deepSearchPollTimer.current = null;
+    },
+    []
+  );
 
   /* ── column prefs ── */
   useEffect(() => {
@@ -224,29 +240,38 @@ export default function ContactsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError('');
-    const [pageResult, countsResult] = await Promise.all([
-      supabase.rpc('contacts_grid_page', {
-        p_search: search.trim(),
-        p_view: view,
-        p_status: statusFilter || null,
-        p_sort: sortKey,
-        p_ascending: sortAsc,
-        p_page: page,
-        p_page_size: PAGE_SIZE,
-      }),
-      supabase.rpc('contact_view_counts'),
-    ]);
-    if (!pageResult.error) {
-      const payload = (pageResult.data ?? {}) as any;
-      setContacts(payload.rows ?? []);
-      setTotal(Number(payload.total) || 0);
-    } else {
-      setLoadError(pageResult.error.message);
+    try {
+      const [pageResult, countsResult] = await Promise.all([
+        supabase.rpc('contacts_grid_page', {
+          p_search: search.trim(),
+          p_view: view,
+          p_status: statusFilter || null,
+          p_sort: sortKey,
+          p_ascending: sortAsc,
+          p_page: page,
+          p_page_size: PAGE_SIZE,
+        }),
+        supabase.rpc('contact_view_counts'),
+      ]);
+      const errors: string[] = [];
+      if (!pageResult.error) {
+        const payload = (pageResult.data ?? {}) as any;
+        setContacts(payload.rows ?? []);
+        setTotal(Number(payload.total) || 0);
+      } else {
+        errors.push(pageResult.error.message);
+      }
+      if (!countsResult.error && countsResult.data) {
+        setViewCounts(countsResult.data as Record<ViewId, number>);
+      } else if (countsResult.error) {
+        errors.push(`Could not refresh view counts: ${countsResult.error.message}`);
+      }
+      setLoadError(errors.join(' · '));
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : 'Network request failed');
+    } finally {
+      setLoading(false);
     }
-    if (!countsResult.error && countsResult.data) {
-      setViewCounts(countsResult.data as Record<ViewId, number>);
-    }
-    setLoading(false);
   }, [supabase, search, view, statusFilter, sortKey, sortAsc, page]);
 
   useEffect(() => {
@@ -564,215 +589,7 @@ export default function ContactsPage() {
       label: 'Opens',
       width: 'w-16',
       sortKey: 'email_opens',
-      render: (c) => (
-        <span
-          className={`text-xs tabular-nums ${c.email_opens ? 'text-gray-700' : 'text-gray-400'}`}
-        >
-          {c.email_opens || ''}
-        </span>
-      ),
-    },
-    clicks: {
-      label: 'Clicks',
-      width: 'w-16',
-      sortKey: 'email_clicks',
-      render: (c) => (
-        <span
-          className={`text-xs font-medium tabular-nums ${
-            c.email_clicks ? 'text-green-600' : 'text-gray-400'
-          }`}
-        >
-          {c.email_clicks || ''}
-        </span>
-      ),
-    },
-    owner: {
-      label: 'Owner',
-      width: 'w-28',
-      render: (c) => (
-        <span className="truncate text-xs font-light text-gray-500">{ownerName(c.owner_id)}</span>
-      ),
-    },
-    created: {
-      label: 'Created',
-      width: 'w-24',
-      sortKey: 'created_at',
-      render: (c) => (
-        <span className="text-xs font-light text-gray-400">
-          {new Date(c.created_at).toLocaleDateString()}
-        </span>
-      ),
-    },
-  };
-
-  const visibleCols = order.filter((k) => !hidden.has(k));
-  const skeletonWidths = [190, 150, 210, 170, 140, 200, 160, 180];
-
-  /* ── deep-search state icon ──
-     Left of every name: red = never run (click to run), amber = queued or
-     running, green = completed (click to run again). Driven by the two stamps
-     the enqueue route and the engine write; clicking is admin-only because
-     the deep-search API is. */
-  async function queueDeepSearch(contact: ContactRow) {
-    // Optimistic amber; the run's conclusion turns it green on the next load.
-    setContacts((rows) =>
-      rows.map((r) =>
-        r.id === contact.id ? { ...r, deep_search_queued_at: new Date().toISOString() } : r
-      )
-    );
-    const res = await fetch(`/api/contacts/${contact.id}/deep-search`, { method: 'POST' });
-    const data = await res.json().catch(() => ({}) as any);
-    if (res.ok) {
-      flash(data.duplicate ? 'Deep search already queued' : `Deep search queued for ${contact.name}`);
-    } else {
-      flash(data.error ?? 'Could not queue the deep search');
-      await load();
-    }
-  }
-
-  const searchIcon = (contact: ContactRow) => {
-    // A queued stamp older than 30 minutes cannot be a live run (two 95s
-    // attempts plus backoff fit well inside it): the job died without its
-    // conclusion clearing the stamp. Showing it amber forever would hide a
-    // failure behind a spinner — treat it as expired and clickable instead.
-    const queuedAge = contact.deep_search_queued_at
-      ? Date.now() - new Date(contact.deep_search_queued_at).getTime()
-      : Infinity;
-    const running = queuedAge < 30 * 60_000;
-    const expired = !running && !!contact.deep_search_queued_at;
-    const done = !!contact.deep_searched_at;
-    const color = running ? 'text-amber-500' : done ? 'text-green-600' : 'text-red-500';
-    const title = running
-      ? 'Deep search queued — runs on the next worker tick'
-      : expired
-        ? `The last queued deep search never concluded${isAdmin ? ' — click to run it again' : ''}`
-        : done
-          ? `Deep search completed ${new Date(contact.deep_searched_at!).toLocaleString()}${
-              isAdmin ? ' — click to run again' : ''
-            }`
-          : isAdmin
-            ? 'Deep search never run — click to run it'
-            : 'Deep search never run';
-    const glyph = (
-      <svg
-        viewBox="0 0 16 16"
-        className="h-3 w-3"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2.2"
-        strokeLinecap="round"
-      >
-        <circle cx="6.7" cy="6.7" r="4.2" />
-        <line x1="9.9" y1="9.9" x2="13.6" y2="13.6" />
-      </svg>
-    );
-    // Amber is a state, not an action — clicking a queued search does nothing,
-    // so it does not get a button.
-    if (!isAdmin || running) {
-      return (
-        <span className={`flex-none self-center ${color}`} title={title}>
-          {glyph}
-        </span>
-      );
-    }
-    return (
-      <button
-        type="button"
-        className={`flex-none self-center transition hover:scale-125 ${color}`}
-        title={title}
-        onClick={(e) => {
-          e.stopPropagation();
-          queueDeepSearch(contact);
-        }}
-      >
-        {glyph}
-      </button>
-    );
-  };
-
-  const checkbox = (on: boolean, onClick: (e: React.MouseEvent) => void) => (
-    <button
-      className={`flex h-[13px] w-[13px] items-center justify-center rounded border text-[9px] leading-none transition hover:scale-110 ${
-        on
-          ? 'border-gray-900 bg-gray-900 text-white dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900'
-          : 'border-gray-300 bg-transparent text-transparent'
-      }`}
-      onClick={onClick}
-    >
-      ✓
-    </button>
-  );
-
-  return (
-    <div className="flex h-full flex-col">
-      {/* ── Title row ── */}
-      <div className="flex flex-none flex-wrap items-center gap-4 px-6 pt-5">
-        <div className="flex items-baseline gap-2.5">
-          <h1 className="text-2xl font-light tracking-tight">Contacts</h1>
-          <span className="text-xs tabular-nums text-gray-400">
-            {loading
-              ? '…'
-              : sorted.length === contacts.length
-                ? `${contacts.length} total`
-                : `${sorted.length} of ${contacts.length}`}
-          </span>
-        </div>
-        <div className="flex-1" />
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            className="h-8 w-52 rounded-full border-0 bg-gray-100 px-4 text-xs outline-none placeholder:text-gray-400 focus:ring-2 focus:ring-brand-500/40"
-            placeholder="Search name, email, phone…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-          <div className="relative">
-            <button
-              className="h-8 rounded-full px-3 text-xs text-gray-500 hover:text-gray-900"
-              onClick={() => setColMenu((v) => !v)}
-            >
-              Columns
-            </button>
-            {colMenu && (
-              <>
-                <div className="fixed inset-0 z-20" onClick={() => setColMenu(false)} />
-                <div className="anim-pop-in absolute right-0 top-9 z-30 w-60 rounded-xl border border-gray-200 bg-white p-2 shadow-xl">
-                  <div className="px-2 pb-1.5 pt-1 text-[10px] font-medium uppercase tracking-widest text-gray-400">
-                    Columns
-                  </div>
-                  {order.map((key, i) => (
-                    <div
-                      key={key}
-                      className="flex h-7 items-center gap-1 rounded-lg pr-1 hover:bg-gray-50"
-                    >
-                      <button
-                        className={`flex-1 px-2 text-left text-xs ${
-                          hidden.has(key) ? 'text-gray-400' : 'text-gray-900'
-                        }`}
-                        onClick={() => toggleCol(key)}
-                      >
-                        {COLUMNS[key].label}
-                      </button>
-                      <span className="w-3 text-center text-xs text-gray-500">
-                        {hidden.has(key) ? '' : '✓'}
-                      </span>
-                      <button
-                        className="px-1 text-xs text-gray-400 hover:text-gray-900 disabled:opacity-30"
-                        title="Move left"
-                        disabled={i === 0}
-                        onClick={() => nudgeCol(key, -1)}
-                      >
-                        ↑
-                      </button>
-                      <button
-                        className="px-1 text-xs text-gray-400 hover:text-gray-900 disabled:opacity-30"
-                        title="Move right"
-                        disabled={i === order.length - 1}
-                        onClick={() => nudgeCol(key, 1)}
-                      >
-                        ↓
-                      </button>
-                    </div>
-                  ))}
+      render: (c) …3513 tokens truncated…     ))}
                   <div className="mt-1 border-t border-gray-100 px-2 pt-1.5 text-[10px] leading-snug text-gray-400">
                     Drag a column heading in the grid to reorder, or use ↑ ↓ here.
                   </div>
