@@ -90,6 +90,8 @@ const DEFAULT_ORDER: ColKey[] = [
 const DEFAULT_HIDDEN: ColKey[] = ['owner', 'location'];
 
 const PAGE_SIZE = 50;
+const DEEP_SEARCH_POLL_INTERVAL_MS = 30_000;
+const DEEP_SEARCH_POLL_WINDOW_MS = 20 * 60_000;
 // v2: the shape changed from a visibility map to { order, hidden } when columns
 // became reorderable. A fresh key means old prefs are ignored, not misread.
 const COLS_LS = 'rmmx5-contact-columns-v2';
@@ -147,7 +149,21 @@ export default function ContactsPage() {
   const [newContact, setNewContact] = useState<NewContactDraft | null>(null);
   const [creating, setCreating] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const deepSearchWatches = useRef<
+    Map<string, { contact: ContactRow; expiresAt: number; refreshFailures: number }>
+  >(new Map());
+  const deepSearchPollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const deepSearchPollInFlight = useRef(false);
   const { isAdmin } = useMyRole();
+
+  useEffect(
+    () => () => {
+      deepSearchWatches.current.clear();
+      if (deepSearchPollTimer.current) clearTimeout(deepSearchPollTimer.current);
+      deepSearchPollTimer.current = null;
+    },
+    []
+  );
 
   /* ── column prefs ── */
   useEffect(() => {
@@ -224,29 +240,38 @@ export default function ContactsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError('');
-    const [pageResult, countsResult] = await Promise.all([
-      supabase.rpc('contacts_grid_page', {
-        p_search: search.trim(),
-        p_view: view,
-        p_status: statusFilter || null,
-        p_sort: sortKey,
-        p_ascending: sortAsc,
-        p_page: page,
-        p_page_size: PAGE_SIZE,
-      }),
-      supabase.rpc('contact_view_counts'),
-    ]);
-    if (!pageResult.error) {
-      const payload = (pageResult.data ?? {}) as any;
-      setContacts(payload.rows ?? []);
-      setTotal(Number(payload.total) || 0);
-    } else {
-      setLoadError(pageResult.error.message);
+    try {
+      const [pageResult, countsResult] = await Promise.all([
+        supabase.rpc('contacts_grid_page', {
+          p_search: search.trim(),
+          p_view: view,
+          p_status: statusFilter || null,
+          p_sort: sortKey,
+          p_ascending: sortAsc,
+          p_page: page,
+          p_page_size: PAGE_SIZE,
+        }),
+        supabase.rpc('contact_view_counts'),
+      ]);
+      const errors: string[] = [];
+      if (!pageResult.error) {
+        const payload = (pageResult.data ?? {}) as any;
+        setContacts(payload.rows ?? []);
+        setTotal(Number(payload.total) || 0);
+      } else {
+        errors.push(pageResult.error.message);
+      }
+      if (!countsResult.error && countsResult.data) {
+        setViewCounts(countsResult.data as Record<ViewId, number>);
+      } else if (countsResult.error) {
+        errors.push(`Could not refresh view counts: ${countsResult.error.message}`);
+      }
+      setLoadError(errors.join(' · '));
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : 'Network request failed');
+    } finally {
+      setLoading(false);
     }
-    if (!countsResult.error && countsResult.data) {
-      setViewCounts(countsResult.data as Record<ViewId, number>);
-    }
-    setLoading(false);
   }, [supabase, search, view, statusFilter, sortKey, sortAsc, page]);
 
   useEffect(() => {
@@ -613,19 +638,184 @@ export default function ContactsPage() {
      running, green = completed (click to run again). Driven by the two stamps
      the enqueue route and the engine write; clicking is admin-only because
      the deep-search API is. */
+  function scheduleDeepSearchPoll() {
+    if (
+      deepSearchPollTimer.current ||
+      deepSearchPollInFlight.current ||
+      deepSearchWatches.current.size === 0
+    ) {
+      return;
+    }
+    deepSearchPollTimer.current = setTimeout(() => {
+      deepSearchPollTimer.current = null;
+      void pollWatchedDeepSearches();
+    }, DEEP_SEARCH_POLL_INTERVAL_MS);
+  }
+
+  function watchDeepSearch(contact: ContactRow) {
+    deepSearchWatches.current.set(contact.id, {
+      contact,
+      expiresAt: Date.now() + DEEP_SEARCH_POLL_WINDOW_MS,
+      refreshFailures: 0,
+    });
+    scheduleDeepSearchPoll();
+  }
+
+  async function pollWatchedDeepSearches() {
+    if (deepSearchPollInFlight.current) return;
+    deepSearchPollInFlight.current = true;
+    let shouldReload = false;
+
+    try {
+      const now = Date.now();
+      const expired = [...deepSearchWatches.current.entries()].filter(
+        ([, watch]) => watch.expiresAt <= now
+      );
+      for (const [id] of expired) deepSearchWatches.current.delete(id);
+      if (expired.length) {
+        flash(
+          expired.length === 1
+            ? `Deep search is still queued for ${expired[0][1].contact.name}; check Admin → Debug Log`
+            : `${expired.length} deep searches are still queued; check Admin → Debug Log`
+        );
+        shouldReload = true;
+      }
+
+      const ids = [...deepSearchWatches.current.keys()];
+      if (!ids.length || document.visibilityState !== 'visible') return;
+
+      const { data, error } = await supabase
+        .from('contacts')
+        .select('id, deep_search_queued_at, deep_searched_at, search_flag')
+        .in('id', ids);
+      if (error) throw error;
+      // Unmount cleanup clears the watch map. If that happened while the
+      // request was in flight, do not write its late result into React state.
+      if (deepSearchWatches.current.size === 0) return;
+
+      const states = new Map((data ?? []).map((row) => [row.id, row]));
+      const notices: string[] = [];
+      setContacts((rows) =>
+        rows.map((row) => {
+          const state = states.get(row.id);
+          return state
+            ? {
+                ...row,
+                deep_search_queued_at: state.deep_search_queued_at,
+                deep_searched_at: state.deep_searched_at,
+                search_flag: state.search_flag,
+              }
+            : row;
+        })
+      );
+
+      for (const id of ids) {
+        const watch = deepSearchWatches.current.get(id);
+        const state = states.get(id);
+        if (!watch) continue;
+        if (!state) {
+          deepSearchWatches.current.delete(id);
+          notices.push(`${watch.contact.name || 'Contact'} no longer exists`);
+          continue;
+        }
+        watch.refreshFailures = 0;
+        if (state.deep_search_queued_at) continue;
+
+        deepSearchWatches.current.delete(id);
+        shouldReload = true;
+        const failureFlag =
+          typeof state.search_flag === 'string' && /deep search failed/i.test(state.search_flag);
+        notices.push(
+          failureFlag
+            ? `Deep search failed for ${watch.contact.name}: ${state.search_flag}`
+            : state.deep_searched_at &&
+                state.deep_searched_at !== watch.contact.deep_searched_at
+              ? state.search_flag
+                ? `Deep search completed for ${watch.contact.name} with a warning: ${state.search_flag}`
+                : `Deep search completed for ${watch.contact.name}`
+              : state.search_flag
+                ? `Deep search stopped for ${watch.contact.name}: ${state.search_flag}`
+                : `Deep search stopped for ${watch.contact.name}; check Admin → Debug Log`
+        );
+      }
+
+      if (notices.length) {
+        flash(
+          notices.length === 1
+            ? notices[0]
+            : `${notices.length} deep searches finished; review their search flags`
+        );
+      }
+    } catch (error) {
+      let stopped = 0;
+      for (const [id, watch] of deepSearchWatches.current) {
+        watch.refreshFailures += 1;
+        if (watch.refreshFailures >= 3) {
+          deepSearchWatches.current.delete(id);
+          stopped += 1;
+        }
+      }
+      if (stopped) {
+        flash(
+          `Could not refresh ${stopped} deep-search status${
+            stopped === 1 ? '' : 'es'
+          }: ${error instanceof Error ? error.message : 'network error'}`
+        );
+        shouldReload = true;
+      }
+    } finally {
+      deepSearchPollInFlight.current = false;
+      if (shouldReload) await load();
+      scheduleDeepSearchPoll();
+    }
+  }
+
   async function queueDeepSearch(contact: ContactRow) {
     // Optimistic amber; the run's conclusion turns it green on the next load.
+    const previousQueuedAt = contact.deep_search_queued_at;
+    const rollbackOptimisticStamp = () => {
+      setContacts((rows) =>
+        rows.map((row) =>
+          row.id === contact.id ? { ...row, deep_search_queued_at: previousQueuedAt } : row
+        )
+      );
+    };
     setContacts((rows) =>
       rows.map((r) =>
         r.id === contact.id ? { ...r, deep_search_queued_at: new Date().toISOString() } : r
       )
     );
-    const res = await fetch(`/api/contacts/${contact.id}/deep-search`, { method: 'POST' });
-    const data = await res.json().catch(() => ({}) as any);
-    if (res.ok) {
-      flash(data.duplicate ? 'Deep search already queued' : `Deep search queued for ${contact.name}`);
-    } else {
+    try {
+      const res = await fetch(`/api/contacts/${contact.id}/deep-search`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}) as any);
+      if (res.ok && data.status === 'already completed this hour') {
+        deepSearchWatches.current.delete(contact.id);
+        flash(`Deep search already completed this hour for ${contact.name}`);
+        await load();
+        return;
+      }
+      if (res.ok) {
+        flash(
+          data.status === 'already queued' || data.duplicate
+            ? `Deep search already queued for ${contact.name}`
+            : `Deep search queued for ${contact.name}`
+        );
+        watchDeepSearch(contact);
+        return;
+      }
+
+      rollbackOptimisticStamp();
       flash(data.error ?? 'Could not queue the deep search');
+      await load();
+    } catch (error) {
+      // A rejected fetch used to strand the optimistic amber icon even though
+      // no job existed. Roll it back immediately, then reconcile with the DB.
+      rollbackOptimisticStamp();
+      flash(
+        `Could not queue the deep search: ${
+          error instanceof Error ? error.message : 'network error'
+        }`
+      );
       await load();
     }
   }

@@ -33,17 +33,43 @@ export async function extractRowsWithLlm(
   contactId: string,
   opts?: { signal?: AbortSignal; requestKey?: string }
 ): Promise<LlmRow[] | null> {
-  const cfg = await getSetting<{ api_key?: string; monthly_limit?: number | string }>('anthropic');
+  let cfg: { api_key?: string; monthly_limit?: number | string };
+  try {
+    cfg = await getSetting<{ api_key?: string; monthly_limit?: number | string }>('anthropic');
+  } catch (e: any) {
+    // Anthropic is an optional layout reader. A settings outage must leave the
+    // deterministic same-domain parser available instead of skipping the page.
+    await logDebug({
+      level: 'warn',
+      source: 'deep-search:llm',
+      message: `Optional extraction settings unavailable; using deterministic parser: ${e?.message ?? 'unknown error'}`,
+      contactId,
+    }).catch(() => {});
+    return null;
+  }
   if (!cfg.api_key) return null;
   const configuredLimit = Number(cfg.monthly_limit);
-  const usage = await reserveUsage({
-    provider: 'anthropic',
-    operation: 'messages',
-    requestKey: opts?.requestKey,
-    monthlyLimit:
-      Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : null,
-    metadata: { kind: 'extract', contact_id: contactId, input_chars: pageText.length },
-  });
+  let usage: Awaited<ReturnType<typeof reserveUsage>>;
+  try {
+    usage = await reserveUsage({
+      provider: 'anthropic',
+      operation: 'messages',
+      requestKey: opts?.requestKey,
+      monthlyLimit:
+        Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : null,
+      metadata: { kind: 'extract', contact_id: contactId, input_chars: pageText.length },
+    });
+  } catch (e: any) {
+    // A ledger/schema/cap failure means "do not call the optional provider",
+    // not "discard a successfully fetched probe page".
+    await logDebug({
+      level: 'warn',
+      source: 'deep-search:llm',
+      message: `Optional extraction usage could not be reserved; using deterministic parser: ${e?.message ?? 'unknown error'}`,
+      contactId,
+    }).catch(() => {});
+    return null;
+  }
   let finished = false;
 
   const prompt = [
@@ -155,17 +181,39 @@ export async function classifySerpResults(
   contactId: string,
   opts?: { signal?: AbortSignal; requestKey?: string }
 ): Promise<SerpVerdict[] | null> {
-  const cfg = await getSetting<{ api_key?: string; monthly_limit?: number | string }>('anthropic');
+  let cfg: { api_key?: string; monthly_limit?: number | string };
+  try {
+    cfg = await getSetting<{ api_key?: string; monthly_limit?: number | string }>('anthropic');
+  } catch (e: any) {
+    await logDebug({
+      level: 'warn',
+      source: 'deep-search:classify',
+      message: `Optional SERP classification settings unavailable; keeping deterministic results only: ${e?.message ?? 'unknown error'}`,
+      contactId,
+    }).catch(() => {});
+    return null;
+  }
   if (!cfg.api_key || !items.length) return null;
   const configuredLimit = Number(cfg.monthly_limit);
-  const usage = await reserveUsage({
-    provider: 'anthropic',
-    operation: 'messages',
-    requestKey: opts?.requestKey,
-    monthlyLimit:
-      Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : null,
-    metadata: { kind: 'classify', contact_id: contactId, item_count: items.length },
-  });
+  let usage: Awaited<ReturnType<typeof reserveUsage>>;
+  try {
+    usage = await reserveUsage({
+      provider: 'anthropic',
+      operation: 'messages',
+      requestKey: opts?.requestKey,
+      monthlyLimit:
+        Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : null,
+      metadata: { kind: 'classify', contact_id: contactId, item_count: items.length },
+    });
+  } catch (e: any) {
+    await logDebug({
+      level: 'warn',
+      source: 'deep-search:classify',
+      message: `Optional SERP classification usage could not be reserved; keeping deterministic results only: ${e?.message ?? 'unknown error'}`,
+      contactId,
+    }).catch(() => {});
+    return null;
+  }
   let finished = false;
 
   const known = [

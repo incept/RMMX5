@@ -242,6 +242,35 @@ function looksBlocked(status: number, html: string): boolean {
   );
 }
 
+/** A 200 transport response can still be an empty or synthetic error page. */
+function pageFailure(status: number, html: string): string | null {
+  if (status < 200 || status >= 300) return `HTTP ${status}`;
+  const bodyText = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&(?:nbsp|#160);/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!html.trim() || !bodyText) return `HTTP ${status} (empty body)`;
+  if (looksBlocked(status, html)) return `HTTP ${status} (challenge page)`;
+
+  const title =
+    /<title\b[^>]*>([\s\S]*?)<\/title>/i
+      .exec(html)?.[1]
+      ?.replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim() ?? '';
+  const titleError =
+    /^(?:(?:4|5)\d\d(?:\s*[-:|]\s*)?)?(?:error|not found|bad gateway|service unavailable|internal server error|gateway timeout|access denied)(?:\s*[-:|].*)?$/i;
+  const bodyError =
+    /^(?:(?:4|5)\d\d\s*(?:error|not found)\b|(?:error|page not found|bad gateway|service unavailable|internal server error|gateway timeout|upstream connect error|application error|this page (?:isn't|is not) working)\b)/i;
+  if (titleError.test(title) || bodyError.test(bodyText.slice(0, 600))) {
+    return `HTTP ${status} (error page)`;
+  }
+  return null;
+}
+
 /** BrightData failure classes we can distinguish from the response. */
 const TRANSIENT_UNLOCKER_ERRORS = [
   'err_http2_protocol_error', // seen repeatedly on bustednewspaper.com, and it
@@ -349,8 +378,9 @@ async function browserFetch(
             headers: BROWSER_HEADERS,
           });
       const html = await readBoundedText(res);
-      if (res.ok && !looksBlocked(res.status, html)) return { ok: true, html, via };
-      note = `${via} HTTP ${res.status}${looksBlocked(res.status, html) ? ' (challenge page)' : ''}`;
+      const failure = pageFailure(res.status, html);
+      if (res.ok && !failure) return { ok: true, html, via };
+      note = `${via} ${failure ?? `HTTP ${res.status}`}`;
     } catch (e: any) {
       // undici reports a dropped socket as UND_ERR_SOCKET with a bare "fetch
       // failed" message, which says nothing on its own — keep the cause code.
@@ -403,14 +433,13 @@ export async function fetchProbePage(
   // before the billable unlocker — and it is the only tier that reaches a host
   // blocking us on the TLS fingerprint.
   const viaBrowser = await fetchWithBrowser(url, opts?.signal);
-  if (viaBrowser.ok && !looksBlocked(viaBrowser.status, viaBrowser.html)) {
+  const browserFailure = viaBrowser.ok
+    ? pageFailure(viaBrowser.status, viaBrowser.html)
+    : viaBrowser.reason;
+  if (viaBrowser.ok && !browserFailure) {
     return { ok: true, html: viaBrowser.html, via: 'browser' };
   }
-  notes.push(
-    viaBrowser.ok
-      ? `browser HTTP ${viaBrowser.status} (challenge page)`
-      : viaBrowser.reason
-  );
+  notes.push(viaBrowser.ok ? `browser ${browserFailure}` : viaBrowser.reason);
 
   const directNote = notes.join('; ');
 
@@ -474,7 +503,8 @@ export async function fetchProbePage(
       .filter(Boolean)
       .join(' ');
 
-    if (!res.ok || !body.trim()) {
+    const unlockerPageFailure = pageFailure(res.status, body);
+    if (!res.ok || unlockerPageFailure) {
       const signal = `${brdError} ${body.slice(0, 300)}`.toLowerCase();
       const detail = POLICY_ERROR.test(signal)
         ? `BrightData refused this target by policy (${brdError || 'policy error'}). ` +
@@ -486,7 +516,11 @@ export async function fetchProbePage(
             ? body.slice(0, 160)
             : `empty body — confirm "${cfg.unlocker_zone}" is a WEB UNLOCKER zone (a SERP or plain proxy zone returns nothing here) and is active`);
       const policyBlocked = POLICY_ERROR.test(signal);
-      await finishUsage(usage.id, 'failed', `HTTP ${res.status} ${detail}`);
+      await finishUsage(
+        usage.id,
+        'failed',
+        `${unlockerPageFailure ?? `HTTP ${res.status}`}: ${detail}`
+      );
       if (debug) {
         await logDebug({
           level: 'info',
@@ -499,7 +533,7 @@ export async function fetchProbePage(
         ok: false,
         blocked: true,
         policyBlocked,
-        reason: `${directNote}; unlocker HTTP ${res.status}: ${detail}`,
+        reason: `${directNote}; unlocker ${unlockerPageFailure ?? `HTTP ${res.status}`}: ${detail}`,
       };
     }
     await finishUsage(usage.id, 'succeeded');

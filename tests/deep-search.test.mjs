@@ -653,7 +653,11 @@ test('the browser tier cannot leak processes', async () => {
   assert.match(source, /IDLE_SHUTDOWN_MS/, 'closes itself when idle');
   assert.match(source, /MAX_CONCURRENT_PAGES/, 'bounds concurrent tabs');
   assert.match(source, /} finally \{/, 'pages are closed on the failure path too');
-  assert.match(source, /await context\?\.close\(\)/, 'contexts are closed, not just pages');
+  assert.match(
+    source,
+    /boundedOperation\(\s*context\.close\(\),\s*'browser context close'/,
+    'contexts are closed with a watchdog, not just pages'
+  );
   // A single shared browser, not one per call.
   assert.match(source, /if \(!browserPromise\)/);
 });
@@ -813,9 +817,12 @@ test('a failed deep-search enqueue answers with JSON the operator can read', asy
   );
   // The enqueue itself must be inside the guarded region.
   const tryAt = source.indexOf('try {');
-  const enqueueAt = source.indexOf('await enqueueJob(');
+  const enqueueAt = source.indexOf('await enqueueDeepSearchJob(');
   const catchAt = source.indexOf('} catch (e) {');
-  assert.ok(tryAt < enqueueAt && enqueueAt < catchAt, 'enqueueJob runs inside the try');
+  assert.ok(
+    tryAt < enqueueAt && enqueueAt < catchAt,
+    'atomic deep-search enqueue runs inside the try'
+  );
 });
 
 test('every API route records its own failures', async () => {
@@ -1083,12 +1090,13 @@ test('a terminally failed deep search cannot stay amber forever', async () => {
   // so the grid showed a spinner state with the error invisible.
   const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
   const migration = await readFile(
-    new URL('../supabase/migrations/0027_selected_audit_hardening.sql', import.meta.url),
+    new URL('../supabase/migrations/0028_deep_search_attempt_state.sql', import.meta.url),
     'utf8'
   );
   assert.match(queue, /terminal && job\.kind === 'deep_search'/);
-  assert.match(queue, /fail_deep_search_state/);
-  assert.match(migration, /deep_search_queued_at = null/);
+  assert.match(queue, /fail_deep_search_attempt/);
+  assert.match(queue, /finalized !== true/);
+  assert.match(migration, /when v_next_job_id is null then null/);
   assert.match(migration, /search_flag = left/, 'the failure reason must surface in the Link Data banner');
 
   // Belt and braces: even if that write is lost, the UI treats a queued stamp
@@ -1457,7 +1465,8 @@ test('the deep-search route accepts a focus date and keys the queue on it', asyn
   assert.ok(route.includes("`deep-search:${id}:${hour}${focusDate ? `:${focusDate}` : ''}`"));
   // And the worker hands it through to the run.
   const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
-  assert.match(queue, /focusDate: typeof payload\.focusDate === 'string'/);
+  assert.match(queue, /focusDate,/);
+  assert.match(queue, /deep_search job payload has an invalid focusDate/);
 });
 
 test('each booking date carries a branch button for a focused search', async () => {
@@ -1553,20 +1562,141 @@ test('the grid shows deep-search state and can start a run from it', async () =>
   );
   assert.match(migration, /add column if not exists deep_searched_at timestamptz/);
   assert.match(migration, /c\.deep_searched_at, c\.deep_search_queued_at/);
-  // Enqueue stamps amber; the run's conclusion stamps green and clears it.
+  // Atomic enqueue stamps amber; the run's conclusion stamps green and clears
+  // it after the last queued sibling.
   const route = await readFile(
     new URL('../app/api/contacts/[id]/deep-search/route.ts', import.meta.url),
     'utf8'
   );
-  assert.match(route, /deep_search_queued_at: new Date\(\)\.toISOString\(\)/);
+  assert.match(route, /enqueueDeepSearchJob/);
   const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
   const hardening = await readFile(
-    new URL('../supabase/migrations/0027_selected_audit_hardening.sql', import.meta.url),
+    new URL('../supabase/migrations/0028_deep_search_attempt_state.sql', import.meta.url),
     'utf8'
   );
-  assert.match(engine, /finish_deep_search_state/);
+  assert.match(engine, /finish_deep_search_attempt/);
   assert.match(hardening, /deep_searched_at = now\(\)/);
-  assert.match(hardening, /deep_search_queued_at = null/);
+  assert.match(hardening, /when v_next_job_id is null then null/);
+});
+
+test('focused deep-search siblings serialize and exact attempts finalize atomically', async () => {
+  const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/deep-search/route.ts', import.meta.url),
+    'utf8'
+  );
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  const migration = await readFile(
+    new URL('../supabase/migrations/0028_deep_search_attempt_state.sql', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(migration, /create or replace function public\.enqueue_deep_search_job/);
+  assert.match(migration, /pg_advisory_xact_lock/);
+  assert.match(migration, /job_queue_active_deep_search_contact_idx/);
+  assert.match(migration, /deep_search_job_id = v_pointer_id/);
+  assert.match(route, /enqueueDeepSearchJob/);
+  assert.doesNotMatch(route, /\.from\('contacts'\)\s*\.update/);
+
+  const claim = migration.slice(migration.indexOf('create or replace function public.claim_jobs'));
+  assert.match(claim, /sibling\.payload ->> 'contactId'/);
+  assert.match(claim, /order by sibling\.created_at, sibling\.id/);
+  assert.match(claim, /for update of j skip locked/);
+
+  const finish = migration.slice(
+    migration.indexOf('create or replace function public.finish_deep_search_attempt'),
+    migration.indexOf('create or replace function public.fail_deep_search_attempt')
+  );
+  assert.match(finish, /j\.locked_by = p_worker/);
+  assert.match(finish, /j\.attempt_count = p_attempt_count/);
+  assert.match(finish, /status = 'completed'/);
+  assert.match(finish, /deep_search_job_id = v_next_job_id/);
+  assert.match(finish, /deep_search_flag_job_id/);
+  assert.match(finish, /else c\.search_flag/, 'unrelated/manual flags are preserved');
+  assert.match(migration, /drop function if exists public\.finish_deep_search_state/);
+
+  assert.match(engine, /p_worker: opts\.jobWorker!/);
+  assert.match(engine, /p_attempt_count: opts\.jobAttempt!/);
+  assert.match(queue, /if \(job\.kind !== 'deep_search'\) await completeJob/);
+  assert.match(queue, /finalizedThisAttempt/);
+  assert.match(queue, /current\?\.status === 'completed'/);
+  assert.match(queue, /\.eq\('attempt_count', job\.attempt_count\)/);
+  assert.match(queue, /job payload is missing a valid \$\{key\}/);
+});
+
+test('deep-search retry generations, malformed failure, and lock order stay safe', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/0028_deep_search_attempt_state.sql', import.meta.url),
+    'utf8'
+  );
+  const enqueue = migration.slice(
+    migration.indexOf('create or replace function public.enqueue_deep_search_job'),
+    migration.indexOf('create or replace function public.finish_deep_search_attempt')
+  );
+  const failedBranch = enqueue.slice(enqueue.indexOf("if v_status = 'failed' then"));
+  const retiredAt = failedBranch.indexOf(
+    "dedupe_key = p_dedupe_key || ':retired:' || v_job_id::text"
+  );
+  const freshInsertAt = failedBranch.indexOf('insert into public.job_queue', retiredAt);
+  assert.ok(retiredAt >= 0 && freshInsertAt > retiredAt, 'a retry archives then inserts a new id');
+  assert.doesNotMatch(
+    failedBranch.slice(0, failedBranch.indexOf('else')),
+    /attempt_count = 0/,
+    'a retry never reuses attempt-number-based provider keys'
+  );
+  assert.match(enqueue, /lower\(j\.payload ->> 'contactId'\) = p_contact_id::text/);
+  assert.match(
+    enqueue,
+    /when c\.deep_search_job_id is distinct from v_pointer_id then now\(\)/
+  );
+
+  const finish = migration.slice(
+    migration.indexOf('create or replace function public.finish_deep_search_attempt'),
+    migration.indexOf('create or replace function public.fail_deep_search_attempt')
+  );
+  const finishAdvisory = finish.indexOf('pg_advisory_xact_lock');
+  const finishContactLock = finish.indexOf('from public.contacts c', finishAdvisory);
+  const finishJobLock = finish.indexOf('select j.payload', finishContactLock);
+  assert.ok(
+    finishAdvisory < finishContactLock && finishContactLock < finishJobLock,
+    'completion locks advisory, contact, then job'
+  );
+  assert.match(finish, /lower\(v_payload ->> 'contactId'\)/);
+  assert.match(finish, /when v_next_job_id is null then null\s+else now\(\)/);
+
+  const fail = migration.slice(
+    migration.indexOf('create or replace function public.fail_deep_search_attempt'),
+    migration.indexOf('create or replace function public.cancel_jobs_for_deleted_contact')
+  );
+  assert.match(fail, /c\.deep_search_job_id = p_job_id/);
+  assert.match(fail, /if v_contact_id is not null then/);
+  assert.ok(
+    fail.indexOf("status = 'failed'") < fail.lastIndexOf('if v_contact_id is not null then'),
+    'an orphaned malformed job is failed before optional contact cleanup'
+  );
+  const failAdvisory = fail.indexOf('pg_advisory_xact_lock');
+  const failContactLock = fail.indexOf('from public.contacts c', failAdvisory);
+  const failJobLock = fail.indexOf('select j.payload', failContactLock);
+  assert.ok(
+    failAdvisory < failContactLock && failContactLock < failJobLock,
+    'terminal failure locks advisory, contact, then job when a contact exists'
+  );
+
+  const deletion = migration.slice(
+    migration.indexOf('create or replace function public.cancel_jobs_for_deleted_contact'),
+    migration.indexOf('drop function if exists public.finish_deep_search_state')
+  );
+  assert.doesNotMatch(deletion, /for update/);
+  assert.equal(
+    (deletion.match(/j\.status = 'processing'/g) ?? []).length,
+    2,
+    'deletion checks processing work before and after cancelling pending rows'
+  );
+
+  const claim = migration.slice(migration.indexOf('create or replace function public.claim_jobs'));
+  assert.match(claim, /c\.deep_search_job_id = j\.id/);
+  assert.match(claim, /lower\(sibling\.payload ->> 'contactId'\) = v_contact_key/);
+  assert.match(claim, /coalesce\(lower\(sibling\.payload ->> 'contactId'\)/);
 });
 
 test('deleting a status moves its contacts where the admin chose', async () => {
@@ -1666,4 +1796,57 @@ test('the panel shows when the last deep search ran', async () => {
   const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
   assert.match(panel, /Last run \$\{new Date\(contact\.deep_searched_at\)\.toLocaleString\(\)\}/);
   assert.match(panel, /Deep search queued…/);
+});
+
+test('deep-search controls distinguish completed duplicates and monitor background outcomes', async () => {
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  const grid = await readFile(new URL('../app/(app)/contacts/page.tsx', import.meta.url), 'utf8');
+
+  // A completed idempotency hit is not presented as a queued job.
+  assert.match(panel, /data\.status === 'already completed this hour'/);
+  assert.match(grid, /data\.status === 'already completed this hour'/);
+  // Both entry points poll slowly and stop after a fixed bound. They read the
+  // authoritative contact stamps so terminal worker failures become visible.
+  for (const source of [panel, grid]) {
+    assert.match(source, /DEEP_SEARCH_POLL_INTERVAL_MS = 30_000/);
+    assert.match(source, /document\.visibilityState !== 'visible'/);
+    assert.match(source, /deep_search_queued_at, deep_searched_at, search_flag/);
+    assert.match(source, /Admin → Debug Log/);
+  }
+  assert.match(panel, /DEEP_SEARCH_POLL_LIMIT = 40/);
+  // The grid has one timer/query for every watched contact, not one permanent
+  // polling loop per click.
+  assert.match(grid, /DEEP_SEARCH_POLL_WINDOW_MS = 20 \* 60_000/);
+  assert.match(grid, /\.in\('id', ids\)/);
+  assert.match(grid, /deepSearchPollTimer/);
+  assert.doesNotMatch(grid, /Symbol\(`deep-search-\$\{contact\.id\}`\)/);
+});
+
+test('contact grid recovers from rejected loads and deep-search enqueue requests', async () => {
+  const grid = await readFile(new URL('../app/(app)/contacts/page.tsx', import.meta.url), 'utf8');
+  assert.match(grid, /catch \(error\) \{[\s\S]*?setLoadError/);
+  assert.match(grid, /finally \{\s*setLoading\(false\)/);
+  assert.match(grid, /const previousQueuedAt = contact\.deep_search_queued_at/);
+  assert.match(grid, /deep_search_queued_at: previousQueuedAt/);
+  assert.match(grid, /rollbackOptimisticStamp\(\);\s*flash\(data\.error/);
+  assert.match(grid, /Could not queue the deep search:/);
+});
+
+test('Admin Debug shows read failures instead of claiming the log is empty', async () => {
+  const debug = await readFile(
+    new URL('../app/(app)/admin/debug/page.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(debug, /const \[loadError, setLoadError\]/);
+  assert.match(debug, /const \{ data, error \} = await query/);
+  assert.match(debug, /if \(error\) throw error/);
+  assert.match(debug, /Could not load the Admin Debug Log/);
+  assert.match(debug, /!loading && !loadError && entries\.length === 0/);
+});
+
+test('runtime setup documents the current migration and Node requirements', async () => {
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
+  assert.match(readme, /highest-numbered migration shipped/);
+  assert.match(readme, /0028_deep_search_attempt_state\.sql/);
+  assert.match(readme, /22\.19\.0 or newer/);
 });

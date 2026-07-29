@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import StatusPill, { type StatusOption } from '@/components/StatusPill';
 import { useMyRole } from '@/lib/use-my-role';
@@ -28,6 +28,12 @@ const AI_CATEGORY_STYLES: Record<string, string> = {
   spam: 'bg-red-100 text-red-700',
   wrong_number: 'bg-red-100 text-red-700',
 };
+
+// A normal worker tick may be 5-15 minutes away. Poll slowly, only after an
+// operator starts a search, and stop after 20 minutes so an abandoned panel
+// cannot become another permanent background request stream.
+const DEEP_SEARCH_POLL_INTERVAL_MS = 30_000;
+const DEEP_SEARCH_POLL_LIMIT = 40;
 
 function callDuration(seconds: number | null): string {
   const s = Math.max(0, Number(seconds) || 0);
@@ -74,6 +80,18 @@ export default function ContactPanel({
   const [mergeQuery, setMergeQuery] = useState('');
   const [mergeResults, setMergeResults] = useState<any[]>([]);
   const [profiles, setProfiles] = useState<any[]>([]);
+  const [deepSearchStatus, setDeepSearchStatus] = useState<string | null>(null);
+  const deepSearchPoll = useRef<symbol | null>(null);
+
+  useEffect(() => {
+    // Changing/closing the panel invalidates an in-flight monitor. The pending
+    // timeout is harmless and exits without touching state when it wakes.
+    deepSearchPoll.current = null;
+    setDeepSearchStatus(null);
+    return () => {
+      deepSearchPoll.current = null;
+    };
+  }, [contactId]);
 
   const load = useCallback(async () => {
     const [contactRes, linksRes, statusRes, stageRes, fieldsRes, activityRes] = await Promise.all([
@@ -323,11 +341,79 @@ export default function ContactPanel({
     }
   }
 
+  async function monitorDeepSearch(previousCompletedAt: string | null) {
+    const token = Symbol('deep-search-poll');
+    deepSearchPoll.current = token;
+    let refreshFailures = 0;
+
+    for (let attempt = 0; attempt < DEEP_SEARCH_POLL_LIMIT; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, DEEP_SEARCH_POLL_INTERVAL_MS));
+      if (deepSearchPoll.current !== token) return;
+      if (document.visibilityState !== 'visible') continue;
+
+      try {
+        const { data, error } = await supabase
+          .from('contacts')
+          .select('deep_search_queued_at, deep_searched_at, search_flag')
+          .eq('id', contactId)
+          .maybeSingle();
+        if (deepSearchPoll.current !== token) return;
+        if (error) throw error;
+        if (!data) {
+          setDeepSearchStatus('This contact no longer exists.');
+          deepSearchPoll.current = null;
+          return;
+        }
+        refreshFailures = 0;
+
+        if (!data.deep_search_queued_at) {
+          deepSearchPoll.current = null;
+          await Promise.allSettled([load(), loadCandidates()]);
+          onChanged();
+          const failureFlag =
+            typeof data.search_flag === 'string' && /deep search failed/i.test(data.search_flag);
+          setDeepSearchStatus(
+            failureFlag
+              ? `Deep search failed: ${data.search_flag}`
+              : data.deep_searched_at && data.deep_searched_at !== previousCompletedAt
+                ? data.search_flag
+                  ? `Deep search completed with a warning: ${data.search_flag}`
+                  : `Deep search completed ${new Date(data.deep_searched_at).toLocaleString()}.`
+                : data.search_flag
+                  ? `Deep search stopped: ${data.search_flag}`
+                  : 'Deep search stopped without completing. Check Admin → Debug Log.'
+          );
+          return;
+        }
+      } catch (error) {
+        refreshFailures += 1;
+        if (refreshFailures >= 3) {
+          deepSearchPoll.current = null;
+          setDeepSearchStatus(
+            `Could not refresh deep-search status: ${
+              error instanceof Error ? error.message : 'network error'
+            }. Check Admin → Debug Log.`
+          );
+          return;
+        }
+      }
+    }
+
+    if (deepSearchPoll.current !== token) return;
+    deepSearchPoll.current = null;
+    await Promise.allSettled([load(), loadCandidates()]);
+    onChanged();
+    setDeepSearchStatus(
+      'Deep search is still queued after 20 minutes. Check Admin → Debug Log for worker errors.'
+    );
+  }
+
   // With a focusDate the run branches out ONE arrest: that date drives every
   // search window and date-built URL, so a three-arrest person gets three
   // focused sweeps instead of one blurred one.
   async function runDeepSearch(focusDate?: string) {
     setBusy(focusDate ? `deep-${focusDate}` : 'deep');
+    const previousCompletedAt = contact?.deep_searched_at ?? null;
     try {
       const res = await fetch(`/api/contacts/${contactId}/deep-search`, {
         method: 'POST',
@@ -344,18 +430,39 @@ export default function ContactPanel({
       // an error response decide whether the UI recovers.
       const data = await res.json().catch(() => ({} as any));
       if (res.ok) {
-        alert(
-          data.duplicate
-            ? 'Deep search is already queued.'
-            : focusDate
-              ? `Deep search queued, focused on the ${focusDate} arrest.`
-              : 'Deep search queued. Results will appear after the next worker tick.'
+        if (data.status === 'already completed this hour') {
+          deepSearchPoll.current = null;
+          setDeepSearchStatus('Deep search already completed this hour. Showing its latest results.');
+          alert('Deep search already completed this hour. Showing its latest results.');
+          await Promise.allSettled([load(), loadCandidates()]);
+          onChanged();
+          return;
+        }
+
+        const alreadyQueued = data.status === 'already queued' || data.duplicate;
+        const queuedMessage = alreadyQueued
+          ? 'Deep search is already queued.'
+          : focusDate
+            ? `Deep search queued, focused on the ${focusDate} arrest.`
+            : 'Deep search queued. Results will appear after the next worker tick.';
+        setDeepSearchStatus(
+          alreadyQueued
+            ? 'Deep search already queued — waiting for the worker.'
+            : 'Deep search queued — waiting for the worker.'
         );
+        alert(queuedMessage);
+        // Pick up the authoritative queue stamp immediately, then monitor the
+        // background job until it completes/fails or this bounded poll expires.
+        await Promise.allSettled([load()]);
+        onChanged();
+        void monitorDeepSearch(previousCompletedAt);
       } else {
         alert(data.error ?? `Deep search failed (HTTP ${res.status})`);
+        setDeepSearchStatus(data.error ?? `Deep search could not be queued (HTTP ${res.status}).`);
       }
     } catch (e: any) {
       alert(`Deep search could not be started: ${e?.message ?? 'network error'}`);
+      setDeepSearchStatus(`Deep search could not be started: ${e?.message ?? 'network error'}`);
     } finally {
       setBusy(null);
     }
@@ -1080,17 +1187,20 @@ export default function ContactPanel({
                 </button>
                 {/* The same stamps that drive the grid icon, in words. */}
                 <span
+                  role="status"
+                  aria-live="polite"
                   className="self-center text-[10px] text-gray-400"
                   title="Stamped when a run concludes — a partial run counts; it kept its findings"
                 >
-                  {contact.deep_search_queued_at &&
-                  Date.now() - new Date(contact.deep_search_queued_at).getTime() < 30 * 60_000
-                    ? 'Deep search queued…'
-                    : contact.deep_search_queued_at
-                      ? 'The last queued run never concluded — run it again'
-                      : contact.deep_searched_at
-                        ? `Last run ${new Date(contact.deep_searched_at).toLocaleString()}`
-                        : 'Never run'}
+                  {deepSearchStatus ??
+                    (contact.deep_search_queued_at &&
+                    Date.now() - new Date(contact.deep_search_queued_at).getTime() < 30 * 60_000
+                      ? 'Deep search queued…'
+                      : contact.deep_search_queued_at
+                        ? 'The last queued run never concluded — run it again'
+                        : contact.deep_searched_at
+                          ? `Last run ${new Date(contact.deep_searched_at).toLocaleString()}`
+                          : 'Never run')}
                 </span>
               </div>
 

@@ -287,9 +287,17 @@ export async function runDeepSearchForContact(
     signal?: AbortSignal;
     focusDate?: string;
     jobId?: string;
+    jobWorker?: string;
+    jobAttempt?: number;
   }
 ): Promise<DeepSearchResult> {
   const supabase = createAdminClient();
+  if (
+    opts?.jobId &&
+    (!opts.jobWorker || !Number.isInteger(opts.jobAttempt) || Number(opts.jobAttempt) < 1)
+  ) {
+    throw new Error('Deep-search queue attempt identity is incomplete');
+  }
   // A focused run branches out ONE arrest of a multi-arrest person: that date
   // is pinned and every date-built URL and search window uses it alone, so the
   // run digs into this booking instead of re-treading all of them.
@@ -312,11 +320,12 @@ export async function runDeepSearchForContact(
     return deadlineHit;
   };
 
-  const { data: contact } = await supabase
+  const { data: contact, error: contactError } = await supabase
     .from('contacts')
     .select('id, name, city, state, search_facts, confirmed_facts')
     .eq('id', contactId)
     .single();
+  if (contactError) throw new Error(`Could not load contact for deep search: ${contactError.message}`);
   if (!contact?.name) throw new Error('Contact has no name to search for');
 
   const name = splitName(contact.name);
@@ -335,10 +344,13 @@ export async function runDeepSearchForContact(
   // makes the confirmed value the one actually searched rather than merely
   // present. confirmed_facts leads because it is the strongest signal there is:
   // a human said so, and it survives Clear results when search_facts does not.
-  const { data: slotLinks } = await supabase
+  const { data: slotLinks, error: slotLinksError } = await supabase
     .from('contact_links')
     .select('url')
     .eq('contact_id', contactId);
+  if (slotLinksError) {
+    throw new Error(`Could not load confirmed contact links: ${slotLinksError.message}`);
+  }
 
   let pinned: SearchFacts = { ...EMPTY_FACTS };
   // Merged first so a focused run's date takes the front of the variant list.
@@ -393,8 +405,12 @@ export async function runDeepSearchForContact(
     });
   }
 
-  const [{ data: siteRows }, { data: ruleRows }, { data: existing }, { data: confirmedRows }] =
-    await Promise.all([
+  const [
+    { data: siteRows, error: siteRowsError },
+    { data: ruleRows, error: ruleRowsError },
+    { data: existing, error: existingError },
+    { data: confirmedRows, error: confirmedRowsError },
+  ] = await Promise.all([
       supabase.from('probe_sites').select('*').order('scope'),
       supabase.from('url_rules').select('*'),
       supabase
@@ -409,6 +425,14 @@ export async function runDeepSearchForContact(
         .eq('status', 'confirmed')
         .limit(20),
     ]);
+  if (siteRowsError) throw new Error(`Could not load probe sites: ${siteRowsError.message}`);
+  if (ruleRowsError) throw new Error(`Could not load URL rules: ${ruleRowsError.message}`);
+  if (existingError) {
+    throw new Error(`Could not load existing search candidates: ${existingError.message}`);
+  }
+  if (confirmedRowsError) {
+    throw new Error(`Could not load confirmed search candidates: ${confirmedRowsError.message}`);
+  }
 
   // Inactive sites still matter: they are the SERP-fallback and id-pivot
   // targets. Only direct probing is limited to the active ones.
@@ -429,6 +453,17 @@ export async function runDeepSearchForContact(
   const unindexedPrioritySites: string[] = [];
   let derived = 0;
   let siteSearches = 0;
+  // A no-result is trustworthy only when at least one external source actually
+  // answered and was readable. Otherwise a total browser/provider outage looks
+  // exactly like a legitimate search with zero matches.
+  let discoveryAttempts = 0;
+  let discoverySuccesses = 0;
+  const discoveryFailures: string[] = [];
+  const recordDiscoveryFailure = (source: string, reason: string) => {
+    if (discoveryFailures.length < 6) {
+      discoveryFailures.push(`${source}: ${reason}`.slice(0, 500));
+    }
+  };
   // Domains that produced at least one hit, so we know which sites are worth
   // handing the operator a 'see everything on this site' link for.
   const sitesWithHits = new Set<string>();
@@ -473,6 +508,7 @@ export async function runDeepSearchForContact(
     const site = sitesAll.find((s) => urlOnDomain(pageUrl, s.domain));
     if (!site) continue; // a news article or social post has no roster to mine
     minedPages += 1;
+    discoveryAttempts += 1;
 
     let outcome: Awaited<ReturnType<typeof fetchProbePage>>;
     try {
@@ -487,6 +523,7 @@ export async function runDeepSearchForContact(
       outcome = { ok: false, reason: errorMessage(e), blocked: false };
     }
     if (!outcome.ok) {
+      recordDiscoveryFailure(`${site.domain} confirmed page`, outcome.reason);
       await logProbeFailure(site.domain, pageUrl, outcome.reason, contactId);
       continue;
     }
@@ -500,6 +537,7 @@ export async function runDeepSearchForContact(
       rows = parsed.rows;
       if (parsed.llmFacts) facts = mergeFacts(facts, parsed.llmFacts);
     } catch (e) {
+      recordDiscoveryFailure(`${site.domain} confirmed page parser`, errorMessage(e));
       await logDebug({
         source: 'deep-search:mine',
         message: `Could not read the confirmed page on ${site.domain}: ${errorMessage(e)}`,
@@ -508,6 +546,7 @@ export async function runDeepSearchForContact(
       });
       continue;
     }
+    discoverySuccesses += 1;
 
     for (const row of rows) {
       const canonical = canonicalUrl(row.url);
@@ -604,6 +643,7 @@ export async function runDeepSearchForContact(
       if (outOfTime()) break;
       if (probed >= MAX_PROBES_PER_RUN) break;
       probed += 1;
+      discoveryAttempts += 1;
       await sleep(PER_DOMAIN_DELAY_MS);
 
       let outcome: Awaited<ReturnType<typeof fetchProbePage>>;
@@ -619,6 +659,7 @@ export async function runDeepSearchForContact(
       if (!outcome.ok) {
         blocked += 1;
         blockedDomains.add(site.domain);
+        recordDiscoveryFailure(site.domain, outcome.reason);
         await logProbeFailure(site.domain, url, outcome.reason, contactId);
 
         // A policy refusal is BrightData's standing decision about the domain,
@@ -656,6 +697,7 @@ export async function runDeepSearchForContact(
         rows = parsed.rows;
         if (parsed.llmFacts) facts = mergeFacts(facts, parsed.llmFacts);
       } catch (e) {
+        recordDiscoveryFailure(`${site.domain} parser`, errorMessage(e));
         await logDebug({
           source: 'deep-search:probe',
           message: `Could not read results from ${site.domain}: ${errorMessage(e)}`,
@@ -664,6 +706,7 @@ export async function runDeepSearchForContact(
         });
         continue;
       }
+      discoverySuccesses += 1;
 
       for (const row of rows) {
         const canonical = canonicalUrl(row.url);
@@ -763,6 +806,7 @@ export async function runDeepSearchForContact(
     // Each engine is metered separately, so a timeout costs an attempt that
     // BrightData does not bill (only successful requests are charged).
     const engines: SearchEngine[] = ['google', 'bing'];
+    discoveryAttempts += engines.length;
     const settled = await Promise.allSettled(
       engines.map((engine) =>
         runSerpSearch(query, {
@@ -780,7 +824,12 @@ export async function runDeepSearchForContact(
     for (const [i, outcome] of settled.entries()) {
       if (outcome.status === 'fulfilled') {
         lists.push(outcome.value);
+        discoverySuccesses += 1;
       } else {
+        recordDiscoveryFailure(
+          `${engines[i]} site search of ${domain}`,
+          errorMessage(outcome.reason)
+        );
         await logDebug({
           level: 'warn',
           source: 'deep-search:serp-fallback',
@@ -981,8 +1030,36 @@ export async function runDeepSearchForContact(
     siteSearches += 1;
   }
   await candidateWriter.flush();
+  // Observe a deadline that fired during the final cheap phases even if no loop
+  // happened to call outOfTime() afterward.
+  outOfTime();
   if (opts?.signal?.aborted) {
     throw opts.signal.reason ?? new Error('Deep-search job lease was lost');
+  }
+  // A deadline is a safe partial completion only after at least one source
+  // answered. If every source timed out, there is no trustworthy partial result
+  // to turn green; leave the job failed/retryable and surface the outage.
+  if (discoverySuccesses === 0) {
+    const detail = discoveryFailures.length
+      ? ` ${discoveryFailures.join(' | ')}`
+      : '';
+    const message = discoveryAttempts > 0
+      ? `Deep search could not read any external source (${discoveryAttempts} failed attempt(s)); ` +
+        `the run was not marked complete.${detail}`
+      : `Deep search had no runnable external source (${sites.length} active probe site(s)); ` +
+        'check probe-site configuration and required state/county facts. The run was not marked complete.';
+    await logDebug({
+      level: 'error',
+      source: 'deep-search:health',
+      message,
+      context: {
+        attempts: discoveryAttempts,
+        successes: discoverySuccesses,
+        failures: discoveryFailures,
+      },
+      contactId,
+    }).catch(() => {});
+    throw new Error(message);
   }
 
   // Say plainly that the window closed early. The candidates above were still
@@ -1000,8 +1077,8 @@ export async function runDeepSearchForContact(
 
   // The grid's search icon runs on these two stamps: queued ⇒ amber, searched
   // ⇒ green. Stamped at conclusion so a partial run counts — it kept its
-  // findings. Best-effort: before migration 0025 the columns do not exist,
-  // and that must not fail the run.
+  // findings. For queued work, migration 0028 commits these stamps, the exact
+  // queue attempt, and the facts in one transaction.
   // Reuses the existing search_flag, so these land in the contacts grid's
   // Flagged view with the reason on hover — no new surface to learn. Ambiguity
   // outranks index lag: an unresolved identity makes every other follow-up
@@ -1013,15 +1090,16 @@ export async function runDeepSearchForContact(
       ? `Not yet indexed on ${unindexedPrioritySites.join(', ')} — re-run deep search in a few days`
       : null;
   if (opts?.jobId) {
-    const { data: committed, error } = await supabase.rpc('finish_deep_search_state', {
+    const { data: committed, error } = await supabase.rpc('finish_deep_search_attempt', {
       p_contact_id: contactId,
       p_job_id: opts.jobId,
+      p_worker: opts.jobWorker!,
+      p_attempt_count: opts.jobAttempt!,
       p_search_facts: merged,
       p_search_flag: nextFlag,
-      p_flag_changed: nextFlag !== null,
     });
     if (error) throw new Error(`Could not finalize deep-search state: ${error.message}`);
-    if (committed !== true) throw new Error('Deep-search generation was superseded before completion');
+    if (committed !== true) throw new Error('Deep-search attempt lost its lease before completion');
   } else if (!factsAreEqual(normalizeFacts(contact.search_facts), merged)) {
     const { error } = await supabase.from('contacts').update({ search_facts: merged }).eq('id', contactId);
     if (error) throw new Error(`Could not persist search facts: ${error.message}`);

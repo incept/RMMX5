@@ -59,7 +59,9 @@ export function errorMessage(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === 'string') return e;
   try {
-    return JSON.stringify(e);
+    // JSON.stringify(undefined) returns undefined rather than a string. Keep
+    // even falsy thrown values observable to queue and debug-log callers.
+    return JSON.stringify(e) ?? String(e);
   } catch {
     return String(e);
   }

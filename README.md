@@ -35,10 +35,13 @@ voicemail drops, vendor management, revenue projection, and a full admin panel.
 
 1. Create a project at [supabase.com](https://supabase.com).
 2. Apply **every** migration in `supabase/migrations` in filename order
-   (`0001_init.sql` through `0020_runtime_hardening.sql`). With the
+   from `0001_init.sql` through the highest-numbered migration shipped with
+   the checkout (currently `0028_deep_search_attempt_state.sql`). With the
    Supabase CLI, run `supabase db push`; otherwise run each unapplied file in
    the SQL Editor. The later migrations contain required security, queue,
-   usage-metering, and concurrency controls and are not optional.
+   usage-metering, and concurrency controls and are not optional. In
+   particular, `0028_deep_search_attempt_state.sql` is required for concurrent
+   focused deep probes to finish independently and report their state.
 3. Copy the Project URL and API keys into `.env.local` (start from
    `.env.local.example`). Mind the key types: the **publishable** key
    (`sb_publishable_…`, or legacy `anon`) goes in
@@ -70,7 +73,12 @@ voicemail drops, vendor management, revenue projection, and a full admin panel.
 
 ## 2. Run locally
 
+Use Node.js **22.19.0 or newer**. The pinned `undici` runtime requires that
+minimum Node version; older Node releases may install successfully and then
+fail at build time or during outbound network requests.
+
 ```bash
+node --version
 npm install
 npm run dev
 ```
