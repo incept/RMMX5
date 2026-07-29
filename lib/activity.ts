@@ -1,4 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server';
+import { errorMessage, logDebug } from '@/lib/debug-log';
 
 /**
  * Appends one entry to the activity log. Fire-and-forget from the caller's
@@ -25,14 +26,23 @@ export async function logActivity(entry: {
 }) {
   try {
     const supabase = createAdminClient();
-    await supabase.from('activity_log').insert({
+    const { error } = await supabase.from('activity_log').insert({
       contact_id: entry.contactId ?? null,
       actor_id: entry.actorId ?? null,
       type: entry.type,
       description: entry.description,
       meta: entry.meta ?? {},
     });
-  } catch {
-    // never let logging break the main flow
+    if (error) throw error;
+  } catch (error) {
+    // Activity is not allowed to break the action, but losing the only
+    // human-readable run summary must be visible in Admin → Debug Log.
+    await logDebug({
+      level: 'warn',
+      source: 'activity-log',
+      message: `Could not record ${entry.type} activity: ${errorMessage(error)}`,
+      context: { contact_id: entry.contactId ?? null },
+      contactId: entry.contactId ?? null,
+    });
   }
 }
