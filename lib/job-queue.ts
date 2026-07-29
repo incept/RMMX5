@@ -127,6 +127,44 @@ export async function enqueueJob(
   return { queued: true, duplicate: false, id: data.id as string };
 }
 
+export async function enqueueDeepSearchJob(input: {
+  contactId: string;
+  actorId: string;
+  focusDate?: string | null;
+  dedupeKey: string;
+  maxAttempts?: number;
+}) {
+  const supabase = createAdminClient();
+  const { data, error } = await supabase
+    .rpc('enqueue_deep_search_job', {
+      p_contact_id: input.contactId,
+      p_actor_id: input.actorId,
+      p_focus_date: input.focusDate ?? null,
+      p_dedupe_key: input.dedupeKey,
+      p_max_attempts: input.maxAttempts ?? 2,
+    })
+    .single();
+  if (error || !data) {
+    throw new Error(
+      `Could not atomically enqueue deep-search job: ${error?.message ?? 'RPC returned no row'}`
+    );
+  }
+  const row = data as {
+    id: string;
+    queued: boolean;
+    duplicate: boolean;
+    retried: boolean;
+    status: string;
+  };
+  return {
+    id: String(row.id),
+    queued: row.queued === true,
+    duplicate: row.duplicate === true,
+    retried: row.retried === true,
+    status: String(row.status),
+  };
+}
+
 async function refreshSmsCampaign(campaignId: string) {
   const supabase = createAdminClient();
   const { error } = await supabase.rpc('refresh_sms_campaign_counts', {
@@ -141,8 +179,33 @@ function nonRetryableError(message: string) {
   return error;
 }
 
-async function handleJob(job: any, signal?: AbortSignal) {
-  const payload = job.payload ?? {};
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function jobPayload(job: any): Record<string, unknown> {
+  const payload = job?.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw nonRetryableError(`${String(job?.kind ?? 'Unknown')} job payload must be an object`);
+  }
+  return payload as Record<string, unknown>;
+}
+
+function requiredPayloadUuid(
+  payload: Record<string, unknown>,
+  key: string,
+  kind: unknown
+): string {
+  const value = payload[key];
+  if (typeof value !== 'string' || !UUID_PATTERN.test(value)) {
+    throw nonRetryableError(
+      `${String(kind ?? 'Unknown')} job payload is missing a valid ${key}`
+    );
+  }
+  return value.toLowerCase();
+}
+
+async function handleJob(job: any, worker: string, signal?: AbortSignal) {
+  const payload = jobPayload(job);
   const supabase = createAdminClient();
   if (signal?.aborted) throw signal.reason ?? new Error('Job lease was lost');
 
@@ -156,16 +219,29 @@ async function handleJob(job: any, signal?: AbortSignal) {
   }
 
   if (job.kind === 'deep_search') {
+    const contactId = requiredPayloadUuid(payload, 'contactId', job.kind);
+    const focusDate =
+      payload.focusDate === undefined
+        ? undefined
+        : typeof payload.focusDate === 'string' &&
+            /^\d{4}-\d{2}-\d{2}$/.test(payload.focusDate)
+          ? payload.focusDate
+          : null;
+    if (focusDate === null) {
+      throw nonRetryableError('deep_search job payload has an invalid focusDate');
+    }
     await runDeepSearchForContact(
-      String(payload.contactId),
+      contactId,
       (payload.actorId as string | null) ?? null,
       {
         deadlineMs: 95_000,
         requestKey: `job:${job.id}:attempt:${job.attempt_count}`,
         signal,
         jobId: String(job.id),
+        jobWorker: worker,
+        jobAttempt: Number(job.attempt_count),
         // A focused run digs into one arrest of a multi-arrest person.
-        focusDate: typeof payload.focusDate === 'string' ? payload.focusDate : undefined,
+        focusDate,
       }
     );
     return;
@@ -374,34 +450,93 @@ async function handleJob(job: any, signal?: AbortSignal) {
   throw new Error(`Unsupported job kind: ${job.kind}`);
 }
 
-async function finishJob(job: any, worker: string, failure?: unknown) {
+async function completeJob(job: any, worker: string) {
   const supabase = createAdminClient();
-  if (!failure) {
-    const { data, error } = await supabase
-      .from('job_queue')
-      .update({
-        status: 'completed',
-        locked_at: null,
-        locked_by: null,
-        last_error: null,
-        completed_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', job.id)
-      .eq('status', 'processing')
-      .eq('locked_by', worker)
-      .select('id')
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    if (!data) throw new Error(`Lost lease before completing job ${job.id}`);
-    return;
-  }
+  const { data, error } = await supabase
+    .from('job_queue')
+    .update({
+      status: 'completed',
+      locked_at: null,
+      locked_by: null,
+      last_error: null,
+      completed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', job.id)
+    .eq('status', 'processing')
+    .eq('locked_by', worker)
+    .eq('attempt_count', job.attempt_count)
+    .select('id')
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error(`Lost lease before completing job ${job.id}`);
+}
 
+async function failJob(job: any, worker: string, failure: unknown) {
+  const supabase = createAdminClient();
   const terminal =
     job.attempt_count >= job.max_attempts ||
     (failure as { retryable?: boolean } | null)?.retryable === false;
   const backoffMinutes = Math.min(60, 2 ** Math.max(0, job.attempt_count - 1));
-  const message = errorMessage(failure).slice(0, 2000);
+  // JavaScript permits Promise.reject(undefined) and even `throw null`.
+  // Completion and failure are separate functions so no falsy thrown value can
+  // ever be mistaken for a successful job.
+  const message = (errorMessage(failure) || 'Unknown job failure').slice(0, 2000);
+
+  // Deep-search terminal failure has two pieces of state that must agree: the
+  // queue attempt and the contact's amber/error state. The RPC verifies the
+  // exact lease and changes both in one transaction, so a reclaimed worker
+  // cannot clear state owned by its successor.
+  const deepSearchContactId =
+    job.kind === 'deep_search' &&
+    job.payload &&
+    typeof job.payload === 'object' &&
+    !Array.isArray(job.payload) &&
+    typeof job.payload.contactId === 'string' &&
+    UUID_PATTERN.test(job.payload.contactId)
+      ? job.payload.contactId
+      : null;
+  if (terminal && job.kind === 'deep_search') {
+    const failureText = `the last deep search failed after ${job.attempt_count} attempt${
+      job.attempt_count === 1 ? '' : 's'
+    } (${message.slice(0, 300)})`;
+    const { data: finalized, error: finalizeError } = await supabase.rpc(
+      'fail_deep_search_attempt',
+      {
+        // NULL is deliberate for a malformed legacy payload. Migration 0028
+        // resolves a pointed contact when possible and always terminally
+        // transitions the exact leased queue row even when it is orphaned.
+        p_contact_id: deepSearchContactId,
+        p_job_id: String(job.id),
+        p_worker: worker,
+        p_attempt_count: Number(job.attempt_count),
+        p_message: failureText,
+      }
+    );
+    if (finalizeError) throw new Error(finalizeError.message);
+    if (finalized !== true) {
+      await logDebug({
+        level: 'warn',
+        source: 'job:deep_search',
+        message: `Lost lease before atomically recording terminal failure: ${message}`,
+        context: {
+          job_id: job.id,
+          worker,
+          attempt: job.attempt_count,
+        },
+        contactId: deepSearchContactId,
+      });
+      return;
+    }
+    await logDebug({
+      source: 'job:deep_search',
+      message,
+      context: { job_id: job.id, attempt: job.attempt_count, terminal: true },
+      contactId: deepSearchContactId,
+    });
+    return;
+  }
+
   const { data, error } = await supabase
     .from('job_queue')
     .update({
@@ -417,6 +552,7 @@ async function finishJob(job: any, worker: string, failure?: unknown) {
     .eq('id', job.id)
     .eq('status', 'processing')
     .eq('locked_by', worker)
+    .eq('attempt_count', job.attempt_count)
     .select('id')
     .maybeSingle();
   if (error) throw new Error(error.message);
@@ -434,30 +570,6 @@ async function finishJob(job: any, worker: string, failure?: unknown) {
     message,
     context: { job_id: job.id, attempt: job.attempt_count, terminal },
   });
-
-  // A deep search that fails its last attempt must not leave the contact
-  // wearing the amber "queued" icon forever with the error hidden in the job
-  // table. Clear the stamp and raise the search flag so the Link Data banner
-  // says WHY and invites a re-run. Best-effort: this write failing must not
-  // mask the recorded job failure.
-  if (terminal && job.kind === 'deep_search' && job.payload?.contactId) {
-    const failureText = `the last deep search failed after ${job.attempt_count} attempt${
-      job.attempt_count === 1 ? '' : 's'
-    } (${message.slice(0, 300)})`;
-    const { error: stampError } = await supabase.rpc('fail_deep_search_state', {
-      p_contact_id: String(job.payload.contactId),
-      p_job_id: String(job.id),
-      p_message: failureText,
-    });
-    if (stampError) {
-      await logDebug({
-        level: 'warn',
-        source: 'job:deep_search',
-        message: `Could not clear the queued stamp after terminal failure: ${stampError.message}`,
-        contactId: String(job.payload.contactId),
-      }).catch(() => {});
-    }
-  }
 }
 
 async function withJobHeartbeat<T>(
@@ -481,6 +593,7 @@ async function withJobHeartbeat<T>(
           .eq('id', job.id)
           .eq('status', 'processing')
           .eq('locked_by', worker)
+          .eq('attempt_count', job.attempt_count)
           .select('id')
           .maybeSingle();
         if (error) {
@@ -491,14 +604,34 @@ async function withJobHeartbeat<T>(
             context: { job_id: job.id, worker },
           });
         } else if (!data) {
-          lostLease = new Error(`Lost lease while processing job ${job.id}`);
-          controller.abort(lostLease);
-          await logDebug({
-            level: 'warn',
-            source: `job:${job.kind}`,
-            message: lostLease.message,
-            context: { job_id: job.id, worker },
-          });
+          // Deep search finalizes its queue row inside the same transaction as
+          // its contact state. A heartbeat already waiting on that row wakes
+          // after commit and correctly finds no *processing* row. Distinguish
+          // that exact completed attempt from a genuine lease takeover.
+          const { data: current, error: currentError } = await supabase
+            .from('job_queue')
+            .select('status, attempt_count')
+            .eq('id', job.id)
+            .maybeSingle();
+          const finalizedThisAttempt =
+            !currentError &&
+            job.kind === 'deep_search' &&
+            current?.status === 'completed' &&
+            Number(current.attempt_count) === Number(job.attempt_count);
+          if (!finalizedThisAttempt) {
+            lostLease = new Error(
+              currentError
+                ? `Lost lease while processing job ${job.id}; state check failed: ${currentError.message}`
+                : `Lost lease while processing job ${job.id}`
+            );
+            controller.abort(lostLease);
+            await logDebug({
+              level: 'warn',
+              source: `job:${job.kind}`,
+              message: lostLease.message,
+              context: { job_id: job.id, worker, attempt: job.attempt_count },
+            });
+          }
         }
       } catch (heartbeatError) {
         await logDebug({
@@ -541,11 +674,14 @@ export async function processQueuedJobs(limit = 1) {
   // ticks; parallel work here only creates RAM and latency spikes.
   for (const job of jobs ?? []) {
     try {
-      await withJobHeartbeat(job, worker, (signal) => handleJob(job, signal));
-      await finishJob(job, worker);
+      await withJobHeartbeat(job, worker, (signal) => handleJob(job, worker, signal));
+      // A deep search commits its contact results and this exact queue attempt
+      // together. A second generic completion write would always look like a
+      // lost lease and could obscure a successful run.
+      if (job.kind !== 'deep_search') await completeJob(job, worker);
       completed += 1;
     } catch (failure) {
-      await finishJob(job, worker, failure);
+      await failJob(job, worker, failure);
       failed += 1;
     }
   }
