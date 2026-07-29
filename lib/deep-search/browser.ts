@@ -173,6 +173,27 @@ async function resolveExecutable(): Promise<string | null> {
   return null;
 }
 
+let availabilityCache: { value: boolean; at: number } | null = null;
+const AVAILABILITY_TTL_MS = 60_000;
+
+/**
+ * Cheap, cached "could this tier run at all?" check. Callers that would skip
+ * the free HTTP tiers on the promise of Chrome must ask this FIRST: on a host
+ * with no Chrome (shared hosting), a browser-only fetch otherwise falls
+ * straight through to the billable unlocker — which BrightData refuses by
+ * policy for exactly the site that needs the browser. Cached briefly so a
+ * settings change (enabling the tier, setting a path) still applies within a
+ * minute without re-statting the filesystem on every URL.
+ */
+export async function browserAvailable(): Promise<boolean> {
+  if (availabilityCache && Date.now() - availabilityCache.at < AVAILABILITY_TTL_MS) {
+    return availabilityCache.value;
+  }
+  const value = (await resolveExecutable()) !== null;
+  availabilityCache = { value, at: Date.now() };
+  return value;
+}
+
 function touchIdleTimer() {
   if (idleTimer) clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
