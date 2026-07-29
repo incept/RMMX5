@@ -47,10 +47,16 @@ export async function POST(request: Request, { params }: Params) {
     // Service role, since requireAdmin already gated the caller and a client-
     // side RLS denial here would be silent. Best-effort: a missing stamp must
     // not fail the enqueue.
-    const { error: stampError } = await createAdminClient()
-      .from('contacts')
-      .update({ deep_search_queued_at: new Date().toISOString() })
-      .eq('id', id);
+    const shouldStamp = result.queued || ['pending', 'processing'].includes(result.status ?? '');
+    const { error: stampError } = shouldStamp
+      ? await createAdminClient()
+          .from('contacts')
+          .update({
+            deep_search_queued_at: new Date().toISOString(),
+            deep_search_job_id: result.id ?? null,
+          })
+          .eq('id', id)
+      : { error: null };
     if (stampError) {
       await logDebug({
         source: 'deep-search:enqueue',
@@ -59,7 +65,15 @@ export async function POST(request: Request, { params }: Params) {
       });
     }
     return NextResponse.json(
-      { ...result, status: result.duplicate ? 'already queued' : 'queued' },
+      {
+        ...result,
+        status:
+          result.duplicate && result.status === 'completed'
+            ? 'already completed this hour'
+            : result.duplicate
+              ? 'already queued'
+              : 'queued',
+      },
       { status: result.duplicate ? 200 : 202 }
     );
   } catch (e) {

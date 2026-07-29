@@ -15,9 +15,10 @@ export default function SmsPage() {
     const [c, l] = await Promise.all([
       supabase
         .from('sms_campaigns')
-        .select('*, email_lists ( name ), sms_messages ( id, status )')
-        .order('created_at', { ascending: false }),
-      supabase.from('email_lists').select('id, name, email_list_members ( id )').order('name'),
+        .select('id, name, body, status, sent_count, failed_count, created_at, email_lists ( name )')
+        .order('created_at', { ascending: false })
+        .limit(100),
+      supabase.from('email_lists').select('id, name').order('name').limit(200),
     ]);
     setCampaigns(c.data ?? []);
     setLists(l.data ?? []);
@@ -119,7 +120,7 @@ export default function SmsPage() {
                 <option value="">Choose list…</option>
                 {lists.map((l) => (
                   <option key={l.id} value={l.id}>
-                    {l.name} ({l.email_list_members?.length ?? 0} members)
+                    {l.name}
                   </option>
                 ))}
               </select>

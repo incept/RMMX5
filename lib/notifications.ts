@@ -21,11 +21,12 @@ function render(template: string, vars: Record<string, string | number>): string
 async function isClient(contact: any): Promise<boolean> {
   if (!contact.status_id) return false;
   const supabase = createAdminClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('statuses')
     .select('is_client_status')
     .eq('id', contact.status_id)
     .single();
+  if (error) throw new Error(error.message);
   return !!data?.is_client_status;
 }
 
@@ -42,7 +43,8 @@ export async function fireNotification(
     .eq('event', event)
     .eq('enabled', true);
   if (options?.ruleId) rulesQuery = rulesQuery.eq('id', options.ruleId);
-  const { data: rules } = await rulesQuery;
+  const { data: rules, error: rulesError } = await rulesQuery;
+  if (rulesError) throw new Error(rulesError.message);
 
   if (!rules?.length) return;
 
@@ -69,7 +71,9 @@ export async function fireNotification(
         .single();
       // A unique-key collision means another cron worker already reserved it.
       if (reservationError?.code === '23505') continue;
-      if (reservationError || !reservation) continue;
+      if (reservationError || !reservation) {
+        throw new Error(reservationError?.message ?? 'Could not reserve notification');
+      }
 
       try {
         const destination = channel === 'email' ? contact.email : contact.phone;
@@ -84,10 +88,14 @@ export async function fireNotification(
           `notification:${reservation.id}`
         );
       } catch (e: any) {
-        await supabase
+        const { error: cleanupError } = await supabase
           .from('notifications_log')
-          .update({ status: 'failed', error: e.message })
+          .delete()
           .eq('id', reservation.id);
+        if (cleanupError) {
+          throw new Error(`${e.message}; notification cleanup failed: ${cleanupError.message}`);
+        }
+        throw e;
       }
     }
   }

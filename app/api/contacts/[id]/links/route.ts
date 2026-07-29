@@ -3,7 +3,6 @@ import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { applyScores } from '@/lib/scoring';
 import { logActivity } from '@/lib/activity';
-import { fireNotification } from '@/lib/notifications';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 import { canonicalUrl } from '@/lib/integrations/brightdata';
@@ -128,44 +127,37 @@ export async function PUT(request: Request, { params }: Params) {
   const byPosition = new Map((existing ?? []).map((l) => [l.position, l]));
 
   const changes: string[] = [];
+  const removedUrls: string[] = [];
   for (const link of normalized) {
     const { position, url, status } = link;
     const prev = byPosition.get(position);
 
     if (!url) {
       if (prev) {
-        const { error } = await admin
-          .from('contact_links')
-          .delete()
-          .eq('contact_id', id)
-          .eq('position', position);
-        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         changes.push(`Link ${position} cleared`);
-        await rememberRemoval(admin, id, prev.url);
+        removedUrls.push(prev.url);
       }
       continue;
     }
 
     if (!prev || prev.url !== url || prev.status !== status) {
       // Replacing a slot's URL is also a removal of the old one.
-      if (prev && prev.url && prev.url !== url) await rememberRemoval(admin, id, prev.url);
-      const { error } = await admin.from('contact_links').upsert(
-        { contact_id: id, position, url, status, updated_at: new Date().toISOString() },
-        { onConflict: 'contact_id,position' }
-      );
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      if (prev && prev.url && prev.url !== url) removedUrls.push(prev.url);
       if (prev && prev.url === url && prev.status !== status) {
         changes.push(`Link ${position} → ${status}`);
-        await fireNotification('link_status_change', contact, {
-          link: url,
-          link_status: status,
-        });
       } else {
         changes.push(prev ? `Link ${position} URL updated` : `Link ${position} added`);
       }
     }
   }
 
+  const { data: updated, error: replaceError } = await admin.rpc('replace_contact_links_atomic', {
+    p_contact_id: id,
+    p_links: normalized,
+    p_actor_id: auth.profile.id,
+  });
+  if (replaceError) return NextResponse.json({ error: replaceError.message }, { status: 500 });
+  await Promise.all(removedUrls.map((url) => rememberRemoval(admin, id, url)));
   const scores = await applyScores(id);
 
   if (changes.length) {
@@ -177,13 +169,6 @@ export async function PUT(request: Request, { params }: Params) {
       meta: { scores },
     });
   }
-
-  const { data: updated, error: readError } = await admin
-    .from('contact_links')
-    .select('*')
-    .eq('contact_id', id)
-    .order('position');
-  if (readError) return NextResponse.json({ error: readError.message }, { status: 500 });
 
   return NextResponse.json({ links: updated, scores });
 }

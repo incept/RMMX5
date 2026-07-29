@@ -55,7 +55,7 @@ export default function InboxPage() {
     // Explicit column list: smtp_password is not readable from the browser
     // (column-level grant in migration 0002) — it's write-only from the UI.
     const { data } = await supabase
-      .from('email_accounts')
+      .from('email_accounts_safe')
       .select(
         'id, owner_id, name, from_name, from_email, smtp_host, smtp_port, smtp_username, smtp_secure, signature_html, is_default, created_at'
       )
@@ -118,10 +118,15 @@ export default function InboxPage() {
     };
     // Password is write-only: include it only when set (blank on edit = keep).
     if (f.smtp_password) row.smtp_password = f.smtp_password;
-    const { error } = f.id
-      ? await supabase.from('email_accounts').update(row).eq('id', f.id)
-      : await supabase.from('email_accounts').insert(row);
-    if (error) return alert(error.message);
+    const res = await fetch(
+      f.id ? `/api/admin/email-accounts/${encodeURIComponent(f.id)}` : '/api/admin/email-accounts',
+      {
+        method: f.id ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(row),
+      }
+    );
+    if (!res.ok) return alert((await res.json()).error ?? 'Could not save SMTP account');
     setAccountForm(null);
     loadAccounts();
   }
@@ -341,7 +346,14 @@ export default function InboxPage() {
                           className="btn py-1 text-red-600"
                           onClick={async () => {
                             if (!confirm(`Delete account ${a.name}?`)) return;
-                            await supabase.from('email_accounts').delete().eq('id', a.id);
+                            const res = await fetch(
+                              `/api/admin/email-accounts/${encodeURIComponent(a.id)}`,
+                              { method: 'DELETE' }
+                            );
+                            if (!res.ok) {
+                              alert((await res.json()).error ?? 'Could not delete SMTP account');
+                              return;
+                            }
                             loadAccounts();
                           }}
                         >

@@ -36,7 +36,7 @@ export default function MarketingPage() {
         .select('*, email_lists ( name ), sequence_steps ( * )')
         .order('name'),
       supabase.from('statuses').select('id, name, color').order('sort_order'),
-      supabase.from('email_accounts').select('id, name, from_email').order('name'),
+      supabase.from('email_accounts_safe').select('id, name, from_email').order('name'),
       supabase.rpc('marketing_list_counts'),
       supabase.rpc('marketing_sequence_counts'),
     ]);

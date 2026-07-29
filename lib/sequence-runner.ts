@@ -46,16 +46,17 @@ export function renderTemplate(
 
 export async function enrollContact(sequenceId: string, contactId: string) {
   const supabase = createAdminClient();
-  const { data: firstStep } = await supabase
+  const { data: firstStep, error: stepError } = await supabase
     .from('sequence_steps')
     .select('delay_days')
     .eq('sequence_id', sequenceId)
     .order('step_order')
     .limit(1)
     .maybeSingle();
+  if (stepError) throw new Error(stepError.message);
 
   const delayMs = (firstStep?.delay_days ?? 0) * 24 * 60 * 60 * 1000;
-  await supabase.from('sequence_enrollments').upsert(
+  const { error: enrollmentError } = await supabase.from('sequence_enrollments').upsert(
     {
       sequence_id: sequenceId,
       contact_id: contactId,
@@ -68,6 +69,7 @@ export async function enrollContact(sequenceId: string, contactId: string) {
     },
     { onConflict: 'sequence_id,contact_id' }
   );
+  if (enrollmentError) throw new Error(enrollmentError.message);
 }
 
 /**
@@ -81,11 +83,12 @@ export async function stopEnrollmentsFor(
   newStatusId?: string
 ) {
   const supabase = createAdminClient();
-  const { data: enrollments } = await supabase
+  const { data: enrollments, error: enrollmentReadError } = await supabase
     .from('sequence_enrollments')
     .select('id, sequence_id, email_sequences ( stop_on, stop_status_ids )')
     .eq('contact_id', contactId)
     .eq('status', 'active');
+  if (enrollmentReadError) throw new Error(enrollmentReadError.message);
 
   for (const e of (enrollments ?? []) as any[]) {
     const seq = e.email_sequences;
@@ -97,21 +100,23 @@ export async function stopEnrollmentsFor(
     ) {
       continue;
     }
-    await supabase
+    const { error } = await supabase
       .from('sequence_enrollments')
       .update({ status: 'stopped', stop_reason: event })
       .eq('id', e.id);
+    if (error) throw new Error(error.message);
   }
 }
 
 /** Starts any active status_change sequences that target the new status. */
 export async function startSequencesForStatus(contactId: string, newStatusId: string) {
   const supabase = createAdminClient();
-  const { data: sequences } = await supabase
+  const { data: sequences, error } = await supabase
     .from('email_sequences')
     .select('id, start_status_ids')
     .eq('active', true)
     .eq('start_trigger', 'status_change');
+  if (error) throw new Error(error.message);
 
   for (const seq of sequences ?? []) {
     if ((seq.start_status_ids ?? []).includes(newStatusId)) {
@@ -134,7 +139,7 @@ export async function processDueEnrollments(limit = 2): Promise<{ sent: number; 
 
   for (const enrollment of (due ?? []) as any[]) {
     try {
-      const [{ data: sequence }, { data: steps }, { data: contact }] = await Promise.all([
+      const [sequenceResult, stepsResult, contactResult] = await Promise.all([
         supabase.from('email_sequences').select('*').eq('id', enrollment.sequence_id).single(),
         supabase
           .from('sequence_steps')
@@ -143,21 +148,29 @@ export async function processDueEnrollments(limit = 2): Promise<{ sent: number; 
           .order('step_order'),
         supabase.from('contacts').select('*').eq('id', enrollment.contact_id).single(),
       ]);
+      if (sequenceResult.error) throw new Error(sequenceResult.error.message);
+      if (stepsResult.error) throw new Error(stepsResult.error.message);
+      if (contactResult.error) throw new Error(contactResult.error.message);
+      const sequence = sequenceResult.data;
+      const steps = stepsResult.data;
+      const contact = contactResult.data;
 
       if (!sequence?.active || !contact?.email) {
-        await supabase
+        const { error } = await supabase
           .from('sequence_enrollments')
           .update({ status: 'stopped', stop_reason: !sequence?.active ? 'sequence_inactive' : 'no_email' })
           .eq('id', enrollment.id);
+        if (error) throw new Error(error.message);
         continue;
       }
 
       const nextStep = (steps ?? [])[enrollment.current_step];
       if (!nextStep) {
-        await supabase
+        const { error } = await supabase
           .from('sequence_enrollments')
           .update({ status: 'completed', next_send_at: null })
           .eq('id', enrollment.id);
+        if (error) throw new Error(error.message);
         continue;
       }
 
@@ -170,11 +183,12 @@ export async function processDueEnrollments(limit = 2): Promise<{ sent: number; 
         contactId: contact.id,
         sequenceId: sequence.id,
         sequenceStepId: nextStep.id,
+        deliveryKey: `sequence:${enrollment.id}:step:${nextStep.id}`,
       });
 
       if (!result.ok) {
         errors += 1;
-        await supabase
+        const { error } = await supabase
           .from('sequence_enrollments')
           .update(
             sequenceFailureUpdate(
@@ -183,12 +197,13 @@ export async function processDueEnrollments(limit = 2): Promise<{ sent: number; 
             )
           )
           .eq('id', enrollment.id);
+        if (error) throw new Error(error.message);
         continue;
       }
       sent += 1;
 
       const following = (steps ?? [])[enrollment.current_step + 1];
-      await supabase
+      const { error: advanceError } = await supabase
         .from('sequence_enrollments')
         .update(
           following
@@ -209,9 +224,10 @@ export async function processDueEnrollments(limit = 2): Promise<{ sent: number; 
               }
         )
         .eq('id', enrollment.id);
+      if (advanceError) throw new Error(advanceError.message);
     } catch (error: any) {
       errors += 1;
-      await supabase
+      const { error: failureUpdateError } = await supabase
         .from('sequence_enrollments')
         .update(
           sequenceFailureUpdate(
@@ -220,6 +236,7 @@ export async function processDueEnrollments(limit = 2): Promise<{ sent: number; 
           )
         )
         .eq('id', enrollment.id);
+      if (failureUpdateError) throw new Error(failureUpdateError.message);
     }
   }
 

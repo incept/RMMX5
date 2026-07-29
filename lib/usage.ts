@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { createAdminClient } from '@/lib/supabase/server';
 import { getSetting } from '@/lib/settings';
+import { logDebug } from '@/lib/debug-log';
 
 export async function reserveUsage(opts: {
   provider: string;
@@ -47,10 +48,14 @@ export async function finishUsage(
     }
     return true;
   } catch (finishError) {
-    console.error('Could not finish provider usage event', {
-      id,
-      status,
-      error: finishError instanceof Error ? finishError.message : String(finishError),
+    const message = finishError instanceof Error ? finishError.message : String(finishError);
+    await logDebug({
+      level: 'error',
+      source: 'usage:finish',
+      message: `Could not finish provider usage event: ${message}`,
+      context: { usage_event_id: id, intended_status: status },
+    }).catch(() => {
+      console.error('Could not finish provider usage event', { id, status, error: message });
     });
     return false;
   }

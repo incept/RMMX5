@@ -60,44 +60,37 @@ export async function GET(request: Request) {
       })
     );
 
-    let pruned: number | null = null;
-    let webhookPruned: any = null;
-    let operationalPruned: any = null;
-    let growthPruned: any = null;
-    try {
-      const { data, error: debugPruneError } = await admin.rpc('prune_debug_log', {
-        p_keep_days: 14,
-      });
-      if (debugPruneError) throw debugPruneError;
-      pruned = typeof data === 'number' ? data : null;
-      const { data: wh, error: webhookPruneError } = await admin
-        .rpc('prune_webhook_tables')
-        .maybeSingle();
-      if (webhookPruneError) throw webhookPruneError;
-      webhookPruned = wh ?? null;
-      const { data: operational, error: operationalPruneError } = await admin
-        .rpc('prune_operational_tables')
-        .maybeSingle();
-      if (operationalPruneError) throw operationalPruneError;
-      operationalPruned = operational ?? null;
-      const { data: growth, error: growthPruneError } = await admin.rpc('prune_growth_tables');
-      if (growthPruneError) throw growthPruneError;
-      growthPruned = growth ?? null;
-    } catch (error) {
-      await logDebug({
-        level: 'warn',
-        source: 'cron:retention',
-        message: `Retention failed: ${errorMessage(error)}`,
-      });
+    const retention: Record<string, unknown> = {};
+    const retentionTasks = [
+      ['debug', () => admin.rpc('prune_debug_log', { p_keep_days: 14 })],
+      ['webhooks', () => admin.rpc('prune_webhook_tables').maybeSingle()],
+      ['operational', () => admin.rpc('prune_operational_tables').maybeSingle()],
+      ['growth', () => admin.rpc('prune_growth_tables')],
+    ] as const;
+    for (const [name, run] of retentionTasks) {
+      try {
+        const result = await run();
+        if (result.error) {
+          retention[name] = { error: result.error.message };
+          await logDebug({
+            level: 'warn',
+            source: `cron:retention:${name}`,
+            message: result.error.message,
+          });
+        } else {
+          retention[name] = result.data ?? null;
+        }
+      } catch (error) {
+        const message = errorMessage(error);
+        retention[name] = { error: message };
+        await logDebug({ level: 'warn', source: `cron:retention:${name}`, message });
+      }
     }
 
     return NextResponse.json({
       ok: true,
       ...outcome,
-      pruned,
-      webhook_pruned: webhookPruned,
-      operational_pruned: operationalPruned,
-      growth_pruned: growthPruned,
+      retention,
       at: new Date().toISOString(),
     });
   } finally {

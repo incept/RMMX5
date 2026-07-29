@@ -19,7 +19,8 @@ export type JobKind =
   | 'email_delivery'
   | 'sms_delivery'
   | 'voicemail_delivery'
-  | 'notification_delivery';
+  | 'notification_delivery'
+  | 'contact_side_effects';
 
 function escapeHtml(value: unknown): string {
   return String(value)
@@ -47,7 +48,56 @@ export async function enqueueJob(
     })
     .select('id')
     .single();
-  if (error?.code === '23505') return { queued: false, duplicate: true };
+  if (error?.code === '23505') {
+    const existing = await supabase
+      .from('job_queue')
+      .select('id, status')
+      .eq('dedupe_key', dedupeKey)
+      .maybeSingle();
+    if (existing.error) {
+      await logDebug({
+        level: 'error',
+        source: 'job-queue',
+        message: `Could not resolve duplicate ${kind} job: ${existing.error.message}`,
+        context: { kind, dedupe_key: dedupeKey },
+      }).catch(() => {});
+      throw new Error(existing.error.message);
+    }
+    if (existing.data?.status === 'failed') {
+      const retried = await supabase
+        .from('job_queue')
+        .update({
+          status: 'pending',
+          attempt_count: 0,
+          available_at: new Date().toISOString(),
+          locked_at: null,
+          locked_by: null,
+          last_error: null,
+          completed_at: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', existing.data.id)
+        .eq('status', 'failed')
+        .select('id')
+        .maybeSingle();
+      if (retried.error) throw new Error(retried.error.message);
+      if (retried.data) {
+        return {
+          queued: true,
+          duplicate: false,
+          retried: true,
+          id: retried.data.id as string,
+          status: 'pending',
+        };
+      }
+    }
+    return {
+      queued: false,
+      duplicate: true,
+      id: existing.data?.id as string | undefined,
+      status: existing.data?.status as string | undefined,
+    };
+  }
   if (error || !data) {
     // Log before throwing. A rejected insert used to leave nothing behind: no
     // row, no debug entry, and a 500 whose body the caller could not parse. A
@@ -79,22 +129,16 @@ export async function enqueueJob(
 
 async function refreshSmsCampaign(campaignId: string) {
   const supabase = createAdminClient();
-  const { data } = await supabase
-    .from('sms_messages')
-    .select('status')
-    .eq('campaign_id', campaignId);
-  const statuses = (data ?? []).map((row) => row.status);
-  const sent = statuses.filter((status) => status === 'sent').length;
-  const failed = statuses.filter((status) => status === 'failed').length;
-  const queued = statuses.filter((status) => status === 'queued').length;
-  await supabase
-    .from('sms_campaigns')
-    .update({
-      status: queued ? 'sending' : failed && !sent ? 'failed' : 'sent',
-      sent_count: sent,
-      failed_count: failed,
-    })
-    .eq('id', campaignId);
+  const { error } = await supabase.rpc('refresh_sms_campaign_counts', {
+    p_campaign_id: campaignId,
+  });
+  if (error) throw new Error(error.message);
+}
+
+function nonRetryableError(message: string) {
+  const error = new Error(message) as Error & { retryable: boolean };
+  error.retryable = false;
+  return error;
 }
 
 async function handleJob(job: any, signal?: AbortSignal) {
@@ -119,6 +163,7 @@ async function handleJob(job: any, signal?: AbortSignal) {
         deadlineMs: 95_000,
         requestKey: `job:${job.id}:attempt:${job.attempt_count}`,
         signal,
+        jobId: String(job.id),
         // A focused run digs into one arrest of a multi-arrest person.
         focusDate: typeof payload.focusDate === 'string' ? payload.focusDate : undefined,
       }
@@ -167,18 +212,26 @@ async function handleJob(job: any, signal?: AbortSignal) {
   }
 
   if (job.kind === 'sms_delivery') {
-    const { data: existing } = await supabase
+    const { data: existing, error: readError } = await supabase
       .from('sms_messages')
       .select('status')
       .eq('id', String(payload.messageId))
       .maybeSingle();
-    if (existing?.status === 'sent') return;
+    if (readError) throw new Error(readError.message);
+    if (!existing || existing.status !== 'queued') return;
     const result = await sendSms(String(payload.phone), String(payload.body));
     const status = result.ok ? 'sent' : 'failed';
-    await supabase
+    const { data: updatedMessage, error: updateError } = await supabase
       .from('sms_messages')
       .update({ status, error: result.error ?? null })
-      .eq('id', String(payload.messageId));
+      .eq('id', String(payload.messageId))
+      .eq('status', 'queued')
+      .select('id')
+      .maybeSingle();
+    if (updateError) {
+      throw nonRetryableError(`SMS provider result could not be recorded: ${updateError.message}`);
+    }
+    if (!updatedMessage) return;
     await logActivity({
       contactId: String(payload.contactId),
       actorId: (payload.actorId as string | null) ?? null,
@@ -193,12 +246,19 @@ async function handleJob(job: any, signal?: AbortSignal) {
   }
 
   if (job.kind === 'voicemail_delivery') {
-    const { data: existing } = await supabase
+    const { data: existing, error: sendReadError } = await supabase
       .from('voicemail_sends')
-      .select('status')
+      .select('status, voicemail_drops ( lifecycle_status )')
       .eq('id', String(payload.sendId))
       .maybeSingle();
-    if (existing?.status === 'sent') return;
+    if (sendReadError) throw new Error(sendReadError.message);
+    if (
+      !existing ||
+      existing.status !== 'queued' ||
+      (existing as any).voicemail_drops?.lifecycle_status !== 'active'
+    ) {
+      return;
+    }
     const { data: signed, error: signError } = await supabase.storage
       .from('voicemail-audio')
       .createSignedUrl(String(payload.audioPath), 3600);
@@ -210,10 +270,28 @@ async function handleJob(job: any, signal?: AbortSignal) {
       audioUrl: signed.signedUrl,
     });
     const status = result.ok ? 'sent' : 'failed';
-    await supabase
+    const { data: updatedSend, error: sendUpdateError } = await supabase
       .from('voicemail_sends')
       .update({ status, error: result.error ?? null })
-      .eq('id', String(payload.sendId));
+      .eq('id', String(payload.sendId))
+      .eq('status', 'queued')
+      .select('id')
+      .maybeSingle();
+    if (sendUpdateError) {
+      throw nonRetryableError(
+        `Voicemail provider result could not be recorded: ${sendUpdateError.message}`
+      );
+    }
+    if (!updatedSend) {
+      await logDebug({
+        level: 'error',
+        source: 'job:voicemail_delivery',
+        message: 'Provider returned after the voicemail send was cancelled',
+        context: { send_id: payload.sendId, drop_id: payload.dropId, provider_ok: result.ok },
+        contactId: String(payload.contactId),
+      });
+      return;
+    }
     await logActivity({
       contactId: String(payload.contactId),
       actorId: (payload.actorId as string | null) ?? null,
@@ -227,12 +305,13 @@ async function handleJob(job: any, signal?: AbortSignal) {
   }
 
   if (job.kind === 'notification_delivery') {
-    const { data: existing } = await supabase
+    const { data: existing, error: readError } = await supabase
       .from('notifications_log')
       .select('status')
       .eq('id', String(payload.notificationId))
       .maybeSingle();
-    if (existing?.status === 'sent') return;
+    if (readError) throw new Error(readError.message);
+    if (!existing || existing.status === 'sent') return;
     let result: { ok: boolean; error?: string };
     if (payload.channel === 'email' && payload.destination) {
       result = await sendViaEmailit({
@@ -245,11 +324,50 @@ async function handleJob(job: any, signal?: AbortSignal) {
     } else {
       result = { ok: false, error: `No ${String(payload.channel)} destination on file` };
     }
-    await supabase
+    const { error: updateError } = await supabase
       .from('notifications_log')
       .update({ status: result.ok ? 'sent' : 'failed', error: result.error ?? null })
       .eq('id', String(payload.notificationId));
+    if (updateError) {
+      throw nonRetryableError(
+        `Notification provider result could not be recorded: ${updateError.message}`
+      );
+    }
     if (!result.ok) throw new Error(result.error ?? 'Notification delivery failed');
+    return;
+  }
+
+  if (job.kind === 'contact_side_effects') {
+    const contactId = String(payload.contactId);
+    const { data: contact, error } = await supabase
+      .from('contacts')
+      .select('*, statuses ( name, color, is_client_status )')
+      .eq('id', contactId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!contact) return;
+    const { fireNotification } = await import('@/lib/notifications');
+    if (payload.event === 'link_status_change') {
+      await fireNotification(
+        'link_status_change',
+        contact,
+        { link: String(payload.link), link_status: String(payload.linkStatus) },
+        { dedupeKey: `contact-link-status:${job.id}` }
+      );
+    } else {
+      const toStatusId =
+        typeof payload.toStatusId === 'string' && payload.toStatusId ? payload.toStatusId : undefined;
+      const { stopEnrollmentsFor, startSequencesForStatus } = await import('@/lib/sequence-runner');
+      await stopEnrollmentsFor(contactId, 'status_change', toStatusId);
+      if (toStatusId) await startSequencesForStatus(contactId, toStatusId);
+      const statusName = (contact as any).statuses?.name ?? 'none';
+      await fireNotification(
+        'status_change',
+        contact,
+        { status: statusName },
+        { dedupeKey: `contact-status:${job.id}` }
+      );
+    }
     return;
   }
 
@@ -323,16 +441,14 @@ async function finishJob(job: any, worker: string, failure?: unknown) {
   // says WHY and invites a re-run. Best-effort: this write failing must not
   // mask the recorded job failure.
   if (terminal && job.kind === 'deep_search' && job.payload?.contactId) {
-    const { error: stampError } = await supabase
-      .from('contacts')
-      .update({
-        deep_search_queued_at: null,
-        search_flag: `the last deep search failed after ${job.attempt_count} attempt${
-          job.attempt_count === 1 ? '' : 's'
-        } (${message.slice(0, 300)})`,
-        search_flagged_at: new Date().toISOString(),
-      })
-      .eq('id', String(job.payload.contactId));
+    const failureText = `the last deep search failed after ${job.attempt_count} attempt${
+      job.attempt_count === 1 ? '' : 's'
+    } (${message.slice(0, 300)})`;
+    const { error: stampError } = await supabase.rpc('fail_deep_search_state', {
+      p_contact_id: String(job.payload.contactId),
+      p_job_id: String(job.id),
+      p_message: failureText,
+    });
     if (stampError) {
       await logDebug({
         level: 'warn',

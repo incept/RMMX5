@@ -2,8 +2,6 @@ import { NextResponse } from 'next/server';
 import { requireUser, requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { logActivity } from '@/lib/activity';
-import { fireNotification } from '@/lib/notifications';
-import { startSequencesForStatus, stopEnrollmentsFor } from '@/lib/sequence-runner';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 
@@ -98,27 +96,35 @@ export async function PATCH(request: Request, { params }: Params) {
     }
   }
 
-  const { data: after, error } = await admin
-    .from('contacts')
-    .update(updates)
-    .eq('id', id)
-    .select('*, statuses ( name, color, is_client_status )')
-    .single();
-  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
-
   if (statusChanged) {
-    const statusName = (after as any).statuses?.name ?? 'none';
-    await logActivity({
-      contactId: id,
-      actorId: auth.profile.id,
-      type: 'status_change',
-      description: `Status changed to "${statusName}"`,
-      meta: { from: before.status_id, to: updates.status_id },
+    const result = await admin.rpc('update_contact_status_atomic', {
+      p_contact_id: id,
+      p_expected_updated_at: before.updated_at,
+      p_updates: updates,
+      p_actor_id: auth.profile.id,
     });
-    await stopEnrollmentsFor(id, 'status_change', updates.status_id ?? undefined);
-    if (updates.status_id) await startSequencesForStatus(id, updates.status_id);
-    await fireNotification('status_change', after, { status: statusName });
+    if (result.error) {
+      const conflict = result.error.code === '40001';
+      return NextResponse.json(
+        { error: conflict ? 'This contact changed in another session. Reload and try again.' : result.error.message },
+        { status: conflict ? 409 : 400 }
+      );
+    }
   } else {
+    const { data: updated, error } = await admin
+      .from('contacts')
+      .update(updates)
+      .eq('id', id)
+      .eq('updated_at', before.updated_at)
+      .select('id')
+      .maybeSingle();
+    if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+    if (!updated) {
+      return NextResponse.json(
+        { error: 'This contact changed in another session. Reload and try again.' },
+        { status: 409 }
+      );
+    }
     await logActivity({
       contactId: id,
       actorId: auth.profile.id,
@@ -127,6 +133,12 @@ export async function PATCH(request: Request, { params }: Params) {
     });
   }
 
+  const { data: after, error: readError } = await admin
+    .from('contacts')
+    .select('*, statuses ( name, color, is_client_status )')
+    .eq('id', id)
+    .single();
+  if (readError) return NextResponse.json({ error: readError.message }, { status: 400 });
   return NextResponse.json({ contact: after });
 }
 

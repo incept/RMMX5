@@ -1082,9 +1082,14 @@ test('a terminally failed deep search cannot stay amber forever', async () => {
   // its final attempt and parked in the job table; nothing told the contact,
   // so the grid showed a spinner state with the error invisible.
   const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
+  const migration = await readFile(
+    new URL('../supabase/migrations/0027_selected_audit_hardening.sql', import.meta.url),
+    'utf8'
+  );
   assert.match(queue, /terminal && job\.kind === 'deep_search'/);
-  assert.match(queue, /deep_search_queued_at: null/);
-  assert.match(queue, /search_flag: /, 'the failure reason must surface in the Link Data banner');
+  assert.match(queue, /fail_deep_search_state/);
+  assert.match(migration, /deep_search_queued_at = null/);
+  assert.match(migration, /search_flag = left/, 'the failure reason must surface in the Link Data banner');
 
   // Belt and braces: even if that write is lost, the UI treats a queued stamp
   // older than 30 minutes as expired (a live run cannot outlast two 95s
@@ -1520,8 +1525,8 @@ test('a link a human removed stays removed', async () => {
     'utf8'
   );
   // Both removal shapes are remembered: clearing a slot and replacing its URL.
-  const remembered = route.match(/await rememberRemoval\(admin, id, prev\.url\)/g) ?? [];
-  assert.equal(remembered.length, 2);
+  assert.match(route, /removedUrls\.push\(prev\.url\)/);
+  assert.match(route, /removedUrls\.map\(\(url\) => rememberRemoval\(admin, id, url\)\)/);
   assert.match(route, /status: 'rejected'/);
   // And the auto search consults that memory before placing a link.
   const intake = await readFile(new URL('../lib/lead-intake.ts', import.meta.url), 'utf8');
@@ -1555,10 +1560,13 @@ test('the grid shows deep-search state and can start a run from it', async () =>
   );
   assert.match(route, /deep_search_queued_at: new Date\(\)\.toISOString\(\)/);
   const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
-  assert.match(
-    engine,
-    /deep_searched_at: new Date\(\)\.toISOString\(\), deep_search_queued_at: null/
+  const hardening = await readFile(
+    new URL('../supabase/migrations/0027_selected_audit_hardening.sql', import.meta.url),
+    'utf8'
   );
+  assert.match(engine, /finish_deep_search_state/);
+  assert.match(hardening, /deep_searched_at = now\(\)/);
+  assert.match(hardening, /deep_search_queued_at = null/);
 });
 
 test('deleting a status moves its contacts where the admin chose', async () => {

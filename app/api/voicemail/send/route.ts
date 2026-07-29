@@ -29,6 +29,7 @@ export async function POST(request: Request) {
     .from('voicemail_drops')
     .select('id, name, audio_path')
     .eq('id', body.dropId)
+    .eq('lifecycle_status', 'active')
     .single();
   if (!drop) return NextResponse.json({ error: 'Drop not found' }, { status: 404 });
 
@@ -90,6 +91,7 @@ export async function POST(request: Request) {
         'voicemail_delivery',
         {
           sendId: sendRow.id,
+          dropId: drop.id,
           dropName: drop.name,
           audioPath: drop.audio_path,
           contactId: contact.id,
