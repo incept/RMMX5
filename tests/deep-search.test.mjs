@@ -1155,7 +1155,7 @@ test('the browser tier can run through a remote worker when local Chrome is abse
   assert.match(worker, /192\\\.168\\\./);
   // The UA override is load-bearing (a "HeadlessChrome" UA is served 403);
   // worker and CRM must stay in step.
-  const ua = /Chrome\/138\.0\.0\.0 Safari\/537\.36/;
+  const ua = /Chrome\/151\.0\.0\.0 Safari\/537\.36/;
   assert.match(worker, ua);
   assert.match(browser, ua);
 });

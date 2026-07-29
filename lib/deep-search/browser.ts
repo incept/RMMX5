@@ -42,7 +42,7 @@ import { readResponseText } from '@/lib/request-limits';
 
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
-  'Chrome/138.0.0.0 Safari/537.36';
+  'Chrome/151.0.0.0 Safari/537.36';
 
 const IDLE_SHUTDOWN_MS = 60_000;
 const MAX_CONCURRENT_PAGES = 2;
