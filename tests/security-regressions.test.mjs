@@ -235,7 +235,7 @@ test('manual searches are admin-only durable jobs', async () => {
   ]) {
     const source = await readFile(new URL(path, import.meta.url), 'utf8');
     assert.match(source, /requireAdmin/);
-    assert.match(source, /enqueueJob/);
+    assert.match(source, /enqueue(?:DeepSearch)?Job/);
     assert.doesNotMatch(source, /runDeepSearch\s*\(/);
     assert.doesNotMatch(source, /runAutoSearchForContact\s*\(/);
   }
@@ -404,8 +404,10 @@ test('sequence and deep-search workers use stable generation identities', async 
   assert.match(sequence, /deliveryKey: `sequence:\$\{enrollment\.id\}:step:\$\{nextStep\.id\}`/);
   assert.match(sequence, /if \(advanceError\) throw new Error/);
   assert.match(queue, /jobId: String\(job\.id\)/);
+  assert.match(queue, /jobWorker: worker/);
+  assert.match(queue, /jobAttempt: Number\(job\.attempt_count\)/);
   assert.match(engine, /if \(opts\?\.signal\?\.aborted\)/);
-  assert.match(engine, /finish_deep_search_state/);
+  assert.match(engine, /finish_deep_search_attempt/);
 });
 
 test('voicemail lifecycle is quota-bound and deletion cancels delivery', async () => {
