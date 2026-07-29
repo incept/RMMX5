@@ -1908,6 +1908,66 @@ test('Admin Debug shows read failures instead of claiming the log is empty', asy
 test('runtime setup documents the current migration and Node requirements', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
   assert.match(readme, /highest-numbered migration shipped/);
-  assert.match(readme, /0028_deep_search_attempt_state\.sql/);
+  assert.match(readme, /0029_deep_search_partial_state\.sql/);
   assert.match(readme, /22\.19\.0 or newer/);
+});
+
+test('provider error envelopes cannot become successful empty discovery', async () => {
+  const serp = await readFile(
+    new URL('../lib/integrations/brightdata.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(serp, /BrightData .* SERP provider error/);
+  assert.match(serp, /did not contain an organic-results array/);
+  assert.doesNotMatch(serp, /data\?\.organic \?\? data\?\.organic_results \?\? \[\]/);
+
+  const fetchPage = await readFile(
+    new URL('../lib/deep-search/fetch-page.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(fetchPage, /!res\.ok \|\| unlockerPageFailure \|\| brdError/);
+  assert.match(fetchPage, /!providerHeaders && !jsonError/);
+  assert.match(fetchPage, /provider error envelope/);
+});
+
+test('partial deep-search evidence is retained and explicitly flagged', async () => {
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /const hasPartialResults = candidates > 0 \|\| factsChanged/);
+  assert.match(source, /if \(!hasPartialResults\) throw new Error\(message\)/);
+  assert.match(source, /confirm them, then run a secondary search/);
+  assert.match(source, /healthWarning/);
+});
+
+test('classification reads and fact writes cannot silently default to empty state', async () => {
+  const source = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /Could not load contact facts for SERP classification/);
+  assert.match(source, /Could not load confirmed links for SERP classification/);
+  assert.match(source, /throw new Error\(`Could not persist facts learned from SERP results/);
+});
+
+test('partial link writes stay visible instead of clearing the search flag', async () => {
+  const source = await readFile(new URL('../lib/lead-intake.ts', import.meta.url), 'utf8');
+  assert.match(source, /partialFailures\.push\(`link slot/);
+  assert.match(source, /Partial search —/);
+  assert.match(source, /Failed to persist search flag/);
+});
+
+test('focused success preserves an earlier sibling warning until a clean secondary search', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/0029_deep_search_partial_state.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /v_preserve_existing_flag/);
+  assert.match(migration, /nullif\(v_payload ->> 'focusDate', ''\) is not null/);
+  assert.match(migration, /concat_ws\(' \| '/);
+  assert.match(migration, /when v_preserve_existing_flag then c\.deep_search_flag_job_id/);
+});
+
+test('workers abort before an extended lease can be reclaimed', async () => {
+  const source = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
+  assert.match(source, /const JOB_LEASE_SECONDS = 300/);
+  assert.match(source, /const JOB_LEASE_ABORT_MARGIN_SECONDS = 60/);
+  assert.match(source, /lastSuccessfulHeartbeat/);
+  assert.match(source, /aborted before another worker could reclaim it/);
+  assert.match(source, /p_lease_seconds: JOB_LEASE_SECONDS/);
 });

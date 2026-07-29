@@ -581,7 +581,24 @@ async function withJobHeartbeat<T>(
   let stopped = false;
   let heartbeatRunning = false;
   let lostLease: Error | null = null;
+  let lastSuccessfulHeartbeat = Date.now();
   const controller = new AbortController();
+  const abortForLeaseRisk = (message: string) => {
+    if (lostLease) return;
+    lostLease = new Error(message);
+    controller.abort(lostLease);
+    void logDebug({
+      level: 'error',
+      source: `job:${job.kind}`,
+      message,
+      context: {
+        job_id: job.id,
+        worker,
+        attempt: job.attempt_count,
+        last_successful_heartbeat_at: new Date(lastSuccessfulHeartbeat).toISOString(),
+      },
+    });
+  };
   const timer = setInterval(() => {
     if (stopped || heartbeatRunning) return;
     heartbeatRunning = true;
@@ -632,6 +649,8 @@ async function withJobHeartbeat<T>(
               context: { job_id: job.id, worker, attempt: job.attempt_count },
             });
           }
+        } else {
+          lastSuccessfulHeartbeat = Date.now();
         }
       } catch (heartbeatError) {
         await logDebug({
@@ -646,6 +665,21 @@ async function withJobHeartbeat<T>(
     })();
   }, 30_000);
   timer.unref?.();
+  // The renewal request itself can hang. Keep a separate watchdog so a worker
+  // stops paid/provider work before its database lease can be reclaimed.
+  const leaseWatchdog = setInterval(() => {
+    if (
+      !stopped &&
+      Date.now() - lastSuccessfulHeartbeat >=
+        (JOB_LEASE_SECONDS - JOB_LEASE_ABORT_MARGIN_SECONDS) * 1000
+    ) {
+      abortForLeaseRisk(
+        `Could not confirm job lease for ${JOB_LEASE_SECONDS - JOB_LEASE_ABORT_MARGIN_SECONDS}s; ` +
+          'aborted before another worker could reclaim it'
+      );
+    }
+  }, 15_000);
+  leaseWatchdog.unref?.();
   try {
     const result = await run(controller.signal);
     if (lostLease) throw lostLease;
@@ -653,8 +687,12 @@ async function withJobHeartbeat<T>(
   } finally {
     stopped = true;
     clearInterval(timer);
+    clearInterval(leaseWatchdog);
   }
 }
+
+const JOB_LEASE_SECONDS = 300;
+const JOB_LEASE_ABORT_MARGIN_SECONDS = 60;
 
 /** Claims a deliberately small batch so one cron invocation has a hard ceiling. */
 export async function processQueuedJobs(limit = 1) {
@@ -663,7 +701,7 @@ export async function processQueuedJobs(limit = 1) {
   const { data: jobs, error } = await supabase.rpc('claim_jobs', {
     p_worker: worker,
     p_limit: Math.min(Math.max(limit, 1), 2),
-    p_lease_seconds: 150,
+    p_lease_seconds: JOB_LEASE_SECONDS,
   });
   if (error) throw new Error(error.message);
 
