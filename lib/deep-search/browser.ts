@@ -9,7 +9,8 @@
 import { type Browser, type Page } from 'puppeteer-core';
 import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
-import { assertPublicWebUrl } from '@/lib/public-url';
+import { assertPublicWebUrl, parsePublicHttpsUrl } from '@/lib/public-url';
+import { readResponseText } from '@/lib/request-limits';
 
 /**
  * Headless Chrome, for the hosts that only a real browser can reach.
@@ -173,6 +174,79 @@ async function resolveExecutable(): Promise<string | null> {
   return null;
 }
 
+/**
+ * The remote browser worker (browser-worker/server.mjs on a VPS with Chrome).
+ * Configured beside the local tier in the same probe_browser settings blob;
+ * used only when no local executable exists, so a Chrome-capable host never
+ * pays a network hop it doesn't need.
+ */
+async function resolveRemote(): Promise<{ url: URL; secret: string } | null> {
+  const cfg = await getSetting<{
+    enabled?: string | boolean;
+    remote_url?: string;
+    remote_secret?: string;
+  }>('probe_browser');
+  if (cfg.enabled === false || cfg.enabled === 'false') return null;
+  const secret = cfg.remote_secret?.trim();
+  if (!cfg.remote_url || !secret) return null;
+  try {
+    // HTTPS-only and public, enforced at save AND at use: probe URLs carry
+    // client names and must never transit plaintext or point back into the
+    // host's own network.
+    return { url: parsePublicHttpsUrl(cfg.remote_url), secret };
+  } catch {
+    return null;
+  }
+}
+
+const REMOTE_FETCH_TIMEOUT_MS = 60_000;
+
+async function fetchWithRemoteBrowser(
+  url: string,
+  signal?: AbortSignal
+): Promise<BrowserFetchResult> {
+  const remote = await resolveRemote();
+  if (!remote) {
+    // Same wording the callers already key their logs on: this tier is not
+    // set up here, neither locally nor remotely.
+    return { ok: false, unavailable: true, reason: 'no Chrome executable configured or found' };
+  }
+  try {
+    const signals = [AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS)];
+    if (signal) signals.push(signal);
+    const res = await fetch(new URL('/fetch', remote.url), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${remote.secret}`,
+      },
+      body: JSON.stringify({ url }),
+      signal: AbortSignal.any(signals),
+    });
+    const bodyText = await readResponseText(res, MAX_RENDERED_HTML_BYTES + 64 * 1024);
+    let data: any;
+    try {
+      data = JSON.parse(bodyText);
+    } catch {
+      return { ok: false, reason: `remote browser returned non-JSON (HTTP ${res.status})` };
+    }
+    if (!res.ok || data?.ok !== true) {
+      return {
+        ok: false,
+        reason: `remote browser: ${String(data?.reason ?? `HTTP ${res.status}`).slice(0, 300)}`,
+      };
+    }
+    const html = typeof data.html === 'string' ? data.html : '';
+    if (!html) return { ok: false, reason: 'remote browser returned an empty page' };
+    if (Buffer.byteLength(html, 'utf8') > MAX_RENDERED_HTML_BYTES) {
+      return { ok: false, reason: 'remote browser page exceeded the rendered-size cap' };
+    }
+    return { ok: true, html, status: Number.isInteger(data.status) ? data.status : 200 };
+  } catch (e: any) {
+    return { ok: false, reason: `remote browser fetch failed: ${e?.message ?? 'unknown error'}` };
+  }
+}
+
 let availabilityCache: { value: boolean; at: number } | null = null;
 const AVAILABILITY_TTL_MS = 60_000;
 
@@ -189,7 +263,7 @@ export async function browserAvailable(): Promise<boolean> {
   if (availabilityCache && Date.now() - availabilityCache.at < AVAILABILITY_TTL_MS) {
     return availabilityCache.value;
   }
-  const value = (await resolveExecutable()) !== null;
+  const value = (await resolveExecutable()) !== null || (await resolveRemote()) !== null;
   availabilityCache = { value, at: Date.now() };
   return value;
 }
@@ -375,7 +449,10 @@ export async function fetchWithBrowser(
   if (signal?.aborted) return { ok: false, reason: 'browser fetch cancelled' };
   const executablePath = await resolveExecutable();
   if (!executablePath) {
-    return { ok: false, unavailable: true, reason: 'no Chrome executable configured or found' };
+    // No local Chrome — hand the fetch to the remote worker if one is
+    // configured. Same result shape, so callers cannot tell the difference,
+    // and the unavailable outcome only remains when NEITHER exists.
+    return fetchWithRemoteBrowser(url, signal);
   }
 
   let browser: Browser;

@@ -1128,6 +1128,38 @@ test('deep search can start from the panel header', async () => {
   assert.match(panel, /onClick=\{\(\) => runDeepSearch\(\)\}/);
 });
 
+test('the browser tier can run through a remote worker when local Chrome is absent', async () => {
+  // Phase 2 of the recovery: the CRM's cloud host cannot run Chrome, so the
+  // tier hands fetches to browser-worker/server.mjs on a VPS. Same result
+  // shape, so fetch-page and the engine are untouched — and the PR #60 skip
+  // now only fires when NEITHER local Chrome nor a remote worker exists.
+  const browser = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
+  assert.match(browser, /!== null \|\| \(await resolveRemote\(\)\) !== null/);
+  assert.match(browser, /return fetchWithRemoteBrowser\(url, signal\)/);
+  // Probe URLs carry client names: the worker address must be public HTTPS,
+  // enforced at use as well as at save, and responses are size-capped.
+  assert.match(browser, /parsePublicHttpsUrl\(cfg\.remote_url\)/);
+  assert.match(browser, /readResponseText\(res, MAX_RENDERED_HTML_BYTES/);
+
+  const settings = await readFile(
+    new URL('../app/api/admin/settings/route.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(settings, /Remote worker URL must be a public https/);
+
+  const worker = await readFile(new URL('../browser-worker/server.mjs', import.meta.url), 'utf8');
+  // The worker must never be an open proxy: constant-time auth, and only
+  // public http(s) targets — loopback/private/link-local refused.
+  assert.match(worker, /timingSafeEqual/);
+  assert.match(worker, /isFetchableUrl/);
+  assert.match(worker, /192\\\.168\\\./);
+  // The UA override is load-bearing (a "HeadlessChrome" UA is served 403);
+  // worker and CRM must stay in step.
+  const ua = /Chrome\/138\.0\.0\.0 Safari\/537\.36/;
+  assert.match(worker, ua);
+  assert.match(browser, ua);
+});
+
 test('a browser-only site on a Chrome-less host is skipped, never billed', async () => {
   // The production regression: needs_browser sites skip the free HTTP tiers by
   // design, Chrome does not exist on the shared host, and the fall-through

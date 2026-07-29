@@ -54,13 +54,19 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
     key: 'probe_browser',
     title: 'Deep-search browser (headless Chrome)',
     hint:
-      'Reads record sites with a real browser, which is the only way past hosts that fingerprint the TLS handshake — arrests.org among them. It reads the sites themselves rather than a search index, so a booking is found when it is published rather than when Google gets round to crawling it. Needs Chrome or Chromium installed on the server (Ubuntu: apt install chromium-browser). Leave the path blank to auto-detect the usual locations; set enabled to false to turn the tier off.',
+      'Reads record sites with a real browser, which is the only way past hosts that fingerprint the TLS handshake — arrests.org among them. It reads the sites themselves rather than a search index, so a booking is found when it is published rather than when Google gets round to crawling it. If Chrome is installed on this server it is used directly (leave the path blank to auto-detect). On a host that cannot run Chrome, run the browser worker (browser-worker/ in the repo) on a small VPS and enter its HTTPS address and secret below — the tier then fetches through it with no other change. Set enabled to false to turn the whole tier off.',
     fields: [
       {
         key: 'executable_path',
         label: 'Chrome/Chromium path (blank = auto-detect)',
         placeholder: '/usr/bin/chromium-browser',
       },
+      {
+        key: 'remote_url',
+        label: 'Remote worker URL (blank = local Chrome only)',
+        placeholder: 'https://browser.example.com',
+      },
+      { key: 'remote_secret', label: 'Remote worker secret', secret: true },
       { key: 'enabled', label: 'Enabled (false turns the tier off)', placeholder: 'true' },
     ],
   },
