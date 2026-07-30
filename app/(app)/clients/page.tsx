@@ -11,7 +11,30 @@ import { useRealtimeRefresh } from '@/lib/use-realtime-refresh';
 
 const PAGE_SIZE = 100;
 
-/** Clients view: stages, service countdown, revenue projection, quick panel access. */
+// Removal links by status, each count in the status's colour so admins read the
+// removal mix at a glance: Live red, Requested orange, Removed green.
+const LINK_STATS = [
+  { key: 'live', color: '#EF4444', label: 'Live' },
+  { key: 'requested', color: '#F59E0B', label: 'Requested' },
+  { key: 'removed', color: '#22C55E', label: 'Removed' },
+] as const;
+
+function LinkStats({ links }: { links?: { status: string }[] | null }) {
+  if (!links || links.length === 0) return <span className="text-gray-300">—</span>;
+  const counts: Record<string, number> = { live: 0, requested: 0, removed: 0 };
+  for (const l of links) if (l.status in counts) counts[l.status] += 1;
+  return (
+    <span className="inline-flex items-center gap-2 font-mono text-sm font-semibold tabular-nums">
+      {LINK_STATS.map(({ key, color, label }) => (
+        <span key={key} style={{ color }} title={`${counts[key]} ${label}`}>
+          {counts[key]}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** Clients view: stages, service countdown, link-status mix, quick panel access. */
 export default function ClientsPage() {
   const supabase = useMemo(() => createClient(), []);
   const { isAdmin } = useMyRole(); // revenue figures are admin-only
@@ -113,9 +136,10 @@ export default function ClientsPage() {
               <th className="grid-th">Stage</th>
               <th className="grid-th">Signed</th>
               <th className="grid-th">Countdown</th>
-              <th className="grid-th">Rep Score</th>
+              <th className="grid-th" title="Removal links — Live / Requested / Removed">
+                Link Stats
+              </th>
               {isAdmin && <th className="grid-th">Gross</th>}
-              {isAdmin && <th className="grid-th">Projected Revenue</th>}
               <th className="grid-th">Source</th>
               <th className="grid-th">Email</th>
               <th className="grid-th">Phone</th>
@@ -166,17 +190,12 @@ export default function ClientsPage() {
                       </span>
                     )}
                   </td>
-                  <td className="grid-td font-mono">{c.reputation_score ?? ''}</td>
+                  <td className="grid-td">
+                    <LinkStats links={c.contact_links} />
+                  </td>
                   {isAdmin && (
                     <td className="grid-td font-mono text-green-700">
                       {c.gross_revenue > 0 ? `$${Number(c.gross_revenue).toLocaleString()}` : ''}
-                    </td>
-                  )}
-                  {isAdmin && (
-                    <td className="grid-td font-mono text-green-700">
-                      {c.revenue_projection > 0
-                        ? `$${Number(c.revenue_projection).toLocaleString()}`
-                        : ''}
                     </td>
                   )}
                   <td className="grid-td text-gray-500">{c.source ?? ''}</td>
@@ -187,7 +206,7 @@ export default function ClientsPage() {
             })}
             {clients.length === 0 && (
               <tr>
-                <td colSpan={isAdmin ? 11 : 9} className="px-4 py-12 text-center text-sm text-gray-400">
+                <td colSpan={isAdmin ? 10 : 9} className="px-4 py-12 text-center text-sm text-gray-400">
                   No clients yet — set a contact's status to a client status (e.g. "Client").
                 </td>
               </tr>

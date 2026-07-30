@@ -284,6 +284,17 @@ export default function ContactPanel({
     }
   }
 
+  // Editing "days left" (re)starts the countdown at N days from today: N becomes
+  // the service period and client_since resets to now, so the field shows exactly
+  // what was typed. Blank on blur changes nothing (Stop clears the countdown).
+  function commitDaysLeft(raw: string) {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    const v = Number(trimmed);
+    if (!Number.isInteger(v) || v < 0 || v > 999) return;
+    patchContact({ client_since: new Date().toISOString(), service_days: v });
+  }
+
   async function saveLinks() {
     setBusy('links');
     const res = await fetch(`/api/contacts/${contactId}/links`, {
@@ -1046,18 +1057,6 @@ export default function ContactPanel({
                       </select>
                     </div>
                     <div>
-                      <label className="label">Service period (days)</label>
-                      <input
-                        className="input"
-                        type="number"
-                        value={contact.service_days ?? ''}
-                        placeholder={String(defaultServiceDays)}
-                        onChange={(e) =>
-                          setField('service_days', e.target.value ? Number(e.target.value) : null)
-                        }
-                      />
-                    </div>
-                    <div>
                       <label className="label">Signed date</label>
                       <input
                         className="input"
@@ -1084,40 +1083,6 @@ export default function ContactPanel({
                         />
                       </div>
                     )}
-                    <div>
-                      <label className="label">Service countdown</label>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-sm text-gray-600">
-                          {daysLeft != null
-                            ? daysLeft <= 0
-                              ? 'Expired'
-                              : `${daysLeft} days left`
-                            : 'Not started'}
-                        </span>
-                        <button
-                          type="button"
-                          className="btn py-1 text-xs"
-                          disabled={busy === 'save'}
-                          onClick={() => patchContact({ client_since: new Date().toISOString() })}
-                        >
-                          {contact.client_since ? 'Restart' : 'Start'}
-                        </button>
-                        {contact.client_since && (
-                          <button
-                            type="button"
-                            className="btn py-1 text-xs"
-                            disabled={busy === 'save'}
-                            onClick={() => patchContact({ client_since: null })}
-                          >
-                            Stop
-                          </button>
-                        )}
-                      </div>
-                      <p className="mt-1 text-[11px] text-gray-400">
-                        Runs {contact.service_days ?? defaultServiceDays} days from when you start it — set the
-                        length above.
-                      </p>
-                    </div>
                   </>
                 )}
                 {customInputs('contact')}
@@ -1331,6 +1296,43 @@ export default function ContactPanel({
                   </div>
                 )}
               </div>
+
+              {isClient && (
+                <div className="rounded-lg border border-gray-200 bg-surface px-3 py-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-semibold tracking-wide text-gray-500 uppercase">
+                      Service countdown
+                    </span>
+                    <input
+                      key={`${contact.client_since}-${contact.service_days}`}
+                      type="number"
+                      min={0}
+                      max={999}
+                      defaultValue={daysLeft ?? ''}
+                      placeholder="days"
+                      className="w-20 rounded-lg border border-gray-200 bg-surface px-2 py-1 text-sm outline-none focus:border-brand-500"
+                      onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+                      onBlur={(e) => commitDaysLeft(e.target.value)}
+                    />
+                    <span className="text-sm text-gray-600">
+                      {daysLeft != null ? (daysLeft <= 0 ? 'Expired' : 'days left') : 'not started'}
+                    </span>
+                    {contact.client_since && (
+                      <button
+                        type="button"
+                        className="btn py-1 text-xs"
+                        disabled={busy === 'save'}
+                        onClick={() => patchContact({ client_since: null })}
+                      >
+                        Stop
+                      </button>
+                    )}
+                  </div>
+                  <p className="mt-1 text-[11px] text-gray-400">
+                    Type the days remaining to (re)start the countdown from today.
+                  </p>
+                </div>
+              )}
 
               <div className="space-y-1.5">
                 {links.map((link, i) => (
