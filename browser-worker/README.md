@@ -62,14 +62,21 @@ curl -s localhost:8787/healthz   # → {"ok":true,"chrome":true}
 
 The worker binds to `127.0.0.1` on purpose — never expose it directly. Probe
 URLs contain client names, so the hop from the CRM must be HTTPS. Caddy gives
-you automatic certificates:
+you automatic certificates. It is not in Ubuntu's default repos, so add the
+official one first:
 
 ```bash
-sudo apt install -y caddy
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install -y caddy
 ```
 
-Point a DNS A record (e.g. `browser.removemymugshot.org`) at the VPS IP, then
-set `/etc/caddy/Caddyfile` to:
+Point a DNS A record (e.g. `browser.removemymugshot.org`) at the VPS IP **and
+wait for it to resolve** (`getent hosts browser.removemymugshot.org` should
+return the VPS IP) before reloading Caddy — the certificate is issued over
+port 80, so the name must already point here. Then set `/etc/caddy/Caddyfile`
+to:
 
 ```
 browser.removemymugshot.org {
@@ -79,7 +86,15 @@ browser.removemymugshot.org {
 
 ```bash
 sudo systemctl reload caddy
-sudo ufw allow 80,443/tcp && sudo ufw enable   # if using ufw
+```
+
+If you use the `ufw` firewall, allow SSH **before** enabling it or you will lock
+yourself out of the box, then open the web ports:
+
+```bash
+sudo ufw allow OpenSSH
+sudo ufw allow 80,443/tcp
+sudo ufw enable
 ```
 
 ## Point the CRM at it
