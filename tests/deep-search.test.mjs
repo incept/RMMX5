@@ -2166,3 +2166,27 @@ test('the contacts grid hands its list to the panel for navigation', async () =>
   assert.match(page, /siblingIds=\{pageRows\.map\(\(c\) => c\.id\)\}/);
   assert.match(page, /onNavigate=\{setSelectedId\}/);
 });
+
+test('a deep search skips re-probing sites that already hold a confirmed record', async () => {
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  // Reuses the confirmed-record URL set (confirmed candidates + accepted link
+  // slots); fullReprobe short-circuits the gate so a full sweep still happens.
+  assert.match(
+    engine,
+    /siteHasConfirmedRecord = \(domain: string\) =>\s*\n?\s*!opts\?\.fullReprobe && confirmedUrls\.some/
+  );
+  // The skip lives in the probe target loop and counts what it skipped.
+  const loopAt = engine.indexOf('for (const site of roundSites)');
+  const loopBody = engine.slice(loopAt, loopAt + 900);
+  assert.match(loopBody, /if \(siteHasConfirmedRecord\(site\.domain\)\) \{/);
+  assert.match(loopBody, /confirmedSkips \+= 1/);
+  // Mining a confirmed page for OTHER arrests must stay — the skip is only here,
+  // not in the mining loop, so we still harvest new bookings from a known page.
+  const mineAt = engine.indexOf('minedPages += 1');
+  assert.ok(mineAt > 0);
+  assert.doesNotMatch(
+    engine.slice(mineAt, mineAt + 600),
+    /siteHasConfirmedRecord/,
+    'mining a confirmed page for other arrests must not be skipped'
+  );
+});

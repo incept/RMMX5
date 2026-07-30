@@ -295,6 +295,10 @@ export async function runDeepSearchForContact(
     jobId?: string;
     jobWorker?: string;
     jobAttempt?: number;
+    // Force a full sweep: re-probe even sites that already hold a confirmed
+    // record for this contact. Default (false) skips those on a re-run to save
+    // the fetch and any billable fallback — a confirmed record won't change.
+    fullReprobe?: boolean;
   }
 ): Promise<DeepSearchResult> {
   const supabase = createAdminClient();
@@ -460,6 +464,10 @@ export async function runDeepSearchForContact(
   const seen = new Set((existing ?? []).map((r: any) => r.canonical_url));
   const candidateWriter = new CandidateWriter(supabase);
 
+  // Sites re-probes skip because a record is already confirmed there (computed
+  // from confirmedUrls, built below for mining). See siteHasConfirmedRecord.
+  let confirmedSkips = 0;
+
   let probed = 0;
   let blocked = 0;
   let browserOnlySkips = 0;
@@ -515,6 +523,13 @@ export async function runDeepSearchForContact(
       ].filter(Boolean)
     ),
   ];
+  // A re-run skips re-SEARCHING a site that already holds a confirmed record for
+  // this contact (the record won't change), saving the fetch and any billable
+  // fallback. fullReprobe forces a full sweep. Note this gates only the probe
+  // loop below — the mining loop above still harvests OTHER arrests from these
+  // same confirmed pages, which is the opposite of redundant.
+  const siteHasConfirmedRecord = (domain: string) =>
+    !opts?.fullReprobe && confirmedUrls.some((u) => urlOnDomain(u, domain));
   let minedPages = 0;
   let minedListings = 0;
   for (const pageUrl of confirmedUrls) {
@@ -639,6 +654,13 @@ export async function runDeepSearchForContact(
       // state; with no state on file it is skipped, not guessed. National sites
       // (no scope_state) are unaffected.
       if (!siteStateAllowed(site.scope_state)) continue;
+      // Already have a confirmed record here: re-searching it can only re-find
+      // the same page, so skip the probe (its page is still mined below for
+      // OTHER arrests). fullReprobe empties confirmedUrls, so this never fires.
+      if (siteHasConfirmedRecord(site.domain)) {
+        confirmedSkips += 1;
+        continue;
+      }
       const states = site.scope_state
         ? [site.scope_state]
         : facts.state.length
@@ -1198,6 +1220,7 @@ export async function runDeepSearchForContact(
       `${pivots ? `, derived ${pivots} sibling record(s) from shared ids` : ''}` +
       `${derived ? `, built ${derived} date-addressed page(s) from county + booking date` : ''}` +
       `${siteSearches ? `, ${siteSearches} site search link(s) to check for further arrests` : ''}` +
+      `${confirmedSkips ? `, skipped ${confirmedSkips} site(s) already holding a confirmed record` : ''}` +
       `: ${candidates} new candidate(s) for review${learned ? `. Learned: ${learned}` : ''}` +
       `${ambiguous() ? `. Candidates span ${[...statesSeen].sort().join(', ')} — pick the right identity in the panel` : ''}` +
       `${deadlineHit ? '. Hit the time limit — partial results; re-run to continue' : ''}` +
@@ -1211,6 +1234,7 @@ export async function runDeepSearchForContact(
       pivots,
       derived,
       siteSearches,
+      confirmedSkips,
       minedPages,
       minedListings,
       focusDate,
