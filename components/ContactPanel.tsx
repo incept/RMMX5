@@ -574,16 +574,38 @@ export default function ContactPanel({
 
   // A county typed by a human is truth, not a guess — same store the ✓ writes
   // to, so it seeds every run even before the first search finds anything.
+  // A metro like Atlanta spans several counties (Fulton, DeKalb, Cobb), so a
+  // comma- or newline-separated list is accepted and each becomes its own
+  // confirmed county; the deep search then probes them one after another.
   async function confirmCounty() {
-    const county = countyValue.trim();
-    if (!county) return;
-    if (
-      await mutateConfirmed(
-        { action: 'confirm_fact', key: 'county', value: county },
-        'confirm-county'
-      )
-    ) {
-      setCountyValue('');
+    const counties = countyValue
+      .split(/[,\n]/)
+      .map((c) => c.trim())
+      .filter(Boolean);
+    if (!counties.length) return;
+    setBusy('confirm-county');
+    try {
+      let anyOk = false;
+      for (const county of counties) {
+        const res = await fetch(`/api/contacts/${contactId}/candidates`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'confirm_fact', key: 'county', value: county }),
+        });
+        const data = await res.json().catch(() => ({}) as any);
+        if (!res.ok) {
+          alert(data.error ?? `Could not add "${county}" (HTTP ${res.status})`);
+          break;
+        }
+        anyOk = true;
+      }
+      if (anyOk) {
+        setCountyValue('');
+        await Promise.all([load(), loadCandidates()]);
+        onChanged();
+      }
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -1405,7 +1427,7 @@ export default function ContactPanel({
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') confirmCounty();
                     }}
-                    placeholder="Add a known county (e.g. Collier)"
+                    placeholder="Add known counties (e.g. Fulton, DeKalb, Cobb)"
                     className="min-w-0 flex-1 rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] dark:text-gray-900"
                   />
                   <button
@@ -1415,7 +1437,7 @@ export default function ContactPanel({
                     onClick={confirmCounty}
                     title="Save as a confirmed county — it seeds every deep search and outranks whatever a search finds"
                   >
-                    {busy === 'confirm-county' ? 'Saving…' : 'Add county'}
+                    {busy === 'confirm-county' ? 'Saving…' : 'Add counties'}
                   </button>
                 </div>
               )}

@@ -468,3 +468,15 @@ test('contact mutations commit durable side effects instead of partial request c
   assert.match(contactRoute, /p_expected_updated_at: before\.updated_at/);
   assert.match(linksRoute, /replace_contact_links_atomic/);
 });
+
+test('sending email and importing contacts are admin-only', async () => {
+  // Both once ran under requireUser (any active user, including a worker). They
+  // send mail on the CRM's behalf and bulk-write contacts, so they are gated to
+  // admins. requireAdmin already accepts super_admin.
+  const emailSend = await readFile(new URL('../app/api/email/send/route.ts', import.meta.url), 'utf8');
+  const importRoute = await readFile(new URL('../app/api/import/route.ts', import.meta.url), 'utf8');
+  assert.match(emailSend, /await requireAdmin\(\)/);
+  assert.doesNotMatch(emailSend, /requireUser/);
+  assert.match(importRoute, /await requireAdmin\(\)/);
+  assert.doesNotMatch(importRoute, /requireUser/);
+});

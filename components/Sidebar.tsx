@@ -55,6 +55,7 @@ const SECTIONS: Section[] = [
       { href: '/admin/pipeline', label: 'Statuses & Stages' },
       { href: '/admin/fields', label: 'Custom Fields' },
       { href: '/admin/url-rules', label: 'URL Rules & Scoring' },
+      { href: '/admin/deep-search-sites', label: 'Deep Search Sites' },
       { href: '/admin/notifications', label: 'Notifications' },
       { href: '/admin/integrations', label: 'Integrations & APIs' },
       { href: '/admin/debug', label: 'Debug Log' },

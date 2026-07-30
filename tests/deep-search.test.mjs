@@ -2073,3 +2073,47 @@ test('workers abort before an extended lease can be reclaimed', async () => {
   assert.match(source, /aborted before another worker could reclaim it/);
   assert.match(source, /p_lease_seconds: JOB_LEASE_SECONDS/);
 });
+
+test('a state-scoped site runs only for a contact we can place in that state', async () => {
+  // stateConflicts() only rejects a KNOWN-but-different state, so a lead with no
+  // state on file let NC/GA sites run for everyone and burned SERP requests
+  // (the timing-out site: queries). The gate now REQUIRES a positive match.
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(engine, /const siteStateAllowed = \(scopeState/);
+  assert.match(engine, /return pinnedStates\.includes\(code\)/);
+  // Applied where probe targets are built...
+  assert.match(engine, /if \(!siteStateAllowed\(site\.scope_state\)\) continue;/);
+  // ...and to the SERP-fallback pool, which previously ignored scope entirely.
+  const fallbackAt = engine.indexOf('const fallbackCandidates');
+  const fallbackBody = engine.slice(fallbackAt, fallbackAt + 700);
+  assert.match(fallbackBody, /siteStateAllowed\(site\.scope_state\)/);
+});
+
+test('a multi-county metro uses more than two counties in derived rosters', async () => {
+  // Atlanta straddles Fulton, DeKalb, and Cobb; the daily-roster fan-out capped
+  // counties at two, dropping the third. Direct county probing already uses all.
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(engine, /const MAX_DERIVED_COUNTIES = 4/);
+  assert.match(engine, /slice\(\s*0,\s*MAX_DERIVED_COUNTIES\s*\)/);
+  assert.doesNotMatch(engine, /facts\.county : \[null\]\)\.slice\(0, 2\)/);
+});
+
+test('the county box accepts a comma-separated list', async () => {
+  // "Fulton, DeKalb, Cobb" in one entry, each becoming its own confirmed county.
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(panel, /countyValue\s*\n?\s*\.split\(\/\[,\\n\]\//);
+});
+
+test('the deep-search sites admin edits coverage, never the URL templates', async () => {
+  const page = await readFile(
+    new URL('../app/(app)/admin/deep-search-sites/page.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(page, /from\('probe_sites'\)/);
+  // It writes the scope columns the engine gates on.
+  assert.match(page, /scope_state:/);
+  assert.match(page, /scope_county:/);
+  // The delicate templates stay in migrations — a typo must not be a click away.
+  assert.doesNotMatch(page, /search_template/);
+  assert.doesNotMatch(page, /date_url_template/);
+});
