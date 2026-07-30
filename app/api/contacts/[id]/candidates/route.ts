@@ -391,14 +391,31 @@ export async function PATCH(request: Request, { params }: Params) {
       );
       if (upsertError) throw upsertError;
 
+      // A hand-confirmed URL is a removal target too — queue it into a slot.
+      const { data: position, error: slotError } = await admin.rpc('place_confirmed_link', {
+        p_contact_id: id,
+        p_url: raw,
+      });
+      if (slotError) throw slotError;
+      const scores = position ? await applyScores(id) : {};
+
       await logActivity({
         contactId: id,
         actorId: adminAuth.profile.id,
         type: 'updated',
-        description: `Confirmed URL as this person's: ${raw}`,
-        meta: { url: raw },
+        description: position
+          ? `Confirmed URL as this person's and placed in link slot ${position}: ${raw}`
+          : `Confirmed URL as this person's — all 14 link slots full, not placed: ${raw}`,
+        meta: { url: raw, position: position ?? null },
       });
-      return NextResponse.json({ ok: true, status: 'confirmed', confirmed_facts: next });
+      return NextResponse.json({
+        ok: true,
+        status: 'confirmed',
+        confirmed_facts: next,
+        position: position ?? null,
+        slotsFull: position == null,
+        ...scores,
+      });
     } catch (error) {
       return apiFailure('api:contacts/[id]/candidates', error, { contactId: id });
     }
@@ -472,14 +489,33 @@ export async function PATCH(request: Request, { params }: Params) {
         );
       }
 
+      // Confirming a record page also queues it for removal: drop it into the
+      // next free numbered slot (idempotent; null when all 14 are full — the
+      // confirmation still stands, the operator just frees a slot to add it).
+      const { data: position, error: slotError } = await admin.rpc('place_confirmed_link', {
+        p_contact_id: id,
+        p_url: candidate.url,
+      });
+      if (slotError) throw slotError;
+      const scores = position ? await applyScores(id) : {};
+
       await logActivity({
         contactId: id,
         actorId: adminAuth.profile.id,
         type: 'updated',
-        description: `Confirmed candidate as this person's: ${candidate.url}`,
-        meta: { url: candidate.url },
+        description: position
+          ? `Confirmed candidate as this person's and placed in link slot ${position}: ${candidate.url}`
+          : `Confirmed candidate as this person's — all 14 link slots full, not placed: ${candidate.url}`,
+        meta: { url: candidate.url, position: position ?? null },
       });
-      return NextResponse.json({ ok: true, status: 'confirmed', confirmed_facts: next });
+      return NextResponse.json({
+        ok: true,
+        status: 'confirmed',
+        confirmed_facts: next,
+        position: position ?? null,
+        slotsFull: position == null,
+        ...scores,
+      });
     } catch (error) {
       return apiFailure('api:contacts/[id]/candidates', error, { contactId: id });
     }

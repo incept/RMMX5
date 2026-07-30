@@ -559,9 +559,17 @@ export default function ContactPanel({
         return;
       }
       await Promise.all([loadCandidates(), load()]);
-      // Accept fills a slot; confirm changes learned facts. Both alter what the
-      // rest of the panel shows, so refresh the parent list too.
+      // Accept and confirm both fill a numbered slot now; confirm also folds
+      // facts. All alter what the rest of the panel shows, so refresh the
+      // parent list too.
       onChanged();
+      // A confirm that couldn't claim a slot succeeded otherwise — say so, or
+      // the link silently not appearing in a numbered field reads as a bug.
+      if (action === 'confirm' && data.slotsFull) {
+        alert(
+          'Confirmed as this person’s. All 14 link slots are full, so it was not placed in a numbered field — free a slot to add it.'
+        );
+      }
     } finally {
       setBusy(null);
     }
@@ -587,6 +595,13 @@ export default function ContactPanel({
       }
       await Promise.all([load(), loadCandidates()]);
       onChanged();
+      // Confirming a URL now also queues it into a numbered slot; flag the
+      // full-slots case so its absence from the fields isn't mistaken for a bug.
+      if (payload.action === 'confirm_url' && data.slotsFull) {
+        alert(
+          'Confirmed as this person’s. All 14 link slots are full, so it was not placed in a numbered field — free a slot to add it.'
+        );
+      }
       return true;
     } finally {
       setBusy(null);
