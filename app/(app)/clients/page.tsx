@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import ContactPanel from '@/components/ContactPanel';
+import { NameSourceIcon } from '@/components/NameSourceIcon';
 import { useMyRole } from '@/lib/use-my-role';
 import { useAutoRefresh } from '@/lib/use-auto-refresh';
 import { useRealtimeRefresh } from '@/lib/use-realtime-refresh';
@@ -116,15 +117,7 @@ export default function ClientsPage() {
                   <td className="grid-td font-medium">
                     <span className="inline-flex items-center gap-1.5">
                       {c.name}
-                      {c.name_source === 'reverse_lookup' && (
-                        <span
-                          className="text-[11px] leading-none"
-                          title="Name from a reverse phone lookup — it may not be accurate"
-                          aria-label="Name derived from a reverse phone lookup"
-                        >
-                          📞
-                        </span>
-                      )}
+                      <NameSourceIcon source={c.name_source} className="h-3 w-3" />
                     </span>
                   </td>
                   <td className="grid-td" onClick={(e) => e.stopPropagation()}>
