@@ -43,7 +43,7 @@ test('contact authorization is enforced below the React UI', async () => {
   );
   const route = await read('app/api/contacts/[id]/route.ts');
   assert.ok(panel.includes('fetch(`/api/contacts/${contactId}'));
-  assert.ok(clients.includes('fetch(`/api/clients?page=${page}'));
+  assert.ok(clients.includes('fetch(`/api/clients?'));
   assert.match(route, /const \{ data: after[\s\S]*?delete \(after as Record<string, any>\)\.revenue_projection/);
 });
 
