@@ -2153,7 +2153,7 @@ test('the phone-source marker distinguishes CallScaler (green) from Trestle (yel
   assert.match(icon, /if \(!marker\) return null/);
 });
 
-test('CallScaler marks caller-ID names and no longer auto-runs the reverse lookup', async () => {
+test('CallScaler marks caller-ID names and no longer auto-runs the lookup or search', async () => {
   const callscaler = await readFile(
     new URL('../lib/integrations/callscaler.ts', import.meta.url),
     'utf8'
@@ -2161,9 +2161,12 @@ test('CallScaler marks caller-ID names and no longer auto-runs the reverse looku
   // A human caller-ID name is stamped so the UI shows the green marker; a
   // placeholder ("Caller <number>") is left unmarked.
   assert.match(callscaler, /name_source: humanName \? 'callscaler' : null/);
-  // The Trestle reverse lookup is an admin action now, never enqueued at intake.
+  // Both the Trestle reverse lookup and the deep search are admin actions now,
+  // never enqueued at intake — a call spends no billed provider work on its own.
   assert.match(callscaler, /p_enqueue_enrichment: false/);
+  assert.match(callscaler, /p_enqueue_search: false/);
   assert.doesNotMatch(callscaler, /p_enqueue_enrichment: createdContact/);
+  assert.doesNotMatch(callscaler, /p_enqueue_search: namedNewContact/);
 });
 
 test('migration 0034 documents both markers and backfills CallScaler names', async () => {

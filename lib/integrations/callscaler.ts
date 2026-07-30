@@ -14,7 +14,6 @@ export interface ProcessedCall {
   skipped?: string;
   contactId?: string;
   createdContact?: boolean;
-  searchContactId?: string;
 }
 
 function phoneDigits(value: string | null | undefined): string | null {
@@ -211,17 +210,17 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
       },
     });
 
-    const namedNewContact = createdContact && looksLikeHumanName(payload.caller_name);
     const { error: completeError } = await supabase.rpc('complete_call_processing', {
       p_call_row_id: claim.id,
       p_call_id: callId,
       p_contact_id: contactId,
-      // The reverse phone lookup is now an admin-only action (the "Reverse #
-      // lookup" button), never automatic — a new call contact no longer spends a
-      // billed Trestle lookup on its own. A real name and city/state are filled
-      // only when an admin runs it by hand.
+      // Neither the reverse phone lookup nor the deep search runs automatically
+      // on a new call contact now — both are admin actions (the contact's
+      // "Reverse # lookup" and "Search" buttons). A call no longer spends billed
+      // provider work on its own; an admin decides per lead. Restore the old
+      // automatic behavior by passing createdContact / a real-name check here.
       p_enqueue_enrichment: false,
-      p_enqueue_search: namedNewContact,
+      p_enqueue_search: false,
     });
     if (completeError) throw new Error(completeError.message);
 
@@ -230,7 +229,6 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
       duplicate: false,
       contactId,
       createdContact,
-      searchContactId: namedNewContact ? contactId : undefined,
     };
   } catch (failure) {
     const { error: failureError } = await supabase
