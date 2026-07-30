@@ -2281,3 +2281,33 @@ test('main views subscribe to Realtime changes with a debounced refetch', async 
     assert.match(page, re, `${p} subscribes to the right table(s)`);
   }
 });
+
+test('confirming a deep-search link places it in a numbered removal slot', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/0033_confirm_fills_link_slot.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /function public\.place_confirmed_link/);
+  assert.match(migration, /generate_series\(1, 14\)/); // the 14 numbered slots
+  assert.match(migration, /return null;.*all 14 full/); // graceful when full
+  assert.match(migration, /insert into public\.contact_links/);
+  // Idempotent: an already-slotted URL returns its slot instead of duplicating.
+  assert.match(migration, /where contact_id = p_contact_id and url = p_url/);
+
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/candidates/route.ts', import.meta.url),
+    'utf8'
+  );
+  // Both the candidate confirm and the hand-typed URL confirm place a slot.
+  assert.ok(
+    (route.match(/place_confirmed_link/g) ?? []).length >= 2,
+    'both confirm paths place a link'
+  );
+  // Re-score only when a slot was actually filled; full is non-fatal.
+  assert.match(route, /position \? await applyScores\(id\) : \{\}/);
+  assert.match(route, /slotsFull: position == null/);
+
+  // The panel tells the operator when the slot could not be claimed.
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(panel, /data\.slotsFull/);
+});
