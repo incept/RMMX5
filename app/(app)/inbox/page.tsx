@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { useAutoRefresh } from '@/lib/use-auto-refresh';
+import { useRealtimeRefresh } from '@/lib/use-realtime-refresh';
 
 /**
  * Unified inbox: every inbound + outbound email across all SMTP accounts,
@@ -69,8 +70,10 @@ export default function InboxPage() {
     loadAccounts();
   }, [load, loadAccounts]);
 
-  // New mail is there when you switch back to the tab, no manual reload.
+  // New mail is there when you switch back to the tab, no manual reload, and
+  // the Realtime subscription surfaces it while the inbox is open.
   useAutoRefresh(load);
+  useRealtimeRefresh('email_messages', load);
 
   async function sendCompose() {
     if (!compose.to || !compose.subject) return alert('To and subject required');

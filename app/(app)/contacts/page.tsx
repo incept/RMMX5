@@ -7,6 +7,7 @@ import StatusPill, { type StatusOption } from '@/components/StatusPill';
 import ContactPanel from '@/components/ContactPanel';
 import { useMyRole } from '@/lib/use-my-role';
 import { useAutoRefresh } from '@/lib/use-auto-refresh';
+import { useRealtimeRefresh } from '@/lib/use-realtime-refresh';
 
 interface ContactRow {
   id: string;
@@ -282,8 +283,10 @@ export default function ContactsPage() {
   }, [load, search]);
 
   // Returning to the tab reloads the grid, so new leads and status changes are
-  // there without a manual refresh.
+  // there without a manual refresh; the Realtime subscription keeps it current
+  // while it's open (debounced to at most one refetch every few seconds).
   useAutoRefresh(load);
+  useRealtimeRefresh('contacts', load);
 
   useEffect(() => {
     supabase
