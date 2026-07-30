@@ -43,6 +43,12 @@ import { classifySerpResults, extractRowsWithLlm } from './llm.ts';
 
 const MAX_PROBES_PER_RUN = 24; // ~24 page fetches worst case, at 3–15 leads/day
 const PER_DOMAIN_DELAY_MS = 400; // politeness; negligible at this volume
+// A metro area can straddle several counties — Atlanta covers Fulton, DeKalb,
+// and Cobb — so a lead legitimately carries more than two. The date-addressed
+// roster phase builds one URL per (site × date × county); this caps the county
+// fan-out there so the combination stays bounded while still covering a
+// multi-county city. Direct county probing (round 1) already uses them all.
+const MAX_DERIVED_COUNTIES = 4;
 /** Surname plus at least one more agreeing signal. Surname alone scores 0.4. */
 const MIN_CONFIDENCE = 0.55;
 /** site: queries cost a SERP request each, so the per-run count is bounded. */
@@ -388,6 +394,18 @@ export async function runDeepSearchForContact(
     rowStates.length > 0 &&
     !rowStates.some((st) => pinnedStates.includes(st));
 
+  // Whether a site pinned to a state (state- or county-scoped) is worth a
+  // request for THIS contact. Unlike stateConflicts(), which only rejects a
+  // KNOWN-but-different state, this REQUIRES a positive match: a contact with no
+  // state on file skips state/county sites entirely rather than spending a
+  // billable request on, say, a Georgia paper for a lead we cannot place in
+  // Georgia. National sites (no scope_state) are always eligible.
+  const siteStateAllowed = (scopeState: string | null | undefined): boolean => {
+    const code = stateCode(scopeState);
+    if (!code) return true; // national / unscoped / unparseable → always eligible
+    return pinnedStates.includes(code);
+  };
+
   if (seededLinks) {
     await logDebug({
       source: 'deep-search:seed',
@@ -617,6 +635,10 @@ export async function runDeepSearchForContact(
     const window = searchWindow();
     const targets: { site: ProbeSite; url: string }[] = [];
     for (const site of roundSites) {
+      // A state/county-pinned site runs only for a contact we can place in that
+      // state; with no state on file it is skipped, not guessed. National sites
+      // (no scope_state) are unaffected.
+      if (!siteStateAllowed(site.scope_state)) continue;
       const states = site.scope_state
         ? [site.scope_state]
         : facts.state.length
@@ -630,8 +652,6 @@ export async function runDeepSearchForContact(
 
       for (const state of states) {
         for (const county of counties) {
-          // A site pinned to one state is irrelevant to a lead in another.
-          if (site.scope_state && stateConflicts([site.scope_state])) continue;
           const url = buildProbeUrl(site.search_template, name, county, state, window);
           if (url && !targets.some((t) => t.url === url)) targets.push({ site, url });
         }
@@ -799,6 +819,10 @@ export async function runDeepSearchForContact(
     ]),
   ]
     .map((domain) => ({ domain, site: sitesAll.find((s) => s.domain === domain) }))
+    // Honor state scope here too: a serp_fallback site pinned to NC must not be
+    // site:-searched for a lead we cannot place in NC — the wasted, timing-out
+    // queries that surfaced this. Domains with no matching site row are kept.
+    .filter(({ site }) => !site || siteStateAllowed(site.scope_state))
     .sort((a, b) => (a.site?.priority ?? 100) - (b.site?.priority ?? 100));
 
   const usedFamilies = new Set<string>();
@@ -933,7 +957,10 @@ export async function runDeepSearchForContact(
     if (outOfTime()) break;
     if (!site.date_url_template) continue;
     for (const isoDate of dateList().slice(0, 3)) {
-      for (const county of (facts.county.length ? facts.county : [null]).slice(0, 2)) {
+      for (const county of (facts.county.length ? facts.county : [null]).slice(
+        0,
+        MAX_DERIVED_COUNTIES
+      )) {
         const url = buildDateUrl(
           site.date_url_template,
           isoDate,

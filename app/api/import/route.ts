@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requireUser } from '@/lib/api-auth';
+import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { validIdempotencyKey } from '@/lib/bulk-delivery';
 import { readJsonBody } from '@/lib/request-limits';
@@ -12,7 +12,7 @@ const CHUNK = 100;
 const text = (value: unknown, max: number) => String(value ?? '').trim().slice(0, max);
 
 export async function POST(request: Request) {
-  const auth = await requireUser();
+  const auth = await requireAdmin();
   if ('error' in auth) return auth.error;
 
   let body: any;
