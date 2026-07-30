@@ -259,7 +259,7 @@ returns bigint
 language plpgsql
 security definer
 set search_path = public
-as $
+as $$
 declare v_deleted bigint;
 begin
   if p_older_than_days < 1 or p_older_than_days > 3650 then
@@ -302,7 +302,7 @@ begin
   get diagnostics v_deleted = row_count;
   return v_deleted;
 end;
-$;
+$$;
 revoke all on function public.purge_admin_data(text, int) from public, anon, authenticated;
 grant execute on function public.purge_admin_data(text, int) to service_role;
 
