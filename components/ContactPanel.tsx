@@ -46,10 +46,17 @@ export default function ContactPanel({
   contactId,
   onClose,
   onChanged,
+  siblingIds,
+  onNavigate,
 }: {
   contactId: string;
   onClose: () => void;
   onChanged: () => void;
+  // The list this contact was opened from, in display order, so the panel can
+  // step to the next/previous record without closing. Optional — the panel
+  // works standalone, just without the arrows.
+  siblingIds?: string[];
+  onNavigate?: (id: string) => void;
 }) {
   const supabase = useMemo(() => createClient(), []);
   const { isAdmin } = useMyRole(); // revenue figures are admin-only
@@ -92,6 +99,38 @@ export default function ContactPanel({
       deepSearchPoll.current = null;
     };
   }, [contactId]);
+
+  // Step to the previous/next contact in the list this panel was opened from.
+  // The panel reloads on contactId change, so navigating is just swapping the id.
+  const siblingIndex = siblingIds ? siblingIds.indexOf(contactId) : -1;
+  const hasPrev = siblingIndex > 0;
+  const hasNext = siblingIndex >= 0 && siblingIndex < (siblingIds?.length ?? 0) - 1;
+  const goToSibling = useCallback(
+    (delta: -1 | 1) => {
+      if (!siblingIds || !onNavigate) return;
+      const i = siblingIds.indexOf(contactId);
+      const next = i + delta;
+      if (i < 0 || next < 0 || next >= siblingIds.length) return;
+      onNavigate(siblingIds[next]);
+    },
+    [siblingIds, onNavigate, contactId]
+  );
+
+  // Arrow keys navigate too, but never while typing in a field.
+  useEffect(() => {
+    if (!siblingIds || !onNavigate) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t?.isContentEditable) return;
+      e.preventDefault();
+      goToSibling(e.key === 'ArrowUp' ? -1 : 1);
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [siblingIds, onNavigate, goToSibling]);
 
   const load = useCallback(async () => {
     const [contactRes, linksRes, statusRes, stageRes, fieldsRes, activityRes] = await Promise.all([
@@ -745,7 +784,18 @@ export default function ContactPanel({
         <div className="border-b border-gray-200 px-5 pt-4">
           <div className="flex items-start justify-between">
             <div>
-              <h2 className="text-2xl font-light tracking-tight">{contact.name}</h2>
+              <h2 className="flex items-center gap-2 text-2xl font-light tracking-tight">
+                {contact.name}
+                {contact.name_source === 'reverse_lookup' && (
+                  <span
+                    className="text-base"
+                    title="Name came from a reverse phone lookup — it may not be accurate. Editing it by hand clears this marker."
+                    aria-label="Name derived from a reverse phone lookup"
+                  >
+                    📞
+                  </span>
+                )}
+              </h2>
               <div className="mt-1 flex items-center gap-2">
                 <StatusPill
                   status={contact.statuses}
@@ -811,9 +861,39 @@ export default function ContactPanel({
                 })()}
               </div>
             </div>
-            <button className="btn btn-ghost" onClick={onClose}>
-              ✕
-            </button>
+            <div className="flex flex-none items-center gap-1">
+              {siblingIndex >= 0 && (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-ghost px-2 disabled:opacity-30"
+                    disabled={!hasPrev}
+                    onClick={() => goToSibling(-1)}
+                    title="Previous contact (↑)"
+                  >
+                    ‹
+                  </button>
+                  <span
+                    className="text-[10px] tabular-nums text-gray-400"
+                    title="Position in the list"
+                  >
+                    {siblingIndex + 1}/{siblingIds?.length}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-ghost px-2 disabled:opacity-30"
+                    disabled={!hasNext}
+                    onClick={() => goToSibling(1)}
+                    title="Next contact (↓)"
+                  >
+                    ›
+                  </button>
+                </>
+              )}
+              <button className="btn btn-ghost" onClick={onClose}>
+                ✕
+              </button>
+            </div>
           </div>
           <div className="mt-3 flex gap-1 overflow-x-auto">
             {TABS.map((t) => (

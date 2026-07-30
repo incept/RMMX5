@@ -10,6 +10,7 @@ import { useMyRole } from '@/lib/use-my-role';
 interface ContactRow {
   id: string;
   name: string;
+  name_source: string | null;
   city: string | null;
   state: string | null;
   email: string | null;
@@ -1155,6 +1156,15 @@ export default function ContactsPage() {
                         </span>
                       )}
                       <span className="whitespace-nowrap text-xs font-medium">{contact.name}</span>
+                      {contact.name_source === 'reverse_lookup' && (
+                        <span
+                          className="flex-none text-[11px] leading-none"
+                          title="Name from a reverse phone lookup — it may not be accurate"
+                          aria-label="Name derived from a reverse phone lookup"
+                        >
+                          📞
+                        </span>
+                      )}
                       <span className="truncate text-[11px] font-light text-gray-400">
                         {[contact.city, contact.state].filter(Boolean).join(', ')}
                       </span>
@@ -1434,6 +1444,8 @@ export default function ContactsPage() {
           contactId={selectedId}
           onClose={() => setSelectedId(null)}
           onChanged={load}
+          siblingIds={pageRows.map((c) => c.id)}
+          onNavigate={setSelectedId}
         />
       )}
     </div>

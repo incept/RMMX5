@@ -64,9 +64,12 @@ export async function enrichContactFromPhone(
   const filled: string[] = [];
 
   if (needsName && identity.name) {
+    // Mark the name as reverse-lookup-derived so the UI can flag it as
+    // "verify me" — a caller-ID/Trestle name is a lead, not confirmed truth.
+    // Cleared when a human edits the name (see the contact PATCH route).
     const { data, error: nameError } = await supabase
       .from('contacts')
-      .update({ name: identity.name })
+      .update({ name: identity.name, name_source: 'reverse_lookup' })
       .eq('id', contactId)
       .eq('name', contact.name)
       .select('id')
