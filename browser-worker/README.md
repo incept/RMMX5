@@ -12,8 +12,9 @@ URLs; it sends back HTML. Nothing else crosses the wire.
 A 2 GB RAM VPS is comfortable; 1 GB works with swap enabled.
 
 ```bash
-# 1. Node 20
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+# 1. Node (current LTS; the worker needs nothing newer than Node 18)
+sudo apt update && sudo apt install -y curl ca-certificates
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 
 # 2. Chrome (the official .deb pulls in every system library it needs)
@@ -61,31 +62,53 @@ curl -s localhost:8787/healthz   # → {"ok":true,"chrome":true}
 
 The worker binds to `127.0.0.1` on purpose — never expose it directly. Probe
 URLs contain client names, so the hop from the CRM must be HTTPS. Caddy gives
-you automatic certificates:
+you automatic certificates. It is not in Ubuntu's default repos, so add the
+official one first:
 
 ```bash
-sudo apt install -y caddy
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install -y caddy
 ```
 
-Point a DNS A record (e.g. `browser.removemymugshot.org`) at the VPS IP, then
-set `/etc/caddy/Caddyfile` to:
+Prefer a **neutral domain unrelated to the brand** (e.g. `worker.example.net`)
+rather than a subdomain of the company domain. The hostname is never sent to
+the sites the worker fetches — a direct navigation carries no `Referer`, and
+the worker adds no headers beyond the User-Agent — but the TLS certificate is
+published in public Certificate Transparency logs, so a brand subdomain would
+publicly link this scraping host to the company. A neutral name avoids that;
+the CRM only requires a public `https://` address and does not care what it is.
+
+Point a DNS A record (e.g. `worker.example.net`) at the VPS IP **and wait for
+it to resolve** (`getent hosts worker.example.net` should return the VPS IP)
+before reloading Caddy — the certificate is issued over port 80, so the name
+must already point here. Then set `/etc/caddy/Caddyfile` to:
 
 ```
-browser.removemymugshot.org {
+worker.example.net {
     reverse_proxy 127.0.0.1:8787
 }
 ```
 
 ```bash
 sudo systemctl reload caddy
-sudo ufw allow 80,443/tcp && sudo ufw enable   # if using ufw
+```
+
+If you use the `ufw` firewall, allow SSH **before** enabling it or you will lock
+yourself out of the box, then open the web ports:
+
+```bash
+sudo ufw allow OpenSSH
+sudo ufw allow 80,443/tcp
+sudo ufw enable
 ```
 
 ## Point the CRM at it
 
 Admin → Integrations → **Deep-search browser (headless Chrome)**:
 
-- **Remote worker URL**: `https://browser.removemymugshot.org`
+- **Remote worker URL**: `https://worker.example.net` (your neutral worker domain)
 - **Remote worker secret**: the secret from step 4
 
 Within a minute (the availability cache), deep searches resume fetching
