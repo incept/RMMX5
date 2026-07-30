@@ -12,8 +12,9 @@ URLs; it sends back HTML. Nothing else crosses the wire.
 A 2 GB RAM VPS is comfortable; 1 GB works with swap enabled.
 
 ```bash
-# 1. Node 20
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+# 1. Node (current LTS; the worker needs nothing newer than Node 18)
+sudo apt update && sudo apt install -y curl ca-certificates
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 
 # 2. Chrome (the official .deb pulls in every system library it needs)
