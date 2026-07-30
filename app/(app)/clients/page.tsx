@@ -20,38 +20,16 @@ export default function ClientsPage() {
 
   const load = useCallback(async () => {
     setLoadError('');
-    const { data: clientStatuses, error: statusesError } = await supabase
-      .from('statuses')
-      .select('id')
-      .eq('is_client_status', true);
-    if (statusesError) {
-      setLoadError(statusesError.message);
-      return;
+    try {
+      const response = await fetch(`/api/clients?page=${page}`, { cache: 'no-store' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error ?? 'Could not load clients');
+      setClients(body.clients ?? []);
+      if (body.summary) setSummary(body.summary);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : 'Could not load clients');
     }
-    const ids = (clientStatuses ?? []).map((s) => s.id);
-
-    const cols =
-      'id, name, name_source, email, phone, stage_id, client_since, service_days, reputation_score, stages ( id, name, color )';
-    let query = supabase
-      .from('contacts')
-      .select(isAdmin ? `${cols}, revenue_projection` : cols)
-      .order('client_since', { ascending: true })
-      .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
-    // Anyone with a client status OR an active service period counts as a client.
-    if (ids.length) query = query.or(`status_id.in.(${ids.join(',')}),client_since.not.is.null`);
-    else query = query.not('client_since', 'is', null);
-
-    const [{ data, error }, { data: totals, error: totalsError }] = await Promise.all([
-      query,
-      supabase.rpc('client_summary'),
-    ]);
-    if (error || totalsError) {
-      setLoadError(error?.message ?? totalsError?.message ?? 'Could not load clients');
-      return;
-    }
-    setClients(data ?? []);
-    if (totals) setSummary(totals as any);
-  }, [supabase, isAdmin, page]);
+  }, [page]);
 
   useEffect(() => {
     load();

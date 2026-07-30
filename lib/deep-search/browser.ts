@@ -9,7 +9,7 @@
 import { type Browser, type Page } from 'puppeteer-core';
 import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
-import { assertPublicWebUrl, parsePublicHttpsUrl } from '@/lib/public-url';
+import { assertPublicHttpsUrl, assertPublicWebUrl } from '@/lib/public-url';
 import { readResponseText } from '@/lib/request-limits';
 
 /**
@@ -190,25 +190,53 @@ async function resolveRemote(): Promise<{ url: URL; secret: string } | null> {
   const secret = cfg.remote_secret?.trim();
   if (!cfg.remote_url || !secret) return null;
   try {
-    // HTTPS-only and public, enforced at save AND at use: probe URLs carry
-    // client names and must never transit plaintext or point back into the
-    // host's own network.
-    return { url: parsePublicHttpsUrl(cfg.remote_url), secret };
+    return { url: await assertPublicHttpsUrl(cfg.remote_url), secret };
   } catch {
     return null;
   }
 }
 
 const REMOTE_FETCH_TIMEOUT_MS = 60_000;
+const REMOTE_HEALTH_TIMEOUT_MS = 4_000;
+const REMOTE_CIRCUIT_MS = 60_000;
+let remoteCircuitOpenUntil = 0;
+
+function markRemoteUnavailable() {
+  remoteCircuitOpenUntil = Date.now() + REMOTE_CIRCUIT_MS;
+  availabilityCache = { value: false, at: Date.now() };
+}
+
+async function remoteHealthy(remote: { url: URL }): Promise<boolean> {
+  if (Date.now() < remoteCircuitOpenUntil) return false;
+  try {
+    const res = await fetch(new URL('/healthz', remote.url), {
+      signal: AbortSignal.timeout(REMOTE_HEALTH_TIMEOUT_MS),
+      cache: 'no-store',
+    });
+    const body = await readResponseText(res, 16 * 1024);
+    const data = JSON.parse(body);
+    const healthy = res.ok && data?.ok === true && data?.chrome === true;
+    if (!healthy) markRemoteUnavailable();
+    return healthy;
+  } catch {
+    markRemoteUnavailable();
+    return false;
+  }
+}
 
 async function fetchWithRemoteBrowser(
   url: string,
   signal?: AbortSignal
 ): Promise<BrowserFetchResult> {
+  if (Date.now() < remoteCircuitOpenUntil) {
+    return {
+      ok: false,
+      unavailable: true,
+      reason: 'remote browser circuit is open after a failed health check',
+    };
+  }
   const remote = await resolveRemote();
   if (!remote) {
-    // Same wording the callers already key their logs on: this tier is not
-    // set up here, neither locally nor remotely.
     return { ok: false, unavailable: true, reason: 'no Chrome executable configured or found' };
   }
   try {
@@ -228,7 +256,12 @@ async function fetchWithRemoteBrowser(
     try {
       data = JSON.parse(bodyText);
     } catch {
-      return { ok: false, reason: `remote browser returned non-JSON (HTTP ${res.status})` };
+      if (res.status >= 500) markRemoteUnavailable();
+      return {
+        ok: false,
+        unavailable: res.status >= 500,
+        reason: `remote browser returned non-JSON (HTTP ${res.status})`,
+      };
     }
     if (!res.ok || data?.ok !== true) {
       return {
@@ -236,6 +269,7 @@ async function fetchWithRemoteBrowser(
         reason: `remote browser: ${String(data?.reason ?? `HTTP ${res.status}`).slice(0, 300)}`,
       };
     }
+    remoteCircuitOpenUntil = 0;
     const html = typeof data.html === 'string' ? data.html : '';
     if (!html) return { ok: false, reason: 'remote browser returned an empty page' };
     if (Buffer.byteLength(html, 'utf8') > MAX_RENDERED_HTML_BYTES) {
@@ -243,27 +277,30 @@ async function fetchWithRemoteBrowser(
     }
     return { ok: true, html, status: Number.isInteger(data.status) ? data.status : 200 };
   } catch (e: any) {
-    return { ok: false, reason: `remote browser fetch failed: ${e?.message ?? 'unknown error'}` };
+    if (signal?.aborted) throw signal.reason ?? e;
+    markRemoteUnavailable();
+    return {
+      ok: false,
+      unavailable: true,
+      reason: `remote browser fetch failed: ${e?.message ?? 'unknown error'}`,
+    };
   }
 }
 
 let availabilityCache: { value: boolean; at: number } | null = null;
 const AVAILABILITY_TTL_MS = 60_000;
 
-/**
- * Cheap, cached "could this tier run at all?" check. Callers that would skip
- * the free HTTP tiers on the promise of Chrome must ask this FIRST: on a host
- * with no Chrome (shared hosting), a browser-only fetch otherwise falls
- * straight through to the billable unlocker — which BrightData refuses by
- * policy for exactly the site that needs the browser. Cached briefly so a
- * settings change (enabling the tier, setting a path) still applies within a
- * minute without re-statting the filesystem on every URL.
- */
 export async function browserAvailable(): Promise<boolean> {
   if (availabilityCache && Date.now() - availabilityCache.at < AVAILABILITY_TTL_MS) {
     return availabilityCache.value;
   }
-  const value = (await resolveExecutable()) !== null || (await resolveRemote()) !== null;
+  const local = (await resolveExecutable()) !== null;
+  if (local) {
+    availabilityCache = { value: true, at: Date.now() };
+    return true;
+  }
+  const remote = await resolveRemote();
+  const value = remote ? await remoteHealthy(remote) : false;
   availabilityCache = { value, at: Date.now() };
   return value;
 }

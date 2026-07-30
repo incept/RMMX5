@@ -71,10 +71,15 @@ const BROAD_QUERY_TIMEOUT_MS = 40_000;
 const MAX_BROAD_QUERY_RESULTS = 20;
 const CANDIDATE_BATCH_SIZE = 25;
 
+type CandidateAttempt = { jobId: string; worker: string; attempt: number };
+
 class CandidateWriter {
   private rows: Record<string, any>[] = [];
 
-  constructor(private readonly supabase: ReturnType<typeof createAdminClient>) {}
+  constructor(
+    private readonly supabase: ReturnType<typeof createAdminClient>,
+    private readonly attempt?: CandidateAttempt
+  ) {}
 
   async add(row: Record<string, any>) {
     this.rows.push(row);
@@ -84,6 +89,17 @@ class CandidateWriter {
   async flush() {
     if (!this.rows.length) return;
     const batch = this.rows.splice(0, this.rows.length);
+    if (this.attempt) {
+      const { data, error } = await this.supabase.rpc('write_deep_search_candidates', {
+        p_job_id: this.attempt.jobId,
+        p_worker: this.attempt.worker,
+        p_attempt_count: this.attempt.attempt,
+        p_rows: batch,
+      });
+      if (error) throw new Error(`Could not store candidate batch: ${error.message}`);
+      if (Number(data) < 0) throw new Error('Deep-search attempt lost its lease before writing candidates');
+      return;
+    }
     const { error } = await this.supabase
       .from('search_candidates')
       .upsert(batch, { onConflict: 'contact_id,canonical_url', ignoreDuplicates: true });
@@ -472,7 +488,16 @@ export async function runDeepSearchForContact(
   const sites = sitesAll.filter((s) => s.active);
   const rules = (ruleRows ?? []) as UrlRule[];
   const seen = new Set((existing ?? []).map((r: any) => r.canonical_url));
-  const candidateWriter = new CandidateWriter(supabase);
+  const candidateWriter = new CandidateWriter(
+    supabase,
+    opts?.jobId
+      ? {
+          jobId: opts.jobId,
+          worker: opts.jobWorker!,
+          attempt: opts.jobAttempt!,
+        }
+      : undefined
+  );
 
   // Sites re-probes skip because a record is already confirmed there (computed
   // from confirmedUrls, built below for mining). See siteHasConfirmedRecord.
@@ -1357,6 +1382,16 @@ export async function runDeepSearchForContact(
       partialWarning: healthWarning,
       facts: merged,
     },
+  }).catch(async (error) => {
+    // The exact queue attempt and contact state are already committed. An
+    // optional audit-row failure must not turn that completed job into a false
+    // retry/failure; retain observability in the debug log instead.
+    await logDebug({
+      level: 'warn',
+      source: 'deep-search:activity',
+      message: `Deep search completed but activity logging failed: ${errorMessage(error)}`,
+      contactId,
+    }).catch(() => {});
   });
 
   return {
