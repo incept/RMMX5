@@ -44,6 +44,11 @@ const MAX_CONCURRENT_PAGES = 2;
 const MAX_QUEUED = 8;
 const MAX_HTML_BYTES = 2 * 1024 * 1024;
 const MAX_BODY_BYTES = 16 * 1024;
+const MAX_DOM_NODES = 25_000;
+const IDLE_SHUTDOWN_MS = 60_000;
+const LAUNCH_TIMEOUT_MS = 30_000;
+const LIFECYCLE_TIMEOUT_MS = 10_000;
+const RESOURCE_CLOSE_TIMEOUT_MS = 5_000;
 
 const DEFAULT_PATHS = [
   '/usr/bin/google-chrome-stable',
@@ -108,8 +113,68 @@ function isFetchableUrl(raw) {
 }
 
 let browserPromise = null;
+let idleTimer = null;
 let activePages = 0;
 const waiters = [];
+
+function boundedOperation(operation, label, timeoutMs, onLateResult) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref?.();
+    operation.then(
+      (value) => {
+        if (settled) {
+          if (onLateResult) void Promise.resolve(onLateResult(value)).catch(() => {});
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
+async function closeBrowser(reason) {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = null;
+  const pending = browserPromise;
+  browserPromise = null;
+  if (!pending) return;
+  try {
+    const browser = await boundedOperation(
+      pending,
+      `browser launch while closing (${reason})`,
+      LIFECYCLE_TIMEOUT_MS,
+      (late) => late.close().catch(() => late.process()?.kill('SIGKILL'))
+    );
+    try {
+      await boundedOperation(browser.close(), `browser close (${reason})`, RESOURCE_CLOSE_TIMEOUT_MS);
+    } catch {
+      browser.process()?.kill('SIGKILL');
+    }
+  } catch {
+    // A failed launch has no owned process to close.
+  }
+}
+
+function touchIdleTimer() {
+  if (idleTimer) clearTimeout(idleTimer);
+  if (activePages !== 0 || waiters.length !== 0) return;
+  idleTimer = setTimeout(() => void closeBrowser('idle'), IDLE_SHUTDOWN_MS);
+  idleTimer.unref?.();
+}
 
 async function getBrowser(executablePath) {
   if (!browserPromise) {
@@ -123,9 +188,15 @@ async function getBrowser(executablePath) {
       if (process.env.CHROME_NO_SANDBOX === '1') {
         args.push('--no-sandbox', '--disable-setuid-sandbox');
       }
-      const browser = await puppeteer.launch({ executablePath, headless: true, args });
+      const browser = await puppeteer.launch({
+        executablePath,
+        headless: true,
+        timeout: LAUNCH_TIMEOUT_MS,
+        args,
+      });
+      const owned = browserPromise;
       browser.on('disconnected', () => {
-        browserPromise = null;
+        if (browserPromise === owned) browserPromise = null;
       });
       return browser;
     })();
@@ -133,7 +204,12 @@ async function getBrowser(executablePath) {
       browserPromise = null;
     });
   }
-  return browserPromise;
+  return boundedOperation(
+    browserPromise,
+    'browser launch',
+    LAUNCH_TIMEOUT_MS + LIFECYCLE_TIMEOUT_MS,
+    (late) => late.close().catch(() => late.process()?.kill('SIGKILL'))
+  );
 }
 
 function acquireSlot() {
@@ -171,32 +247,59 @@ async function fetchPage(url) {
     return { ok: false, reason: 'no Chrome executable found on the worker host' };
   }
   await acquireSlot();
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = null;
   let context = null;
+  let cleanupFailed = false;
   try {
     const browser = await getBrowser(executablePath);
-    // An incognito context per fetch: no cookies or cache shared between
-    // requests, and closing it reaps the renderer process.
-    context = await browser.createBrowserContext();
-    const page = await context.newPage();
-    await page.setUserAgent(BROWSER_UA);
-    await page.setViewport({ width: 1366, height: 900 });
-    // Documents and scripts render the page; images, media, and fonts only
-    // spend the VPS's bandwidth.
-    await page.setRequestInterception(true);
+    context = await boundedOperation(
+      browser.createBrowserContext(),
+      'browser context creation',
+      LIFECYCLE_TIMEOUT_MS,
+      (late) => late.close()
+    );
+    const page = await boundedOperation(
+      context.newPage(),
+      'browser page creation',
+      LIFECYCLE_TIMEOUT_MS,
+      (late) => late.close()
+    );
+    await boundedOperation(
+      Promise.all([
+        page.setUserAgent(BROWSER_UA),
+        page.setViewport({ width: 1366, height: 900 }),
+        page.setRequestInterception(true),
+      ]),
+      'browser page setup',
+      LIFECYCLE_TIMEOUT_MS
+    );
     page.on('request', (req) => {
       const type = req.resourceType();
-      if (type === 'image' || type === 'media' || type === 'font') req.abort().catch(() => {});
-      else req.continue().catch(() => {});
+      if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
+        req.abort().catch(() => {});
+      } else {
+        req.continue().catch(() => {});
+      }
     });
     const response = await page.goto(url, {
       waitUntil: 'domcontentloaded',
       timeout: PAGE_TIMEOUT_MS,
     });
-    // Cloudflare interstitials resolve shortly after domcontentloaded; a small
-    // settle window lets the challenge complete without waiting for networkidle
-    // on pages that long-poll.
-    await new Promise((r) => setTimeout(r, 2_500));
-    const html = await page.content();
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    const nodeCount = await boundedOperation(
+      page.evaluate(() => document.getElementsByTagName('*').length),
+      'DOM size check',
+      LIFECYCLE_TIMEOUT_MS
+    );
+    if (nodeCount > MAX_DOM_NODES) {
+      return { ok: false, reason: `rendered DOM exceeds ${MAX_DOM_NODES} nodes` };
+    }
+    const html = await boundedOperation(
+      page.content(),
+      'rendered HTML serialization',
+      LIFECYCLE_TIMEOUT_MS
+    );
     if (Buffer.byteLength(html, 'utf8') > MAX_HTML_BYTES) {
       return { ok: false, reason: `rendered HTML exceeds ${MAX_HTML_BYTES} bytes` };
     }
@@ -204,8 +307,16 @@ async function fetchPage(url) {
   } catch (e) {
     return { ok: false, reason: `browser fetch failed: ${e?.message ?? 'unknown error'}` };
   } finally {
-    if (context) await context.close().catch(() => {});
+    if (context) {
+      try {
+        await boundedOperation(context.close(), 'browser context close', RESOURCE_CLOSE_TIMEOUT_MS);
+      } catch {
+        cleanupFailed = true;
+      }
+    }
     releaseSlot();
+    if (cleanupFailed) await closeBrowser('context cleanup failure');
+    else touchIdleTimer();
   }
 }
 
@@ -269,3 +380,6 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`RMMX5 browser worker listening on ${HOST}:${PORT}`);
 });
+
+process.once('SIGTERM', () => void closeBrowser('SIGTERM').finally(() => process.exit(0)));
+process.once('SIGINT', () => void closeBrowser('SIGINT').finally(() => process.exit(0)));

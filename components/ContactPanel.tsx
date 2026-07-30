@@ -62,6 +62,7 @@ export default function ContactPanel({
   const { isAdmin } = useMyRole(); // revenue figures are admin-only
   const [tab, setTab] = useState<Tab>('Contact Info');
   const [contact, setContact] = useState<any>(null);
+  const [contactLoadError, setContactLoadError] = useState('');
   const [links, setLinks] = useState<LinkSlot[]>([]);
   const [statuses, setStatuses] = useState<StatusOption[]>([]);
   const [stages, setStages] = useState<any[]>([]);
@@ -133,12 +134,14 @@ export default function ContactPanel({
   }, [siblingIds, onNavigate, goToSibling]);
 
   const load = useCallback(async () => {
+    setContactLoadError('');
     const [contactRes, linksRes, statusRes, stageRes, fieldsRes, activityRes] = await Promise.all([
-      supabase
-        .from('contacts')
-        .select('*, statuses ( id, name, color, is_client_status ), stages ( id, name, color )')
-        .eq('id', contactId)
-        .single(),
+      fetch(`/api/contacts/${contactId}`, { cache: 'no-store' }).then(async (response) => {
+        const body = await response.json().catch(() => ({}));
+        return response.ok
+          ? { data: body.contact, error: null }
+          : { data: null, error: new Error(body.error ?? 'Could not load contact') };
+      }),
       supabase.from('contact_links').select('*').eq('contact_id', contactId).order('position'),
       supabase.from('statuses').select('id, name, color, is_client_status').order('sort_order'),
       supabase.from('stages').select('id, name, color').order('sort_order'),
@@ -151,6 +154,11 @@ export default function ContactPanel({
         .limit(100),
     ]);
 
+    if (contactRes.error) {
+      setContactLoadError(contactRes.error.message ?? 'Could not load contact');
+      setContact(null);
+      return;
+    }
     setContact(contactRes.data);
 
     // Possible duplicates: another contact sharing this one's phone or email.
@@ -717,6 +725,16 @@ export default function ContactPanel({
     setDefaultServiceDays(90);
   }, []);
 
+  if (contactLoadError) {
+    return (
+      <div className="fixed inset-0 z-40 flex justify-end bg-black/20" onClick={onClose}>
+        <div className="h-full w-full max-w-2xl bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div className="rounded-lg bg-red-50 p-4 text-sm text-red-700">{contactLoadError}</div>
+          <button className="btn mt-4" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    );
+  }
   if (!contact) return null;
 
   const input = (label: string, key: string, type = 'text', readOnly = false) => (

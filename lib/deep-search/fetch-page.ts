@@ -504,6 +504,17 @@ export async function fetchProbePage(
     return { ok: true, html: viaBrowser.html, via: 'browser' };
   }
   notes.push(viaBrowser.ok ? `browser ${browserFailure}` : viaBrowser.reason);
+  // A browser-only host has no useful unlocker path when the configured Chrome
+  // tier itself is unavailable. Return immediately so an unhealthy remote worker
+  // cannot add a 60-second stall and then trigger a known-futile billable call.
+  if (opts?.needsBrowser && !viaBrowser.ok && viaBrowser.unavailable) {
+    return {
+      ok: false,
+      blocked: true,
+      browserUnavailable: true,
+      reason: viaBrowser.reason,
+    };
+  }
 
   const directNote = notes.join('; ');
 

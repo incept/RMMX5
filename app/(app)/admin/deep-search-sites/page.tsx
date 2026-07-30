@@ -1,7 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { createClient } from '@/lib/supabase/client';
+import { useCallback, useEffect, useState } from 'react';
 
 /**
  * Admin: Deep Search Sites — the sites the deep search actually probes, and the
@@ -44,19 +43,23 @@ function coverageLabel(site: any): string {
 }
 
 export default function DeepSearchSitesPage() {
-  const supabase = useMemo(() => createClient(), []);
   const [sites, setSites] = useState<any[]>([]);
   const [form, setForm] = useState<any>(null);
+  const [loadError, setLoadError] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
-    const { data } = await supabase
-      .from('probe_sites')
-      .select('*')
-      .order('scope')
-      .order('priority')
-      .order('domain');
-    setSites(data ?? []);
-  }, [supabase]);
+    setLoadError('');
+    try {
+      const response = await fetch('/api/admin/probe-sites', { cache: 'no-store' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error ?? 'Could not load probe sites');
+      setSites(body.sites ?? []);
+    } catch (error) {
+      setSites([]);
+      setLoadError(error instanceof Error ? error.message : 'Could not load probe sites');
+    }
+  }, []);
 
   useEffect(() => {
     load();
@@ -102,10 +105,22 @@ export default function DeepSearchSitesPage() {
       scope_state: national ? null : state,
       scope_county: national ? null : county || null,
     };
-    const { error } = await supabase.from('probe_sites').update(row).eq('id', f.id);
-    if (error) return alert(error.message);
-    setForm(null);
-    load();
+    setSaving(true);
+    try {
+      const response = await fetch('/api/admin/probe-sites', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: f.id, ...row }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error ?? 'Could not save probe site');
+      setForm(null);
+      await load();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Could not save probe site');
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -121,6 +136,12 @@ export default function DeepSearchSitesPage() {
         Lower priority number = tried first. URL templates are managed in migrations and aren&apos;t
         shown here.
       </p>
+
+      {loadError && (
+        <div className="mb-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+          {loadError}
+        </div>
+      )}
 
       <div className="card p-0">
         <table className="w-full">
@@ -261,8 +282,8 @@ export default function DeepSearchSitesPage() {
                 <button className="btn" onClick={() => setForm(null)}>
                   Cancel
                 </button>
-                <button className="btn btn-primary" onClick={save}>
-                  Save
+                <button className="btn btn-primary" onClick={save} disabled={saving}>
+                  {saving ? 'Saving…' : 'Save'}
                 </button>
               </div>
             </div>

@@ -4,7 +4,7 @@ import { getSetting, setSetting } from '@/lib/settings';
 import { getUsageSummary } from '@/lib/usage';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
-import { parsePublicHttpsUrl } from '@/lib/public-url';
+import { assertPublicHttpsUrl } from '@/lib/public-url';
 
 const KNOWN_KEYS = [
   'brightdata',
@@ -95,7 +95,7 @@ export async function PUT(request: Request) {
   if (!KNOWN_KEYS.includes(body.key)) {
     return NextResponse.json({ error: `Unknown settings key: ${body.key}` }, { status: 400 });
   }
-  if (typeof body.value !== 'object' || body.value === null) {
+  if (typeof body.value !== 'object' || body.value === null || Array.isArray(body.value)) {
     return NextResponse.json({ error: 'value must be an object' }, { status: 400 });
   }
 
@@ -216,7 +216,7 @@ export async function PUT(request: Request) {
     if (typeof value.remote_secret === 'string') value.remote_secret = value.remote_secret.trim();
     if (value.remote_url) {
       try {
-        value.remote_url = parsePublicHttpsUrl(String(value.remote_url)).toString();
+        value.remote_url = (await assertPublicHttpsUrl(String(value.remote_url))).toString();
       } catch {
         return NextResponse.json(
           { error: 'Remote worker URL must be a public https:// address' },
@@ -233,7 +233,7 @@ export async function PUT(request: Request) {
   }
   if (body.key === 'voicemail' && value.provider_url) {
     try {
-      value.provider_url = parsePublicHttpsUrl(String(value.provider_url)).toString();
+      value.provider_url = (await assertPublicHttpsUrl(String(value.provider_url))).toString();
     } catch (error) {
       return NextResponse.json(
         { error: error instanceof Error ? error.message : 'Invalid provider URL' },
@@ -242,13 +242,50 @@ export async function PUT(request: Request) {
     }
   }
   const secretFields = SECRET_FIELDS[body.key] ?? [];
-  if (secretFields.some((f) => isMasked(value[f]))) {
-    const current = await getSetting<Record<string, any>>(body.key, { fresh: true });
-    for (const field of secretFields) {
-      if (isMasked(value[field])) value[field] = current[field] ?? '';
+  let current: Record<string, any> | null = null;
+  const endpointField =
+    body.key === 'probe_browser'
+      ? 'remote_url'
+      : body.key === 'voicemail'
+        ? 'provider_url'
+        : null;
+  if (endpointField || secretFields.some((field) => isMasked(value[field]))) {
+    try {
+      current = await getSetting<Record<string, any>>(body.key, { fresh: true });
+    } catch (error) {
+      return apiFailure('api:admin/settings', error, { context: { key: body.key } });
     }
   }
+  if (
+    endpointField &&
+    String(value[endpointField] ?? '') !== String(current?.[endpointField] ?? '')
+  ) {
+    if (auth.profile.role !== 'super_admin') {
+      return NextResponse.json(
+        { error: 'Only a super administrator can change a credential-bearing endpoint' },
+        { status: 403 }
+      );
+    }
+    const endpointSecret = body.key === 'probe_browser' ? 'remote_secret' : 'api_key';
+    if (
+      typeof value[endpointSecret] !== 'string' ||
+      !value[endpointSecret].trim() ||
+      isMasked(value[endpointSecret])
+    ) {
+      return NextResponse.json(
+        { error: `${endpointSecret} must be re-entered when the endpoint changes` },
+        { status: 400 }
+      );
+    }
+  }
+  for (const field of secretFields) {
+    if (isMasked(value[field])) value[field] = current?.[field] ?? '';
+  }
 
-  await setSetting(body.key, value, auth.profile.id);
+  try {
+    await setSetting(body.key, value, auth.profile.id);
+  } catch (error) {
+    return apiFailure('api:admin/settings', error, { context: { key: body.key } });
+  }
   return NextResponse.json({ ok: true });
 }

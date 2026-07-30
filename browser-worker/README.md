@@ -121,3 +121,16 @@ Run a deep search on a contact with a confirmed county and check
 Admin → Debug Log: the `browser-only … skipped` warning should be gone and
 arrests.org probes should report success. On the VPS,
 `journalctl -u rmmx-browser-worker -f` shows each fetch.
+
+## Resource and health behavior
+
+The worker keeps at most two page contexts active, bounds every Puppeteer
+lifecycle operation, rejects pages above 25,000 DOM nodes or 2 MB of rendered
+HTML, and closes its shared browser after one idle minute. If a context cannot
+close promptly, the worker terminates that Chrome process before releasing the
+capacity slot so renderer processes cannot accumulate.
+
+The CRM checks `/healthz` before treating a remote worker as available and
+opens a one-minute circuit after connectivity failures. While that circuit is
+open, browser-only sites go directly to their SERP fallback; they do not wait
+for the dead worker or fall through to a billable unlocker.

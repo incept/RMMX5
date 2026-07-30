@@ -4,8 +4,27 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { logActivity } from '@/lib/activity';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
+import { logDebug } from '@/lib/debug-log';
 
 type Params = { params: Promise<{ id: string }> };
+
+/** Server-filtered contact detail. Revenue never crosses the worker boundary. */
+export async function GET(_request: Request, { params }: Params) {
+  const auth = await requireUser();
+  if ('error' in auth) return auth.error;
+  const { id } = await params;
+  const { data, error } = await createAdminClient()
+    .from('contacts')
+    .select('*, statuses ( id, name, color, is_client_status ), stages ( id, name, color )')
+    .eq('id', id)
+    .maybeSingle();
+  if (error) return apiFailure('api:contacts/[id]', error, { contactId: id });
+  if (!data) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  if (!['admin', 'super_admin'].includes(auth.profile.role)) {
+    delete (data as Record<string, any>).revenue_projection;
+  }
+  return NextResponse.json({ contact: data });
+}
 
 /**
  * PATCH updates a contact. Status changes carry side effects:
@@ -139,6 +158,9 @@ export async function PATCH(request: Request, { params }: Params) {
     .eq('id', id)
     .single();
   if (readError) return NextResponse.json({ error: readError.message }, { status: 400 });
+  if (!['admin', 'super_admin'].includes(auth.profile.role)) {
+    delete (after as Record<string, any>).revenue_projection;
+  }
   return NextResponse.json({ contact: after });
 }
 
@@ -146,8 +168,40 @@ export async function DELETE(_request: Request, { params }: Params) {
   const auth = await requireAdmin();
   if ('error' in auth) return auth.error;
   const { id } = await params;
+  const admin = createAdminClient();
 
-  const { error } = await createAdminClient().from('contacts').delete().eq('id', id);
-  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
-  return NextResponse.json({ ok: true });
+  // Delete the database row first so all relational state disappears
+  // transactionally. Storage is external to Postgres; best-effort cleanup after
+  // commit prevents normal contact deletion from being held hostage by storage.
+  const { data: files, error: fileError } = await admin
+    .from('contact_files')
+    .select('storage_path')
+    .eq('contact_id', id);
+  if (fileError) return apiFailure('api:contacts/[id]', fileError, { contactId: id });
+
+  const { data: deleted, error } = await admin
+    .from('contacts')
+    .delete()
+    .eq('id', id)
+    .select('id')
+    .maybeSingle();
+  if (error) return apiFailure('api:contacts/[id]', error, { contactId: id });
+  if (!deleted) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+
+  const paths = (files ?? []).map((file) => file.storage_path).filter(Boolean);
+  let storageObjectsRemoved = 0;
+  if (paths.length) {
+    const { error: storageError } = await admin.storage.from('contact-files').remove(paths);
+    if (storageError) {
+      await logDebug({
+        level: 'error',
+        source: 'files:orphan-contact-delete',
+        message: `Contact was deleted but ${paths.length} storage object(s) could not be removed: ${storageError.message}`,
+        context: { contact_id: id, paths },
+      }).catch(() => {});
+    } else {
+      storageObjectsRemoved = paths.length;
+    }
+  }
+  return NextResponse.json({ ok: true, storageObjectsRemoved });
 }
