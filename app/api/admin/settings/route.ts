@@ -285,7 +285,7 @@ export async function PUT(request: Request) {
   try {
     await setSetting(body.key, value, auth.profile.id);
   } catch (error) {
-    return apiFailure('api:admin/settings', error, { key: body.key });
+    return apiFailure('api:admin/settings', error, { context: { key: body.key } });
   }
   return NextResponse.json({ ok: true });
 }

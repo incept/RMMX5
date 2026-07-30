@@ -46,7 +46,7 @@ export async function PATCH(request: Request) {
     const state = body.scope === 'national' ? null : String(body.scope_state ?? '').toUpperCase();
     const county =
       body.scope === 'county' ? String(body.scope_county ?? '').trim().slice(0, 120) : null;
-    if (body.scope !== 'national' && !STATE_CODES.has(state)) {
+    if (body.scope !== 'national' && (!state || !STATE_CODES.has(state))) {
       return NextResponse.json({ error: 'A valid state is required' }, { status: 400 });
     }
     if (body.scope === 'county' && !county) {
