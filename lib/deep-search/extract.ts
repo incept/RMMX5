@@ -29,6 +29,14 @@ const NOT_A_NAME = new Set([
   'jr', 'sr', 'ii', 'iii', 'iv', 'unknown', 'none', 'posts', 'post', 'reels',
   'warrant', 'warrants', 'active', 'booked', 'charged', 'date', 'birth', 'old',
   'year', 'from', 'was', 'and', 'jail', 'crime', 'crimes', 'busted', 'gazette',
+  // Sitemap/XML/web scaffolding — a sitemap fed to the extractor put the person's
+  // name next to <loc>/<lastmod>, so "Loc" and "Lastmod" scored as middle names.
+  'loc', 'lastmod', 'urlset', 'changefreq', 'priority', 'xml', 'xmlns', 'sitemap',
+  'http', 'https', 'www', 'href', 'link', 'src', 'img', 'span', 'div', 'meta',
+  'com', 'org', 'net', 'gov', 'edu',
+  // Common filler words that are never middle names (kept conservative so real
+  // name-words like May/Will/Grace/June are NOT excluded).
+  'into', 'with', 'this', 'that', 'these', 'those', 'here', 'there', 'about',
 ]);
 
 /**
@@ -139,6 +147,10 @@ export function findCounties(text: string): string[] {
  */
 export function findMiddleNames(text: string, name: NameParts): string[] {
   if (!name.first || !name.last) return [];
+  // A sitemap/XML document is structure, not prose: its tag names sit right
+  // beside the name in the URL slug and were being read as middle names. Don't
+  // mine names out of one at all.
+  if (/<\??(?:xml|urlset|sitemapindex|loc|url)\b/i.test(text)) return [];
   const tokens = text.toLowerCase().split(/[^a-z]+/).filter((t) => t.length > 1);
   const first = name.first.toLowerCase();
   const last = name.last.toLowerCase();

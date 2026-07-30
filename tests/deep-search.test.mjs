@@ -2190,3 +2190,37 @@ test('a deep search skips re-probing sites that already hold a confirmed record'
     'mining a confirmed page for other arrests must not be skipped'
   );
 });
+
+test('sitemap tokens and XML content never become middle names', async () => {
+  // A sitemap fed to the extractor put the name next to <loc>/<lastmod>, which
+  // scored as middle names "Loc"/"Lastmod" (seen on the Victoria Hollis run).
+  const extract = await readFile(new URL('../lib/deep-search/extract.ts', import.meta.url), 'utf8');
+  for (const junk of ['loc', 'lastmod', 'urlset', 'changefreq', 'into']) {
+    assert.match(extract, new RegExp(`'${junk}'`), `${junk} must be blocked as a name`);
+  }
+  // And a whole XML/sitemap document is refused before token-scanning.
+  assert.match(extract, /urlset\|sitemapindex/);
+  assert.match(extract, /is structure, not prose/);
+});
+
+test('the deep search runs one broad, unquoted name search before the site: fallback', async () => {
+  // Site-targeted routes miss a record on a site we could not probe (a
+  // county-scoped site with no county) or one not in the registry. A broad
+  // "name city state" query at 20 results reaches page two, where these sit.
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(engine, /const BROAD_QUERY_TIMEOUT_MS = 40_000/);
+  assert.match(engine, /const MAX_BROAD_QUERY_RESULTS = 20/);
+  assert.match(engine, /const broadQuery = \[name\.first, name\.last, contact\.city, broadState\]/);
+  const broadAt = engine.indexOf('const broadQuery =');
+  const fallbackAt = engine.indexOf('const fallbackCandidates =');
+  assert.ok(broadAt > 0 && broadAt < fallbackAt, 'broad query must precede the site: fallback');
+  // Same corroboration bar as every other route — no same-named strangers.
+  const broadBlock = engine.slice(broadAt, fallbackAt);
+  assert.match(broadBlock, /scored\.confidence < MIN_CONFIDENCE/);
+  assert.match(broadBlock, /source_detail: 'broad name search'/);
+});
+
+test('SERP fallbacks get more room before the timeout cap', async () => {
+  const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
+  assert.match(engine, /const FALLBACK_TIMEOUT_MS = 30_000/);
+});
