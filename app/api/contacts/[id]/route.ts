@@ -22,6 +22,7 @@ export async function GET(_request: Request, { params }: Params) {
   if (!data) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   if (!['admin', 'super_admin'].includes(auth.profile.role)) {
     delete (data as Record<string, any>).revenue_projection;
+    delete (data as Record<string, any>).gross_revenue;
   }
   return NextResponse.json({ contact: data });
 }
@@ -86,12 +87,19 @@ export async function PATCH(request: Request, { params }: Params) {
     }
     updates.service_days = value;
   }
-  if ('gross_revenue' in updates && updates.gross_revenue != null) {
-    const value = Number(updates.gross_revenue);
-    if (!Number.isFinite(value) || value < 0 || value > 99_999_999) {
-      return NextResponse.json({ error: 'gross_revenue must be a number from 0 to 99,999,999' }, { status: 400 });
+  if ('gross_revenue' in updates) {
+    // Money collected is admin data, mirroring revenue_projection: hidden from
+    // non-admin reads below, so a non-admin write must be refused, not applied.
+    if (!['admin', 'super_admin'].includes(auth.profile.role)) {
+      return NextResponse.json({ error: 'Only an admin can set gross revenue' }, { status: 403 });
     }
-    updates.gross_revenue = Math.round(value * 100) / 100;
+    if (updates.gross_revenue != null) {
+      const value = Number(updates.gross_revenue);
+      if (!Number.isFinite(value) || value < 0 || value > 99_999_999) {
+        return NextResponse.json({ error: 'gross_revenue must be a number from 0 to 99,999,999' }, { status: 400 });
+      }
+      updates.gross_revenue = Math.round(value * 100) / 100;
+    }
   }
   if ('signed_date' in updates && updates.signed_date != null && !/^\d{4}-\d{2}-\d{2}$/.test(String(updates.signed_date))) {
     return NextResponse.json({ error: 'signed_date must be a date (YYYY-MM-DD)' }, { status: 400 });
@@ -170,6 +178,7 @@ export async function PATCH(request: Request, { params }: Params) {
   if (readError) return NextResponse.json({ error: readError.message }, { status: 400 });
   if (!['admin', 'super_admin'].includes(auth.profile.role)) {
     delete (after as Record<string, any>).revenue_projection;
+    delete (after as Record<string, any>).gross_revenue;
   }
   return NextResponse.json({ contact: after });
 }

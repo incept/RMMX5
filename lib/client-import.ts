@@ -47,6 +47,11 @@ export interface ParsedClientImport {
   /** Website rows appearing before any named client (orphans, skipped). */
   skippedLeadingRows: number;
   /**
+   * Website cells that held something other than an http(s) URL (notes, a bare
+   * domain, a URL with a typo). Skipped, but counted so the loss is visible.
+   */
+  skippedInvalidUrls: number;
+  /**
    * Client names that don't look like a person (an email landed in the column, a
    * lone letter). Still imported — dropping a group would misattach its links —
    * but surfaced so the operator can relabel them after.
@@ -143,6 +148,7 @@ export function gridToClients(grid: string[][]): ParsedClientImport {
   let totalLinks = 0;
   let droppedLinks = 0;
   let skippedLeadingRows = 0;
+  let skippedInvalidUrls = 0;
   const overCapClients: string[] = [];
   const suspiciousNames: string[] = [];
 
@@ -170,6 +176,7 @@ export function gridToClients(grid: string[][]): ParsedClientImport {
     }
 
     const url = cell(row, idx.website);
+    if (url && !/^https?:\/\//i.test(url)) skippedInvalidUrls++;
     if (url && /^https?:\/\//i.test(url)) {
       if (!current) {
         skippedLeadingRows++;
@@ -189,7 +196,15 @@ export function gridToClients(grid: string[][]): ParsedClientImport {
     }
   }
 
-  return { clients, totalLinks, droppedLinks, overCapClients, skippedLeadingRows, suspiciousNames };
+  return {
+    clients,
+    totalLinks,
+    droppedLinks,
+    overCapClients,
+    skippedLeadingRows,
+    skippedInvalidUrls,
+    suspiciousNames,
+  };
 }
 
 function sheetToGrid(buffer: ArrayBuffer): string[][] {

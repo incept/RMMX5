@@ -1058,19 +1058,24 @@ export default function ContactPanel({
                         onChange={(e) => setField('signed_date', e.target.value || null)}
                       />
                     </div>
-                    <div>
-                      <label className="label">Gross revenue</label>
-                      <input
-                        className="input"
-                        type="number"
-                        step="0.01"
-                        value={contact.gross_revenue ?? ''}
-                        placeholder="0.00"
-                        onChange={(e) =>
-                          setField('gross_revenue', e.target.value ? Number(e.target.value) : null)
-                        }
-                      />
-                    </div>
+                    {/* Money collected is admin data (like Projected Revenue): the
+                        API strips it from non-admin reads and 403s non-admin
+                        writes, so only render the field where saving can work. */}
+                    {isAdmin && (
+                      <div>
+                        <label className="label">Gross revenue</label>
+                        <input
+                          className="input"
+                          type="number"
+                          step="0.01"
+                          value={contact.gross_revenue ?? ''}
+                          placeholder="0.00"
+                          onChange={(e) =>
+                            setField('gross_revenue', e.target.value ? Number(e.target.value) : null)
+                          }
+                        />
+                      </div>
+                    )}
                     <div>
                       <label className="label">Service countdown</label>
                       <div className="flex flex-wrap items-center gap-2">

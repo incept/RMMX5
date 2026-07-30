@@ -67,6 +67,17 @@ test('gridToClients dedupes a repeated URL within one client', () => {
   assert.equal(res.clients[0].links.length, 1);
 });
 
+test('gridToClients counts non-URL website cells instead of losing them silently', () => {
+  const res = gridToClients([
+    ['Client', 'Website'],
+    ['Jane Doe', 'https://a.com/x'],
+    ['', 'see notes — removed by phone'],
+    ['', 'recentlybooked.com/no-scheme'],
+  ]);
+  assert.equal(res.clients[0].links.length, 1);
+  assert.equal(res.skippedInvalidUrls, 2);
+});
+
 test('link status maps roster labels to the three CRM states', () => {
   assert.equal(mapLinkStatus('Removed'), 'removed');
   assert.equal(mapLinkStatus('Site Is Down'), 'removed');
@@ -107,4 +118,18 @@ test('the client import route is admin-only and stamps the client status', async
   assert.match(route, /is_client_status/);
   assert.match(route, /import_client_chunk/);
   assert.match(route, /idempotency-key/i);
+});
+
+test('gross revenue is admin-only across the contact API, like revenue_projection', async () => {
+  const route = await readFile(
+    new URL('../app/api/contacts/[id]/route.ts', import.meta.url),
+    'utf8'
+  );
+  // Stripped from BOTH non-admin reads (GET, and the read-back after PATCH)…
+  assert.equal(route.match(/delete \(\w+ as Record<string, any>\)\.gross_revenue;/g)?.length, 2);
+  // …and a non-admin write is refused, not applied.
+  assert.match(route, /Only an admin can set gross revenue/);
+  // The panel only renders the field where saving can work.
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(panel, /\{isAdmin && \(\s*<div>\s*<label className="label">Gross revenue<\/label>/);
 });

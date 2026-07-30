@@ -46,6 +46,11 @@ export default function ClientImportPage() {
       const data = await res.json();
       if (!res.ok) setError(data.error ?? 'Import failed');
       else setResult(data);
+    } catch (e: any) {
+      // A network drop mid-import must not fail silently. The request key is
+      // unchanged, so pressing Import again resumes idempotently — committed
+      // chunks are returned as-is, only unfinished ones actually run.
+      setError(`${e?.message ?? 'Import failed'} — press Import again to resume safely.`);
     } finally {
       setBusy(false);
     }
@@ -92,7 +97,10 @@ export default function ClientImportPage() {
             <Stat label="Gross total" value={`$${grossTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />
           </div>
 
-          {(parsed.droppedLinks > 0 || parsed.suspiciousNames.length > 0 || parsed.skippedLeadingRows > 0) && (
+          {(parsed.droppedLinks > 0 ||
+            parsed.suspiciousNames.length > 0 ||
+            parsed.skippedLeadingRows > 0 ||
+            parsed.skippedInvalidUrls > 0) && (
             <div className="mt-4 space-y-1 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
               {parsed.droppedLinks > 0 && (
                 <div>
@@ -105,6 +113,12 @@ export default function ClientImportPage() {
                   <strong>{parsed.suspiciousNames.length}</strong> row(s) have an unusual client name (an email or
                   single letter): {parsed.suspiciousNames.slice(0, 6).join(', ')}
                   {parsed.suspiciousNames.length > 6 ? '…' : ''}. They&apos;ll still import — relabel them after.
+                </div>
+              )}
+              {parsed.skippedInvalidUrls > 0 && (
+                <div>
+                  <strong>{parsed.skippedInvalidUrls}</strong> website cell(s) weren&apos;t usable http(s) URLs
+                  (notes, typos) and were skipped — check those rows in the sheet if any matter.
                 </div>
               )}
               {parsed.skippedLeadingRows > 0 && (
