@@ -89,7 +89,7 @@ export default function PipelinePage() {
                 onChange={(e) => update(row.id, { color: e.target.value })}
               />
               <input
-                className="input flex-1"
+                className="input min-w-0 flex-1"
                 defaultValue={row.name}
                 // Enter commits (via blur, the single save path). Without this
                 // the only way to save a rename was to click elsewhere, with
@@ -104,8 +104,13 @@ export default function PipelinePage() {
                   if (value !== row.name) update(row.id, { name: value });
                 }}
               />
+              {/* basis-16 + shrink-0, not w-16: the .input primitive is unlayered,
+                  so its w-full outranks Tailwind's width utilities (v4 keeps those
+                  in @layer utilities, and unlayered CSS wins). flex-basis — which
+                  .input never sets — sizes this box instead, and min-w-0 on the
+                  name field beside it lets that field shrink and show its text. */}
               <input
-                className="input w-16"
+                className="input shrink-0 basis-16"
                 type="number"
                 title="Sort order"
                 defaultValue={row.sort_order}
