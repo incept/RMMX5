@@ -2117,3 +2117,52 @@ test('the deep-search sites admin edits coverage, never the URL templates', asyn
   assert.doesNotMatch(page, /search_template/);
   assert.doesNotMatch(page, /date_url_template/);
 });
+
+test('a reverse-lookup name is marked, and the mark clears on a manual rename', async () => {
+  const enrichment = await readFile(new URL('../lib/enrichment.ts', import.meta.url), 'utf8');
+  assert.match(enrichment, /name_source: 'reverse_lookup'/);
+  const migration = await readFile(
+    new URL('../supabase/migrations/0030_contacts_ux.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /add column if not exists name_source/);
+  // The trigger clears the mark on a rename but leaves enrichment's own write
+  // (which sets name AND name_source together) untouched.
+  assert.match(migration, /new\.name is distinct from old\.name/);
+  assert.match(migration, /new\.name_source is not distinct from old\.name_source/);
+  assert.match(migration, /new\.name_source := null/);
+});
+
+test('the general contacts view and its count exclude clients', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/0030_contacts_ux.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(
+    migration,
+    /p_view = 'all' and c\.client_since is null and not coalesce\(s\.is_client_status, false\)/
+  );
+  // The "all" count filters the same way, and name_source flows to the grid.
+  assert.match(migration, /'all', count\(\*\) filter/);
+  assert.match(migration, /c\.name, c\.name_source/);
+});
+
+test('the contact panel can step to the next/previous contact', async () => {
+  const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
+  assert.match(panel, /siblingIds\?: string\[\]/);
+  assert.match(panel, /onNavigate\?: \(id: string\) => void/);
+  assert.match(panel, /goToSibling/);
+  // Arrow keys navigate, but never while typing in a field.
+  assert.match(panel, /tag === 'INPUT' \|\| tag === 'TEXTAREA' \|\| tag === 'SELECT'/);
+  // The derived-name marker shows next to the name.
+  assert.match(panel, /name_source === 'reverse_lookup'/);
+});
+
+test('the contacts grid hands its list to the panel for navigation', async () => {
+  const page = await readFile(
+    new URL('../app/(app)/contacts/page.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(page, /siblingIds=\{pageRows\.map\(\(c\) => c\.id\)\}/);
+  assert.match(page, /onNavigate=\{setSelectedId\}/);
+});

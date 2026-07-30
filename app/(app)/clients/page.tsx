@@ -31,7 +31,7 @@ export default function ClientsPage() {
     const ids = (clientStatuses ?? []).map((s) => s.id);
 
     const cols =
-      'id, name, email, phone, stage_id, client_since, service_days, reputation_score, stages ( id, name, color )';
+      'id, name, name_source, email, phone, stage_id, client_since, service_days, reputation_score, stages ( id, name, color )';
     let query = supabase
       .from('contacts')
       .select(isAdmin ? `${cols}, revenue_projection` : cols)
@@ -130,7 +130,20 @@ export default function ClientsPage() {
               const left = daysLeft(c);
               return (
                 <tr key={c.id} className="grid-row" onClick={() => setSelectedId(c.id)}>
-                  <td className="grid-td font-medium">{c.name}</td>
+                  <td className="grid-td font-medium">
+                    <span className="inline-flex items-center gap-1.5">
+                      {c.name}
+                      {c.name_source === 'reverse_lookup' && (
+                        <span
+                          className="text-[11px] leading-none"
+                          title="Name from a reverse phone lookup — it may not be accurate"
+                          aria-label="Name derived from a reverse phone lookup"
+                        >
+                          📞
+                        </span>
+                      )}
+                    </span>
+                  </td>
                   <td className="grid-td" onClick={(e) => e.stopPropagation()}>
                     <select
                       className="input w-44 py-1"
@@ -204,7 +217,13 @@ export default function ClientsPage() {
       </div>
 
       {selectedId && (
-        <ContactPanel contactId={selectedId} onClose={() => setSelectedId(null)} onChanged={load} />
+        <ContactPanel
+          contactId={selectedId}
+          onClose={() => setSelectedId(null)}
+          onChanged={load}
+          siblingIds={clients.map((c) => c.id)}
+          onNavigate={setSelectedId}
+        />
       )}
     </div>
   );
