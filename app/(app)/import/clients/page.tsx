@@ -1,21 +1,50 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { createClient } from '@/lib/supabase/client';
 import {
   parseClientImportFile,
   MAX_IMPORT_FILE_BYTES,
   type ParsedClientImport,
 } from '@/lib/client-import';
 
+// Matches the /api/import/clients body limit, so an oversize roster fails here
+// with a clear message instead of after a successful-looking preview.
+const MAX_IMPORT_BODY_BYTES = 8 * 1024 * 1024;
+
+async function hashKey(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 /** Import wizard for a grouped client roster (.xlsx/.csv) → the Clients tab. */
 export default function ClientImportPage() {
+  const supabase = useMemo(() => createClient(), []);
   const [filename, setFilename] = useState('');
   const [parsed, setParsed] = useState<ParsedClientImport | null>(null);
   const [result, setResult] = useState<{ imported: number; totalClients: number; totalLinks: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [requestKey, setRequestKey] = useState('');
+  const [statuses, setStatuses] = useState<{ id: string; name: string }[]>([]);
+  const [statusId, setStatusId] = useState('');
+
+  useEffect(() => {
+    supabase
+      .from('statuses')
+      .select('id, name')
+      .eq('is_client_status', true)
+      .order('sort_order')
+      .then(({ data }) => {
+        const rows = (data ?? []) as { id: string; name: string }[];
+        setStatuses(rows);
+        // Default to a status named "Client", else the first flagged one.
+        const preferred = rows.find((s) => s.name.trim().toLowerCase() === 'client') ?? rows[0];
+        if (preferred) setStatusId(preferred.id);
+      });
+  }, [supabase]);
 
   async function handleFile(file: File) {
     setError(null);
@@ -26,7 +55,6 @@ export default function ClientImportPage() {
       const p = await parseClientImportFile(file);
       if (!p.clients.length) throw new Error('No clients found — is this the client roster, with a "Client" (or "Name") column?');
       setFilename(file.name);
-      setRequestKey(crypto.randomUUID());
       setParsed(p);
     } catch (e: any) {
       setError(e.message);
@@ -38,18 +66,30 @@ export default function ClientImportPage() {
     setBusy(true);
     setError(null);
     try {
+      const payload = JSON.stringify({
+        filename,
+        clients: parsed.clients,
+        statusId: statusId || undefined,
+      });
+      if (payload.length > MAX_IMPORT_BODY_BYTES) {
+        throw new Error('This roster is too large to import in one request — split it into smaller files.');
+      }
+      // Key derived from the payload, not a fresh random: re-selecting the same
+      // file after a reload or a lost response reuses the key, so committed
+      // clients come back from cache instead of being duplicated.
+      const key = 'client-import:' + (await hashKey(payload));
       const res = await fetch('/api/import/clients', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': requestKey },
-        body: JSON.stringify({ filename, clients: parsed.clients }),
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
+        body: payload,
       });
       const data = await res.json();
       if (!res.ok) setError(data.error ?? 'Import failed');
       else setResult(data);
     } catch (e: any) {
-      // A network drop mid-import must not fail silently. The request key is
-      // unchanged, so pressing Import again resumes idempotently — committed
-      // chunks are returned as-is, only unfinished ones actually run.
+      // A network drop mid-import must not fail silently. The key is stable, so
+      // pressing Import again resumes idempotently — committed chunks come back
+      // from cache, only unfinished ones run.
       setError(`${e?.message ?? 'Import failed'} — press Import again to resume safely.`);
     } finally {
       setBusy(false);
@@ -100,7 +140,8 @@ export default function ClientImportPage() {
           {(parsed.droppedLinks > 0 ||
             parsed.suspiciousNames.length > 0 ||
             parsed.skippedLeadingRows > 0 ||
-            parsed.skippedInvalidUrls > 0) && (
+            parsed.skippedInvalidUrls > 0 ||
+            parsed.csvErrors.length > 0) && (
             <div className="mt-4 space-y-1 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
               {parsed.droppedLinks > 0 && (
                 <div>
@@ -123,6 +164,12 @@ export default function ClientImportPage() {
               )}
               {parsed.skippedLeadingRows > 0 && (
                 <div>{parsed.skippedLeadingRows} URL row(s) before the first client were skipped.</div>
+              )}
+              {parsed.csvErrors.length > 0 && (
+                <div>
+                  <strong>CSV parse issues</strong> — columns may be misaligned, which can attach links to the
+                  wrong client. Check these rows: {parsed.csvErrors.join('; ')}
+                </div>
               )}
             </div>
           )}
@@ -155,9 +202,32 @@ export default function ClientImportPage() {
             </table>
           </div>
 
-          <button className="btn btn-primary mt-4" disabled={busy} onClick={runImport}>
-            {busy ? 'Importing…' : `Import ${importable} clients`}
-          </button>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-sm text-gray-600">
+              Import as status
+              <select
+                className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-sm"
+                value={statusId}
+                onChange={(e) => setStatusId(e.target.value)}
+              >
+                {statuses.length === 0 && <option value="">No client status configured</option>}
+                {statuses.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button className="btn btn-primary" disabled={busy || !statusId} onClick={runImport}>
+              {busy ? 'Importing…' : `Import ${importable} clients`}
+            </button>
+          </div>
+          {statuses.length === 0 && (
+            <p className="mt-2 text-xs text-red-700">
+              No client status is flagged. In Statuses &amp; Stages, tick the “client” box on your Client
+              status, then reload this page.
+            </p>
+          )}
         </>
       )}
 

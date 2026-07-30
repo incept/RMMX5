@@ -5,6 +5,7 @@ import { validIdempotencyKey } from '@/lib/bulk-delivery';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 import { logDebug } from '@/lib/debug-log';
+import { isValidISODate } from '@/lib/valid-date';
 
 const MAX_CLIENTS = 1000;
 const IMPORT_BODY_BYTES = 8 * 1024 * 1024;
@@ -64,8 +65,36 @@ export async function POST(request: Request) {
       { status: 400 }
     );
   }
-  const clientStatusId =
-    clientStatuses.find((s) => s.name.trim().toLowerCase() === 'client')?.id ?? clientStatuses[0].id;
+  // An explicit choice from the wizard wins (validated against the client-status
+  // set). Otherwise: a status literally named "Client", else the sole client
+  // status. Refuse to guess among several — picking the wrong lifecycle status
+  // (Former, Cancelled…) would misfile hundreds of records.
+  const requestedStatusId = typeof body.statusId === 'string' ? body.statusId : null;
+  let clientStatusId: string;
+  if (requestedStatusId) {
+    if (!clientStatuses.some((s) => s.id === requestedStatusId)) {
+      return NextResponse.json(
+        { error: 'The chosen import status is not a client status.' },
+        { status: 400 }
+      );
+    }
+    clientStatusId = requestedStatusId;
+  } else {
+    const named = clientStatuses.find((s) => s.name.trim().toLowerCase() === 'client');
+    if (named) {
+      clientStatusId = named.id;
+    } else if (clientStatuses.length === 1) {
+      clientStatusId = clientStatuses[0].id;
+    } else {
+      return NextResponse.json(
+        {
+          error:
+            'Several client statuses exist — choose which one to import into, or name your primary one "Client".',
+        },
+        { status: 400 }
+      );
+    }
+  }
 
   // Validate + normalise the whole request before the first write.
   const prepared: Record<string, any>[] = [];
@@ -103,7 +132,7 @@ export async function POST(request: Request) {
       source: text(c.source, 200) || 'client import',
       status_id: clientStatusId,
       gross_revenue: grossValid ? gross : null,
-      signed_date: /^\d{4}-\d{2}-\d{2}$/.test(signed) ? signed : null,
+      signed_date: isValidISODate(signed) ? signed : null,
       links,
     });
   }

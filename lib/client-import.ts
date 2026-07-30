@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import Papa from 'papaparse';
+import { isValidISODate } from './valid-date.ts';
 
 /**
  * Parsing for the client-roster import — a grouped spreadsheet, unlike the flat
@@ -57,6 +58,8 @@ export interface ParsedClientImport {
    * but surfaced so the operator can relabel them after.
    */
   suspiciousNames: string[];
+  /** CSV structural parse errors (empty for XLSX); shown so misgrouping is visible. */
+  csvErrors: string[];
 }
 
 /** A client "name" that is really data-entry noise (an email, a single letter). */
@@ -101,7 +104,10 @@ export function parseSignedDate(raw: string | null | undefined): string | null {
   const s = String(raw).trim().replace(/\/+$/, '').trim();
   if (!s) return null;
   const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  if (iso) {
+    const value = `${iso[1]}-${iso[2]}-${iso[3]}`;
+    return isValidISODate(value) ? value : null;
+  }
   const t = Date.parse(s);
   if (Number.isNaN(t)) return null;
   const d = new Date(t);
@@ -204,6 +210,7 @@ export function gridToClients(grid: string[][]): ParsedClientImport {
     skippedLeadingRows,
     skippedInvalidUrls,
     suspiciousNames,
+    csvErrors: [],
   };
 }
 
@@ -219,9 +226,20 @@ export async function parseClientImportFile(file: File): Promise<ParsedClientImp
     throw new Error('Import files must be 20 MB or smaller');
   }
   const isCsv = /\.csv$/i.test(file.name);
-  const grid: string[][] = isCsv
-    ? (Papa.parse<string[]>(await file.text(), { skipEmptyLines: false }).data as string[][])
-    : sheetToGrid(await file.arrayBuffer());
+  let csvErrors: string[] = [];
+  let grid: string[][];
+  if (isCsv) {
+    const result = Papa.parse<string[]>(await file.text(), { skipEmptyLines: false });
+    grid = result.data as string[][];
+    // Structural CSV problems (unclosed quotes, delimiter confusion) silently
+    // misalign columns — here that attaches a client's removal links to the WRONG
+    // person — so surface them instead of importing blind.
+    csvErrors = result.errors
+      .slice(0, 8)
+      .map((e) => `row ${typeof e.row === 'number' ? e.row + 1 : '?'}: ${e.message}`);
+  } else {
+    grid = sheetToGrid(await file.arrayBuffer());
+  }
 
   if (grid.length > MAX_GRID_ROWS) {
     throw new Error(`Import files are limited to ${MAX_GRID_ROWS} rows`);
@@ -232,5 +250,5 @@ export async function parseClientImportFile(file: File): Promise<ParsedClientImp
   if (grid.some((row) => row.some((cell) => String(cell ?? '').length > MAX_CELL_CHARS))) {
     throw new Error('An import cell exceeds the 10,000 character safety limit');
   }
-  return gridToClients(grid);
+  return { ...gridToClients(grid), csvErrors };
 }

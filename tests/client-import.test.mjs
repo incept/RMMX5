@@ -7,6 +7,7 @@ import {
   parseGross,
   parseSignedDate,
 } from '../lib/client-import.ts';
+import { isValidISODate } from '../lib/valid-date.ts';
 
 test('gridToClients groups a fill-down roster into clients with their links', () => {
   const grid = [
@@ -98,6 +99,29 @@ test('gross and signed-date parsing tolerate messy cells', () => {
   assert.equal(parseSignedDate('not a date'), null);
 });
 
+test('isValidISODate rejects impossible calendar dates a regex would accept', () => {
+  assert.equal(isValidISODate('2025-06-03'), true);
+  assert.equal(isValidISODate('2026-02-31'), false);
+  assert.equal(isValidISODate('2026-99-99'), false);
+  assert.equal(isValidISODate('2026-13-01'), false);
+  assert.equal(isValidISODate('2026-00-10'), false);
+  assert.equal(isValidISODate('2026-2-3'), false); // must be zero-padded
+  assert.equal(isValidISODate('2026-02-29'), false); // 2026 is not a leap year
+  assert.equal(isValidISODate('2024-02-29'), true); // 2024 is
+});
+
+test('parseSignedDate nulls an impossible ISO date instead of passing it to the DB', () => {
+  // Would otherwise reach a ::date cast and abort a mid-import chunk.
+  assert.equal(parseSignedDate('2026-02-31'), null);
+  assert.equal(parseSignedDate('2026-99-99 notes'), null);
+  assert.equal(parseSignedDate('2025-06-03'), '2025-06-03');
+});
+
+test('gridToClients reports no CSV errors (that layer is CSV-parse only)', () => {
+  const res = gridToClients([['Client', 'Website'], ['Jane', 'https://a.com/x']]);
+  assert.deepEqual(res.csvErrors, []);
+});
+
 test('migration 0035 adds the client fields and the idempotent import RPC', async () => {
   const migration = await readFile(
     new URL('../supabase/migrations/0035_client_import.sql', import.meta.url),
@@ -118,6 +142,34 @@ test('the client import route is admin-only and stamps the client status', async
   assert.match(route, /is_client_status/);
   assert.match(route, /import_client_chunk/);
   assert.match(route, /idempotency-key/i);
+});
+
+test('the client import route validates the destination status and never guesses among many', async () => {
+  const route = await readFile(
+    new URL('../app/api/import/clients/route.ts', import.meta.url),
+    'utf8'
+  );
+  // An explicit wizard choice is checked against the client-status set…
+  assert.match(route, /body\.statusId/);
+  assert.match(route, /not a client status/);
+  // …and with several flagged and none named "Client", it refuses rather than
+  // silently misfiling hundreds of rows into an arbitrary lifecycle status.
+  assert.match(route, /Several client statuses exist/);
+  // Real calendar dates only reach the DB.
+  assert.match(route, /isValidISODate\(signed\)/);
+});
+
+test('the import wizard derives a stable idempotency key from the payload', async () => {
+  const page = await readFile(
+    new URL('../app/(app)/import/clients/page.tsx', import.meta.url),
+    'utf8'
+  );
+  // Not a fresh random UUID per selection — a content hash, so a reload + reselect
+  // of the same file reuses the key and cannot duplicate committed clients.
+  assert.match(page, /hashKey\(payload\)/);
+  assert.doesNotMatch(page, /crypto\.randomUUID\(\)/);
+  // And it preflights the body size against the server limit.
+  assert.match(page, /MAX_IMPORT_BODY_BYTES/);
 });
 
 test('gross revenue is admin-only across the contact API, like revenue_projection', async () => {

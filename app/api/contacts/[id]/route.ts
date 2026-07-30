@@ -5,6 +5,7 @@ import { logActivity } from '@/lib/activity';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 import { logDebug } from '@/lib/debug-log';
+import { isValidISODate } from '@/lib/valid-date';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -101,8 +102,8 @@ export async function PATCH(request: Request, { params }: Params) {
       updates.gross_revenue = Math.round(value * 100) / 100;
     }
   }
-  if ('signed_date' in updates && updates.signed_date != null && !/^\d{4}-\d{2}-\d{2}$/.test(String(updates.signed_date))) {
-    return NextResponse.json({ error: 'signed_date must be a date (YYYY-MM-DD)' }, { status: 400 });
+  if ('signed_date' in updates && updates.signed_date != null && !isValidISODate(String(updates.signed_date))) {
+    return NextResponse.json({ error: 'signed_date must be a real date (YYYY-MM-DD)' }, { status: 400 });
   }
   if ('custom' in updates && (updates.custom == null || typeof updates.custom !== 'object' || Array.isArray(updates.custom))) {
     return NextResponse.json({ error: 'custom must be an object' }, { status: 400 });
