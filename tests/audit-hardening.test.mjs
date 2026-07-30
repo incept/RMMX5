@@ -40,8 +40,10 @@ test('contact authorization is enforced below the React UI', async () => {
     migration.match(/grant select \([\s\S]*?\) on table public\.contacts to authenticated/)?.[0] ?? '',
     /revenue_projection/
   );
+  const route = await read('app/api/contacts/[id]/route.ts');
   assert.ok(panel.includes('fetch(`/api/contacts/${contactId}'));
   assert.ok(clients.includes('fetch(`/api/clients?page=${page}'));
+  assert.match(route, /const \{ data: after[\s\S]*?delete \(after as Record<string, any>\)\.revenue_projection/);
 });
 
 test('candidate batches are fenced by the exact queue lease', async () => {

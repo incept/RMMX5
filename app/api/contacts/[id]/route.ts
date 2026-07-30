@@ -158,6 +158,9 @@ export async function PATCH(request: Request, { params }: Params) {
     .eq('id', id)
     .single();
   if (readError) return NextResponse.json({ error: readError.message }, { status: 400 });
+  if (!['admin', 'super_admin'].includes(auth.profile.role)) {
+    delete (after as Record<string, any>).revenue_projection;
+  }
   return NextResponse.json({ contact: after });
 }
 
