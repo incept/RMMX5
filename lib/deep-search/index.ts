@@ -56,9 +56,19 @@ const MAX_SERP_FALLBACKS = 4;
 /**
  * A fallback query is one of up to eight in a run, so it gets a tighter deadline
  * than a name search. Bing was timing out at 60s on site: queries and adding
- * that wait to every domain.
+ * that wait to every domain. Raised from 25s: a fifth of fallbacks were dying at
+ * the cap on slow-but-valid responses. (A persistently timing-out SERP points at
+ * the BrightData zone config, which a client-side timeout cannot fix.)
  */
-const FALLBACK_TIMEOUT_MS = 25_000;
+const FALLBACK_TIMEOUT_MS = 30_000;
+/**
+ * One broad, un-site-restricted name search per run — the highest-value SERP
+ * spend, since it finds records on sites we can't probe (a county-scoped site
+ * with no county) or that aren't in the registry at all. It gets a name-search
+ * deadline, not the tighter fallback one.
+ */
+const BROAD_QUERY_TIMEOUT_MS = 40_000;
+const MAX_BROAD_QUERY_RESULTS = 20;
 const CANDIDATE_BATCH_SIZE = 25;
 
 class CandidateWriter {
@@ -820,6 +830,112 @@ export async function runDeepSearchForContact(
       }
     }
     if (probed >= MAX_PROBES_PER_RUN) break;
+  }
+
+  /* ── One broad name search ────────────────────────────────────────────────
+     Every route above is site-targeted: a record on a site we could not probe
+     (a county-scoped site with no county — recentlybooked.com for an Atlanta
+     lead whose county is unknown) or one not in the registry at all never
+     surfaces. A single broad, UNQUOTED "name city state" query catches those.
+     It reaches page two (20 results), where these records often sit, and the
+     corroboration rules keep another person's record out. Highest-value SERP
+     spend, so it runs before the site: fallbacks and gets a name-search
+     deadline, not the tight fallback one. */
+  const broadState = facts.state[0] ?? seedState ?? stateCode(contact.state) ?? null;
+  if (
+    !ambiguous() &&
+    !outOfTime() &&
+    msLeft() > BROAD_QUERY_TIMEOUT_MS + 5_000 &&
+    name.first &&
+    name.last
+  ) {
+    // Unquoted on purpose: a page rendering "Hollis, Victoria" or "VICTORIA
+    // CLARK HOLLIS" does not satisfy an exact-phrase "Victoria Hollis", so the
+    // auto-search's quoted query missed exactly this kind of record.
+    const broadQuery = [name.first, name.last, contact.city, broadState]
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+    const engines: SearchEngine[] = ['google', 'bing'];
+    discoveryAttempts += engines.length;
+    serpFallbacks += engines.length;
+    const settled = await Promise.allSettled(
+      engines.map((engine) =>
+        runSerpSearch(broadQuery, {
+          engine,
+          numResults: MAX_BROAD_QUERY_RESULTS,
+          timeoutMs: BROAD_QUERY_TIMEOUT_MS,
+          signal,
+          requestKey: opts?.requestKey ? `${opts.requestKey}:broad:${engine}` : undefined,
+        })
+      )
+    );
+    const broadLists: SerpResult[][] = [];
+    for (const [i, outcome] of settled.entries()) {
+      if (outcome.status === 'fulfilled') {
+        broadLists.push(outcome.value);
+        discoverySuccesses += 1;
+      } else {
+        recordDiscoveryFailure(`${engines[i]} broad search`, errorMessage(outcome.reason));
+        await logDebug({
+          level: 'warn',
+          source: 'deep-search:broad',
+          message: `${engines[i]} broad name search failed: ${errorMessage(outcome.reason)}`,
+          context: { query: broadQuery },
+          contactId,
+        });
+      }
+    }
+    if (broadLists.length) {
+      let broadHits = 0;
+      for (const r of mergeSerpResults(broadLists)) {
+        if (!r.link) continue;
+        const canonical = canonicalUrl(r.link);
+        if (!canonical || seen.has(canonical)) continue;
+        // Social/search/sitemap pages are not a person's record page.
+        if (isNonRecordUrl(r.link)) continue;
+        const haystack = `${r.title} ${r.snippet} ${r.link}`;
+        const rowFacts = mergeFacts(
+          mergeFacts({ ...EMPTY_FACTS }, factsFromUrl(r.link, name)),
+          factsFromText(`${r.title} ${r.snippet}`, name)
+        );
+        if (stateConflicts(rowFacts.state)) continue;
+        // Same bar as every other route: surname plus at least one agreeing
+        // fact, so a same-named stranger's page never lands in the queue.
+        const scored = scoreCorroboration(haystack, name, mergeFacts(facts, rowFacts));
+        if (scored.confidence < MIN_CONFIDENCE) continue;
+
+        const rule = matchUrlRule(r.link, rules);
+        const hitSite = sitesAll.find((s) => urlOnDomain(r.link, s.domain));
+        await candidateWriter.add({
+          contact_id: contactId,
+          url: r.link,
+          canonical_url: canonical,
+          title: r.title?.slice(0, 300) || null,
+          snippet: 'found via a broad name search',
+          source: 'google',
+          source_detail: 'broad name search',
+          round: 2,
+          confidence: scored.confidence,
+          matched_facts: scored.matched,
+          url_rule_id: rule?.id ?? null,
+        });
+        seen.add(canonical);
+        candidates += 1;
+        broadHits += 1;
+        if (hitSite) {
+          sitesWithHits.add(hitSite.domain);
+          rememberFamilyIds(familyIds, hitSite.family ?? null, rowFacts.record_ids);
+        }
+        facts = mergeFacts(facts, rowFacts);
+        for (const st of rowFacts.state) statesSeen.add(st);
+      }
+      await logDebug({
+        source: 'deep-search:broad',
+        message: `Broad name search "${broadQuery}" added ${broadHits} candidate(s)`,
+        contactId,
+      });
+    }
   }
 
   /* ── SERP fallback for sites we cannot read directly ──────────────────────
