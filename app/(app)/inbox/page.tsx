@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
+import { useAutoRefresh } from '@/lib/use-auto-refresh';
 
 /**
  * Unified inbox: every inbound + outbound email across all SMTP accounts,
@@ -67,6 +68,9 @@ export default function InboxPage() {
     load();
     loadAccounts();
   }, [load, loadAccounts]);
+
+  // New mail is there when you switch back to the tab, no manual reload.
+  useAutoRefresh(load);
 
   async function sendCompose() {
     if (!compose.to || !compose.subject) return alert('To and subject required');

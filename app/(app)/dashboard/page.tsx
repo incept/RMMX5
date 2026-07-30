@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { useMyRole } from '@/lib/use-my-role';
+import { useAutoRefresh } from '@/lib/use-auto-refresh';
 
 /**
  * Overview: reputation health, pipeline breakdown, recent activity — plus
@@ -25,7 +26,7 @@ export default function DashboardPage() {
   const [revenue, setRevenue] = useState<any>(null);
   const [loadError, setLoadError] = useState('');
 
-  useEffect(() => {
+  const load = useCallback(() => {
     supabase
       .rpc('dashboard_metrics')
       .then(({ data, error }) => {
@@ -48,6 +49,13 @@ export default function DashboardPage() {
         .catch(() => setLoadError('Could not load revenue metrics'));
     }
   }, [supabase, isAdmin]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // Reputation, pipeline, and activity refresh when you return to the tab.
+  useAutoRefresh(load);
 
   const byStatus: { id: string; name: string; color: string; count: number }[] =
     metrics.by_status ?? [];

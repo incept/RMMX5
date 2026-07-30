@@ -2233,3 +2233,20 @@ test('SERP fallbacks get more room before the timeout cap', async () => {
   const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
   assert.match(engine, /const FALLBACK_TIMEOUT_MS = 30_000/);
 });
+
+test('main views auto-refresh when the tab regains focus', async () => {
+  const hook = await readFile(new URL('../lib/use-auto-refresh.ts', import.meta.url), 'utf8');
+  // Fires on focus AND visibility, but only while the tab is actually visible.
+  assert.match(hook, /addEventListener\('focus'/);
+  assert.match(hook, /addEventListener\('visibilitychange'/);
+  assert.match(hook, /document\.visibilityState !== 'visible'/);
+  // One tab-switch emits both focus and visibilitychange; the gap guard collapses
+  // that pair into a single fetch.
+  assert.match(hook, /now - lastRun\.current < minGap/);
+
+  for (const p of ['contacts', 'clients', 'inbox', 'dashboard']) {
+    const page = await readFile(new URL(`../app/(app)/${p}/page.tsx`, import.meta.url), 'utf8');
+    assert.match(page, /import \{ useAutoRefresh \}/, `${p} imports the hook`);
+    assert.match(page, /useAutoRefresh\(load\)/, `${p} wires it to its loader`);
+  }
+});
