@@ -2233,3 +2233,51 @@ test('SERP fallbacks get more room before the timeout cap', async () => {
   const engine = await readFile(new URL('../lib/deep-search/index.ts', import.meta.url), 'utf8');
   assert.match(engine, /const FALLBACK_TIMEOUT_MS = 30_000/);
 });
+
+test('main views auto-refresh when the tab regains focus', async () => {
+  const hook = await readFile(new URL('../lib/use-auto-refresh.ts', import.meta.url), 'utf8');
+  // Fires on focus AND visibility, but only while the tab is actually visible.
+  assert.match(hook, /addEventListener\('focus'/);
+  assert.match(hook, /addEventListener\('visibilitychange'/);
+  assert.match(hook, /document\.visibilityState !== 'visible'/);
+  // One tab-switch emits both focus and visibilitychange; the gap guard collapses
+  // that pair into a single fetch.
+  assert.match(hook, /now - lastRun\.current < minGap/);
+
+  for (const p of ['contacts', 'clients', 'inbox', 'dashboard']) {
+    const page = await readFile(new URL(`../app/(app)/${p}/page.tsx`, import.meta.url), 'utf8');
+    assert.match(page, /import \{ useAutoRefresh \}/, `${p} imports the hook`);
+    assert.match(page, /useAutoRefresh\(load\)/, `${p} wires it to its loader`);
+  }
+});
+
+test('main views subscribe to Realtime changes with a debounced refetch', async () => {
+  const hook = await readFile(new URL('../lib/use-realtime-refresh.ts', import.meta.url), 'utf8');
+  assert.match(hook, /postgres_changes/);
+  assert.match(hook, /channel\(`ui-refresh:/);
+  // A burst of changes coalesces into one refetch per window.
+  assert.match(hook, /if \(timer\) return;/);
+  // A hidden tab skips the refetch (useAutoRefresh handles it on return).
+  assert.match(hook, /document\.visibilityState !== 'visible'/);
+
+  const migration = await readFile(
+    new URL('../supabase/migrations/0032_realtime_publication.sql', import.meta.url),
+    'utf8'
+  );
+  for (const t of ['contacts', 'activity_log', 'email_messages']) {
+    assert.match(migration, new RegExp(`'${t}'`), `${t} added to the publication`);
+  }
+  // Idempotent — guarded so re-running never errors on an already-added table.
+  assert.match(migration, /pg_publication_tables/);
+
+  const wiring = {
+    contacts: /useRealtimeRefresh\('contacts'/,
+    clients: /useRealtimeRefresh\('contacts'/,
+    inbox: /useRealtimeRefresh\('email_messages'/,
+    dashboard: /useRealtimeRefresh\(\['contacts', 'activity_log'\]/,
+  };
+  for (const [p, re] of Object.entries(wiring)) {
+    const page = await readFile(new URL(`../app/(app)/${p}/page.tsx`, import.meta.url), 'utf8');
+    assert.match(page, re, `${p} subscribes to the right table(s)`);
+  }
+});

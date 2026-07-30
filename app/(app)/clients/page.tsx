@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import ContactPanel from '@/components/ContactPanel';
 import { useMyRole } from '@/lib/use-my-role';
+import { useAutoRefresh } from '@/lib/use-auto-refresh';
+import { useRealtimeRefresh } from '@/lib/use-realtime-refresh';
 
 const PAGE_SIZE = 100;
 
@@ -30,6 +32,9 @@ export default function ClientsPage() {
       setLoadError(error instanceof Error ? error.message : 'Could not load clients');
     }
   }, [page]);
+
+  useAutoRefresh(load);
+  useRealtimeRefresh('contacts', load);
 
   useEffect(() => {
     load();
