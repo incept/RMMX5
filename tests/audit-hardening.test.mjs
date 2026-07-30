@@ -60,6 +60,8 @@ test('candidate batches are fenced by the exact queue lease', async () => {
 
 test('contact search and retention paths are bounded', async () => {
   const migration = await read('supabase/migrations/0031_audit_hardening.sql');
+  assert.doesNotMatch(migration, /^\s*(?:as\s+)?\$(?:;)?\s*$/m);
+  assert.equal((migration.match(/\$\$/g) ?? []).length % 2, 0);
   assert.match(migration, /create extension if not exists pg_trgm/);
   assert.match(migration, /with filtered as not materialized/);
   assert.match(migration, /status = 'new'.*180 days/s);
