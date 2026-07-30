@@ -72,14 +72,21 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo 
 sudo apt update && sudo apt install -y caddy
 ```
 
-Point a DNS A record (e.g. `browser.removemymugshot.org`) at the VPS IP **and
-wait for it to resolve** (`getent hosts browser.removemymugshot.org` should
-return the VPS IP) before reloading Caddy — the certificate is issued over
-port 80, so the name must already point here. Then set `/etc/caddy/Caddyfile`
-to:
+Prefer a **neutral domain unrelated to the brand** (e.g. `worker.example.net`)
+rather than a subdomain of the company domain. The hostname is never sent to
+the sites the worker fetches — a direct navigation carries no `Referer`, and
+the worker adds no headers beyond the User-Agent — but the TLS certificate is
+published in public Certificate Transparency logs, so a brand subdomain would
+publicly link this scraping host to the company. A neutral name avoids that;
+the CRM only requires a public `https://` address and does not care what it is.
+
+Point a DNS A record (e.g. `worker.example.net`) at the VPS IP **and wait for
+it to resolve** (`getent hosts worker.example.net` should return the VPS IP)
+before reloading Caddy — the certificate is issued over port 80, so the name
+must already point here. Then set `/etc/caddy/Caddyfile` to:
 
 ```
-browser.removemymugshot.org {
+worker.example.net {
     reverse_proxy 127.0.0.1:8787
 }
 ```
@@ -101,7 +108,7 @@ sudo ufw enable
 
 Admin → Integrations → **Deep-search browser (headless Chrome)**:
 
-- **Remote worker URL**: `https://browser.removemymugshot.org`
+- **Remote worker URL**: `https://worker.example.net` (your neutral worker domain)
 - **Remote worker secret**: the secret from step 4
 
 Within a minute (the availability cache), deep searches resume fetching
