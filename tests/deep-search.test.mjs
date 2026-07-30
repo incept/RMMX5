@@ -1134,11 +1134,12 @@ test('the browser tier can run through a remote worker when local Chrome is abse
   // shape, so fetch-page and the engine are untouched — and the PR #60 skip
   // now only fires when NEITHER local Chrome nor a remote worker exists.
   const browser = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
-  assert.match(browser, /!== null \|\| \(await resolveRemote\(\)\) !== null/);
+  assert.match(browser, /const value = remote \? await remoteHealthy\(remote\) : false/);
+  assert.match(browser, /remoteCircuitOpenUntil/);
   assert.match(browser, /return fetchWithRemoteBrowser\(url, signal\)/);
   // Probe URLs carry client names: the worker address must be public HTTPS,
   // enforced at use as well as at save, and responses are size-capped.
-  assert.match(browser, /parsePublicHttpsUrl\(cfg\.remote_url\)/);
+  assert.match(browser, /assertPublicHttpsUrl\(cfg\.remote_url\)/);
   assert.match(browser, /readResponseText\(res, MAX_RENDERED_HTML_BYTES/);
 
   const settings = await readFile(
@@ -2109,7 +2110,15 @@ test('the deep-search sites admin edits coverage, never the URL templates', asyn
     new URL('../app/(app)/admin/deep-search-sites/page.tsx', import.meta.url),
     'utf8'
   );
-  assert.match(page, /from\('probe_sites'\)/);
+  const route = await readFile(
+    new URL('../app/api/admin/probe-sites/route.ts', import.meta.url),
+    'utf8'
+  );
+  // The browser page goes through the authenticated, logged server boundary.
+  assert.match(page, /fetch\('\/api\/admin\/probe-sites'/);
+  assert.doesNotMatch(page, /from\('probe_sites'\)/);
+  assert.match(route, /from\('probe_sites'\)/);
+  assert.match(route, /apiFailure\('api:admin\/probe-sites'/);
   // It writes the scope columns the engine gates on.
   assert.match(page, /scope_state:/);
   assert.match(page, /scope_county:/);
