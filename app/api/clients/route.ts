@@ -21,10 +21,10 @@ export async function GET(request: Request) {
     if (statusesError) throw statusesError;
     const ids = (clientStatuses ?? []).map((status) => status.id);
     const columns =
-      'id, name, email, phone, state, source, stage_id, client_since, signed_date, service_days, reputation_score, stages ( id, name, color )';
+      'id, name, email, phone, state, source, stage_id, client_since, signed_date, service_days, contact_links ( status ), stages ( id, name, color )';
     let query = admin
       .from('contacts')
-      .select(isAdmin ? `${columns}, revenue_projection, gross_revenue` : columns)
+      .select(isAdmin ? `${columns}, gross_revenue` : columns)
       .order('client_since', { ascending: true })
       .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
     if (ids.length) query = query.or(`status_id.in.(${ids.join(',')}),client_since.not.is.null`);
