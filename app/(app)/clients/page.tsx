@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import ContactPanel from '@/components/ContactPanel';
 import { NameSourceIcon } from '@/components/NameSourceIcon';
@@ -82,7 +83,14 @@ export default function ClientsPage() {
         </div>
       )}
       <div className="mb-5 flex items-center justify-between">
-        <h1 className="text-2xl font-light tracking-tight">Clients</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-light tracking-tight">Clients</h1>
+          {isAdmin && (
+            <Link href="/import/clients" className="btn py-1 text-xs">
+              Import roster
+            </Link>
+          )}
+        </div>
         <div className="text-sm text-gray-500">
           {summary.count} client{summary.count === 1 ? '' : 's'}
           {isAdmin && (
@@ -101,10 +109,14 @@ export default function ClientsPage() {
           <thead>
             <tr>
               <th className="grid-th">Name</th>
+              <th className="grid-th">State</th>
               <th className="grid-th">Stage</th>
+              <th className="grid-th">Signed</th>
               <th className="grid-th">Countdown</th>
               <th className="grid-th">Rep Score</th>
+              {isAdmin && <th className="grid-th">Gross</th>}
               {isAdmin && <th className="grid-th">Projected Revenue</th>}
+              <th className="grid-th">Source</th>
               <th className="grid-th">Email</th>
               <th className="grid-th">Phone</th>
             </tr>
@@ -120,6 +132,7 @@ export default function ClientsPage() {
                       <NameSourceIcon source={c.name_source} className="h-3 w-3" />
                     </span>
                   </td>
+                  <td className="grid-td text-gray-500">{c.state ?? ''}</td>
                   <td className="grid-td" onClick={(e) => e.stopPropagation()}>
                     <select
                       className="input w-44 py-1"
@@ -135,6 +148,7 @@ export default function ClientsPage() {
                       ))}
                     </select>
                   </td>
+                  <td className="grid-td text-gray-500">{c.signed_date ?? ''}</td>
                   <td className="grid-td">
                     {left != null && (
                       <span
@@ -155,11 +169,17 @@ export default function ClientsPage() {
                   <td className="grid-td font-mono">{c.reputation_score ?? ''}</td>
                   {isAdmin && (
                     <td className="grid-td font-mono text-green-700">
+                      {c.gross_revenue > 0 ? `$${Number(c.gross_revenue).toLocaleString()}` : ''}
+                    </td>
+                  )}
+                  {isAdmin && (
+                    <td className="grid-td font-mono text-green-700">
                       {c.revenue_projection > 0
                         ? `$${Number(c.revenue_projection).toLocaleString()}`
                         : ''}
                     </td>
                   )}
+                  <td className="grid-td text-gray-500">{c.source ?? ''}</td>
                   <td className="grid-td text-gray-500">{c.email}</td>
                   <td className="grid-td text-gray-500">{c.phone}</td>
                 </tr>
@@ -167,7 +187,7 @@ export default function ClientsPage() {
             })}
             {clients.length === 0 && (
               <tr>
-                <td colSpan={isAdmin ? 7 : 6} className="px-4 py-12 text-center text-sm text-gray-400">
+                <td colSpan={isAdmin ? 11 : 9} className="px-4 py-12 text-center text-sm text-gray-400">
                   No clients yet — set a contact's status to a client status (e.g. "Client").
                 </td>
               </tr>
