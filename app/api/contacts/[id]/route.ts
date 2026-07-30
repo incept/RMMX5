@@ -54,7 +54,7 @@ export async function PATCH(request: Request, { params }: Params) {
   const allowed = [
     'name', 'city', 'state', 'email', 'phone', 'status_id', 'browser', 'ppc_kw',
     'source', 'ip', 'utm', 'stage_id', 'client_since', 'service_days', 'custom', 'owner_id',
-    'device', 'source_url', 'wp_user', 'gclid',
+    'device', 'source_url', 'wp_user', 'gclid', 'signed_date', 'gross_revenue',
   ];
   const updates: Record<string, any> = {};
   for (const key of allowed) if (key in patch) updates[key] = patch[key];
@@ -85,6 +85,16 @@ export async function PATCH(request: Request, { params }: Params) {
       return NextResponse.json({ error: 'service_days must be an integer from 0 to 3650' }, { status: 400 });
     }
     updates.service_days = value;
+  }
+  if ('gross_revenue' in updates && updates.gross_revenue != null) {
+    const value = Number(updates.gross_revenue);
+    if (!Number.isFinite(value) || value < 0 || value > 99_999_999) {
+      return NextResponse.json({ error: 'gross_revenue must be a number from 0 to 99,999,999' }, { status: 400 });
+    }
+    updates.gross_revenue = Math.round(value * 100) / 100;
+  }
+  if ('signed_date' in updates && updates.signed_date != null && !/^\d{4}-\d{2}-\d{2}$/.test(String(updates.signed_date))) {
+    return NextResponse.json({ error: 'signed_date must be a date (YYYY-MM-DD)' }, { status: 400 });
   }
   if ('custom' in updates && (updates.custom == null || typeof updates.custom !== 'object' || Array.isArray(updates.custom))) {
     return NextResponse.json({ error: 'custom must be an object' }, { status: 400 });

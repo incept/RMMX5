@@ -1049,6 +1049,62 @@ export default function ContactPanel({
                         }
                       />
                     </div>
+                    <div>
+                      <label className="label">Signed date</label>
+                      <input
+                        className="input"
+                        type="date"
+                        value={contact.signed_date ?? ''}
+                        onChange={(e) => setField('signed_date', e.target.value || null)}
+                      />
+                    </div>
+                    <div>
+                      <label className="label">Gross revenue</label>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.01"
+                        value={contact.gross_revenue ?? ''}
+                        placeholder="0.00"
+                        onChange={(e) =>
+                          setField('gross_revenue', e.target.value ? Number(e.target.value) : null)
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="label">Service countdown</label>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm text-gray-600">
+                          {daysLeft != null
+                            ? daysLeft <= 0
+                              ? 'Expired'
+                              : `${daysLeft} days left`
+                            : 'Not started'}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn py-1 text-xs"
+                          disabled={busy === 'save'}
+                          onClick={() => patchContact({ client_since: new Date().toISOString() })}
+                        >
+                          {contact.client_since ? 'Restart' : 'Start'}
+                        </button>
+                        {contact.client_since && (
+                          <button
+                            type="button"
+                            className="btn py-1 text-xs"
+                            disabled={busy === 'save'}
+                            onClick={() => patchContact({ client_since: null })}
+                          >
+                            Stop
+                          </button>
+                        )}
+                      </div>
+                      <p className="mt-1 text-[11px] text-gray-400">
+                        Runs {contact.service_days ?? defaultServiceDays} days from when you start it — set the
+                        length above.
+                      </p>
+                    </div>
                   </>
                 )}
                 {customInputs('contact')}
@@ -1172,6 +1228,8 @@ export default function ContactPanel({
                   'state',
                   'stage_id',
                   'service_days',
+                  'signed_date',
+                  'gross_revenue',
                   'browser',
                   'ppc_kw',
                   'source',
