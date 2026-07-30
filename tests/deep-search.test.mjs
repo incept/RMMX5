@@ -2142,6 +2142,42 @@ test('a reverse-lookup name is marked, and the mark clears on a manual rename', 
   assert.match(migration, /new\.name_source := null/);
 });
 
+test('the phone-source marker distinguishes CallScaler (green) from Trestle (yellow)', async () => {
+  const icon = await readFile(new URL('../components/NameSourceIcon.tsx', import.meta.url), 'utf8');
+  // Two origins, two colors.
+  assert.match(icon, /callscaler:[\s\S]*?text-green-600/);
+  assert.match(icon, /reverse_lookup:[\s\S]*?text-yellow-500/);
+  // A monochrome SVG takes currentColor — a color emoji can't be recolored.
+  assert.match(icon, /fill="currentColor"/);
+  // An unknown or null source renders nothing.
+  assert.match(icon, /if \(!marker\) return null/);
+});
+
+test('CallScaler marks caller-ID names and no longer auto-runs the reverse lookup', async () => {
+  const callscaler = await readFile(
+    new URL('../lib/integrations/callscaler.ts', import.meta.url),
+    'utf8'
+  );
+  // A human caller-ID name is stamped so the UI shows the green marker; a
+  // placeholder ("Caller <number>") is left unmarked.
+  assert.match(callscaler, /name_source: humanName \? 'callscaler' : null/);
+  // The Trestle reverse lookup is an admin action now, never enqueued at intake.
+  assert.match(callscaler, /p_enqueue_enrichment: false/);
+  assert.doesNotMatch(callscaler, /p_enqueue_enrichment: createdContact/);
+});
+
+test('migration 0034 documents both markers and backfills CallScaler names', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/0034_name_source_callscaler.sql', import.meta.url),
+    'utf8'
+  );
+  // Backfill is guarded to unmarked rows and keyed on the caller_name the intake
+  // used, so it never clobbers a reverse_lookup mark or a human-verified name.
+  assert.match(migration, /set name_source = 'callscaler'/);
+  assert.match(migration, /c\.name_source is null/);
+  assert.match(migration, /btrim\(cl\.caller_name\) = c\.name/);
+});
+
 test('the general contacts view and its count exclude clients', async () => {
   const migration = await readFile(
     new URL('../supabase/migrations/0030_contacts_ux.sql', import.meta.url),
@@ -2164,7 +2200,7 @@ test('the contact panel can step to the next/previous contact', async () => {
   // Arrow keys navigate, but never while typing in a field.
   assert.match(panel, /tag === 'INPUT' \|\| tag === 'TEXTAREA' \|\| tag === 'SELECT'/);
   // The derived-name marker shows next to the name.
-  assert.match(panel, /name_source === 'reverse_lookup'/);
+  assert.match(panel, /<NameSourceIcon source=\{contact\.name_source\}/);
 });
 
 test('the contacts grid hands its list to the panel for navigation', async () => {

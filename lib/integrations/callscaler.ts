@@ -171,6 +171,10 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
           .from('contacts')
           .insert({
             name: humanName ? payload.caller_name.trim() : `Caller ${payload.caller_number ?? callId}`,
+            // A real caller-ID name is machine-supplied, not human-entered — mark
+            // it so the UI shows the green "verify me" phone marker. Cleared the
+            // moment someone edits the name (clear_name_source_on_rename trigger).
+            name_source: humanName ? 'callscaler' : null,
             phone: payload.caller_number ?? null,
             status_id: newStatus?.id ?? null,
             source: payload.utm_source ?? payload.source ?? 'call',
@@ -212,7 +216,11 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
       p_call_row_id: claim.id,
       p_call_id: callId,
       p_contact_id: contactId,
-      p_enqueue_enrichment: createdContact,
+      // The reverse phone lookup is now an admin-only action (the "Reverse #
+      // lookup" button), never automatic — a new call contact no longer spends a
+      // billed Trestle lookup on its own. A real name and city/state are filled
+      // only when an admin runs it by hand.
+      p_enqueue_enrichment: false,
       p_enqueue_search: namedNewContact,
     });
     if (completeError) throw new Error(completeError.message);

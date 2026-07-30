@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import StatusPill, { type StatusOption } from '@/components/StatusPill';
+import { NameSourceIcon } from '@/components/NameSourceIcon';
 import { useMyRole } from '@/lib/use-my-role';
 
 const TABS = ['Contact Info', 'Link Data', 'Email', 'Calls', 'Activity', 'Files'] as const;
@@ -819,15 +820,7 @@ export default function ContactPanel({
             <div>
               <h2 className="flex items-center gap-2 text-2xl font-light tracking-tight">
                 {contact.name}
-                {contact.name_source === 'reverse_lookup' && (
-                  <span
-                    className="text-base"
-                    title="Name came from a reverse phone lookup — it may not be accurate. Editing it by hand clears this marker."
-                    aria-label="Name derived from a reverse phone lookup"
-                  >
-                    📞
-                  </span>
-                )}
+                <NameSourceIcon source={contact.name_source} className="h-4 w-4" />
               </h2>
               <div className="mt-1 flex items-center gap-2">
                 <StatusPill
@@ -1069,10 +1062,10 @@ export default function ContactPanel({
                 {customInputs('contact')}
               </div>
 
-              {/* Reverse phone lookup — admin only, because every press is a
-                  billed Trestle call (metered against the same monthly cap as
-                  the automatic enrichment). Shows the raw answer; only blank
-                  fields are ever written. */}
+              {/* Reverse phone lookup — admin only, and now the ONLY way a
+                  Trestle lookup runs: it is no longer automatic on new call
+                  contacts. Every press is a billed Trestle call. Shows the raw
+                  answer; only blank fields (name, city, state) are ever written. */}
               {isAdmin && (
                 <div className="flex flex-wrap items-center gap-2">
                   <button

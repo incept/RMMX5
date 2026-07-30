@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import StatusPill, { type StatusOption } from '@/components/StatusPill';
 import ContactPanel from '@/components/ContactPanel';
+import { NameSourceIcon } from '@/components/NameSourceIcon';
 import { useMyRole } from '@/lib/use-my-role';
 import { useAutoRefresh } from '@/lib/use-auto-refresh';
 import { useRealtimeRefresh } from '@/lib/use-realtime-refresh';
@@ -1164,15 +1165,7 @@ export default function ContactsPage() {
                         </span>
                       )}
                       <span className="whitespace-nowrap text-xs font-medium">{contact.name}</span>
-                      {contact.name_source === 'reverse_lookup' && (
-                        <span
-                          className="flex-none text-[11px] leading-none"
-                          title="Name from a reverse phone lookup — it may not be accurate"
-                          aria-label="Name derived from a reverse phone lookup"
-                        >
-                          📞
-                        </span>
-                      )}
+                      <NameSourceIcon source={contact.name_source} className="h-3 w-3" />
                       <span className="truncate text-[11px] font-light text-gray-400">
                         {[contact.city, contact.state].filter(Boolean).join(', ')}
                       </span>
