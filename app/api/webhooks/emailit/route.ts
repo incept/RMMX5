@@ -7,6 +7,8 @@ import { verifyEmailitWebhook } from '@/lib/webhook-auth';
 import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receipts';
 import { readTextBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
+import { fetchEmailitMessage } from '@/lib/integrations/emailit';
+import { recordInboundEmail } from '@/lib/inbound-email';
 
 /**
  * Emailit event webhook (bounces & complaints) — configure in the Emailit
@@ -46,6 +48,35 @@ export async function POST(request: Request) {
   }
 
   const eventType = String(body?.type ?? body?.event ?? '').toLowerCase();
+
+  // Inbound mail (Webhooks v2). The event carries only headers, so fetch the
+  // full body by id and drop it into the unified inbox via the shared recorder.
+  // De-duplicated on the event id, exactly like the bounce path below.
+  if (eventType === 'email.received' || eventType.endsWith('.received')) {
+    const object = body?.data?.object ?? {};
+    const emailId = object?.id ?? body?.data?.id ?? body?.object?.id ?? body?.id ?? null;
+    if (!emailId) return NextResponse.json({ ok: true, ignored: 'received: missing email id' });
+    const receivedEventId = body?.event_id ?? body?.id ?? `emailit-received:${emailId}`;
+    const claimedReceived = await claimWebhookReceipt('emailit', receivedEventId);
+    if (!claimedReceived) return NextResponse.json({ ok: true, duplicate: true });
+    try {
+      const full = await fetchEmailitMessage(String(emailId));
+      if (!full.ok) throw new Error(full.error);
+      const { contactId } = await recordInboundEmail({
+        from: full.message.from || String(object.from ?? ''),
+        to: full.message.to || String(object.to ?? ''),
+        subject: full.message.subject || String(object.subject ?? ''),
+        html: full.message.html,
+        text: full.message.text,
+        messageId: full.message.messageId ?? String(emailId),
+      });
+      return NextResponse.json({ ok: true, contact_id: contactId });
+    } catch (error: any) {
+      await releaseWebhookReceipt('emailit', receivedEventId);
+      return NextResponse.json({ error: error?.message ?? 'Inbound email failed' }, { status: 500 });
+    }
+  }
+
   if (!eventType.includes('bounce') && !eventType.includes('complaint')) {
     return NextResponse.json({ ok: true, ignored: eventType });
   }

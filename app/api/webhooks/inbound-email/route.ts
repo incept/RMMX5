@@ -1,12 +1,10 @@
 import { NextResponse } from 'next/server';
-import { createAdminClient } from '@/lib/supabase/server';
 import { getSetting } from '@/lib/settings';
-import { stopEnrollmentsFor } from '@/lib/sequence-runner';
-import { logActivity } from '@/lib/activity';
 import { verifyBearerSecret } from '@/lib/webhook-auth';
 import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receipts';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
+import { recordInboundEmail } from '@/lib/inbound-email';
 import { createHash } from 'crypto';
 
 /**
@@ -40,66 +38,16 @@ export async function POST(request: Request) {
   if (!claimed) return NextResponse.json({ ok: true, duplicate: true });
 
   try {
-    const admin = createAdminClient();
-    const extracted = String(body.from).match(/[^\s<>"]+@[^\s<>"]+/)?.[0] ?? String(body.from);
-    const fromEmail = extracted.trim().toLowerCase().slice(0, 320);
-    const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fromEmail);
-
-    const { data: contact } = validEmail
-      ? await admin
-          .from('contacts')
-          .select('id, name')
-          .eq('email_normalized', fromEmail)
-          .limit(1)
-          .maybeSingle()
-      : { data: null };
-
-    const { data: message, error: messageError } = await admin
-      .from('email_messages')
-      .insert({
-        contact_id: contact?.id ?? null,
-        direction: 'inbound',
-        from_email: fromEmail,
-        to_email: String(body.to ?? '').slice(0, 320),
-        subject: String(body.subject ?? '(no subject)').slice(0, 500),
-        html: String(body.html ?? body.text ?? '').slice(0, 750_000),
-        message_id: body.message_id ? String(body.message_id).slice(0, 1000) : null,
-        in_reply_to: body.in_reply_to ? String(body.in_reply_to).slice(0, 1000) : null,
-        status: 'received',
-        sent_at: new Date().toISOString(),
-      })
-      .select('id')
-      .single();
-    if (messageError) throw messageError;
-
-    if (contact) {
-      // Mark the latest outbound message to this contact as replied.
-      const { data: lastOut } = await admin
-        .from('email_messages')
-        .select('id')
-        .eq('contact_id', contact.id)
-        .eq('direction', 'outbound')
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (lastOut) {
-        await admin.from('email_messages').update({ replied: true }).eq('id', lastOut.id);
-        await admin.from('email_events').insert({
-          message_id: lastOut.id,
-          contact_id: contact.id,
-          type: 'reply',
-        });
-      }
-      await stopEnrollmentsFor(contact.id, 'reply');
-      await logActivity({
-        contactId: contact.id,
-        type: 'email',
-        description: `Reply received from ${fromEmail}: "${body.subject ?? ''}"`,
-        meta: { message_row_id: message?.id },
-      });
-    }
-
-    return NextResponse.json({ ok: true, contact_id: contact?.id ?? null });
+    const { contactId } = await recordInboundEmail({
+      from: body.from,
+      to: body.to,
+      subject: body.subject,
+      html: body.html,
+      text: body.text,
+      messageId: body.message_id,
+      inReplyTo: body.in_reply_to,
+    });
+    return NextResponse.json({ ok: true, contact_id: contactId });
   } catch (error: any) {
     await releaseWebhookReceipt('inbound_email', eventId);
     return NextResponse.json({ error: error?.message ?? 'Inbound email failed' }, { status: 500 });
