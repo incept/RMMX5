@@ -31,10 +31,34 @@ export async function GET(request: Request) {
   const ascending = url.searchParams.get('dir') !== 'desc';
   // Strip PostgREST filter syntax before the term goes into an .or() string.
   const q = (url.searchParams.get('q') ?? '').replace(/[,()%*:\\]/g, ' ').trim().slice(0, 100);
+  // Optional filter: clients holding at least one removal link in this status.
+  const linkStatusParam = url.searchParams.get('linkStatus') ?? '';
+  const linkStatus =
+    (['live', 'requested', 'removed'] as const).find((s) => s === linkStatusParam) ?? null;
 
   const admin = createAdminClient();
 
   try {
+    // Resolve which contacts hold a link in the chosen status first, so the
+    // embedded contact_links (the full Live/Requested/Removed counts shown in
+    // the grid) is not narrowed by the filter. An empty match short-circuits.
+    let linkContactIds: string[] | null = null;
+    if (linkStatus) {
+      const { data: linkRows, error: linkError } = await admin
+        .from('contact_links')
+        .select('contact_id')
+        .eq('status', linkStatus);
+      if (linkError) throw linkError;
+      linkContactIds = [...new Set((linkRows ?? []).map((r) => r.contact_id as string))];
+      if (linkContactIds.length === 0) {
+        const { data: summaryOnly } = await auth.supabase.rpc('client_summary');
+        return NextResponse.json({
+          clients: [],
+          summary: { count: 0, projection_total: summaryOnly?.projection_total ?? 0 },
+        });
+      }
+    }
+
     const { data: clientStatuses, error: statusesError } = await admin
       .from('statuses')
       .select('id')
@@ -52,6 +76,7 @@ export async function GET(request: Request) {
     if (ids.length) query = query.or(`status_id.in.(${ids.join(',')}),client_since.not.is.null`);
     else query = query.not('client_since', 'is', null);
     if (q) query = query.or(`name.ilike.%${q}%,email.ilike.%${q}%,phone.ilike.%${q}%`);
+    if (linkContactIds) query = query.in('id', linkContactIds);
 
     const [{ data, error, count }, { data: summary, error: summaryError }] = await Promise.all([
       query,

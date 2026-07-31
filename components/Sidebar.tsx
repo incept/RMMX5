@@ -38,7 +38,7 @@ const SECTIONS: Section[] = [
   },
   {
     id: 'outreach',
-    label: 'Outreach',
+    label: 'Messaging',
     children: [
       { href: '/inbox', label: 'Inbox' },
       { href: '/marketing', label: 'Email Marketing' },

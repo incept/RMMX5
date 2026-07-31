@@ -83,6 +83,7 @@ export default function ClientsPage() {
   const [asc, setAsc] = useState(true);
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [linkStatus, setLinkStatus] = useState('');
   const dragCol = useRef<ClientColKey | null>(null);
   const [dragOver, setDragOver] = useState<ClientColKey | null>(null);
 
@@ -91,6 +92,7 @@ export default function ClientsPage() {
     try {
       const params = new URLSearchParams({ page: String(page), sort, dir: asc ? 'asc' : 'desc' });
       if (debouncedSearch.trim()) params.set('q', debouncedSearch.trim());
+      if (linkStatus) params.set('linkStatus', linkStatus);
       const response = await fetch(`/api/clients?${params}`, { cache: 'no-store' });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error ?? 'Could not load clients');
@@ -99,7 +101,7 @@ export default function ClientsPage() {
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : 'Could not load clients');
     }
-  }, [page, sort, asc, debouncedSearch]);
+  }, [page, sort, asc, debouncedSearch, linkStatus]);
 
   useAutoRefresh(load);
   useRealtimeRefresh('contacts', load);
@@ -113,8 +115,8 @@ export default function ClientsPage() {
       .then(({ data }) => setStages(data ?? []));
   }, [load, supabase]);
 
-  // A sort or search change starts over at the first page.
-  useEffect(() => setPage(0), [sort, asc, debouncedSearch]);
+  // A sort, search, or filter change starts over at the first page.
+  useEffect(() => setPage(0), [sort, asc, debouncedSearch, linkStatus]);
 
   // Debounce the search box so typing doesn't fire a request per keystroke.
   useEffect(() => {
@@ -282,7 +284,7 @@ export default function ClientsPage() {
         </div>
       </div>
 
-      <div className="mb-3">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <input
           className="input max-w-xs"
           type="search"
@@ -290,6 +292,20 @@ export default function ClientsPage() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
+        {/* Inline width, not a w-* utility: the unlayered `.input` sets w-full,
+            which outranks utility widths and would balloon this select. */}
+        <select
+          className="input py-1.5"
+          style={{ width: '13rem' }}
+          value={linkStatus}
+          onChange={(e) => setLinkStatus(e.target.value)}
+          title="Filter to clients holding a link in this status"
+        >
+          <option value="">All link statuses</option>
+          <option value="live">Has live links</option>
+          <option value="requested">Has requested links</option>
+          <option value="removed">Has removed links</option>
+        </select>
       </div>
 
       <div className="card overflow-x-auto p-0">

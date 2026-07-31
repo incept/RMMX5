@@ -6,6 +6,46 @@ import { useAutoRefresh } from '@/lib/use-auto-refresh';
 import { useRealtimeRefresh } from '@/lib/use-realtime-refresh';
 
 /**
+ * Wraps a message body in a minimal HTML document whose base styles track the
+ * app theme, so a sent message reads as part of the CRM instead of the bare
+ * white / black / serif block a raw fragment renders as. Still injected into the
+ * sandboxed iframe below (no scripts), so inbound mail that ships its own
+ * styling renders as the sender built it — only the frame's defaults change.
+ */
+function framedEmail(html: string, dark: boolean): string {
+  const bg = dark ? '#282c34' : '#ffffff'; // --color-surface, both themes
+  const fg = dark ? '#f0f2f5' : '#111827'; // gray-900, both themes
+  const link = dark ? '#a5b4fc' : '#4f46e5';
+  const rule = dark ? '#474d59' : '#e5e7eb';
+  const muted = dark ? '#b4bac3' : '#6b7280';
+  return `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<base target="_blank">
+<style>
+  :root { color-scheme: ${dark ? 'dark' : 'light'}; }
+  html, body { margin: 0; }
+  body {
+    padding: 12px;
+    background: ${bg};
+    color: ${fg};
+    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
+    overflow-wrap: break-word;
+  }
+  a { color: ${link}; }
+  img, table { max-width: 100%; }
+  table { border-collapse: collapse; }
+  blockquote {
+    margin: 0 0 0 0.8em;
+    padding-left: 0.8em;
+    border-left: 3px solid ${rule};
+    color: ${muted};
+  }
+</style></head><body>${html}</body></html>`;
+}
+
+/**
  * Unified inbox: every inbound + outbound email across all SMTP accounts,
  * with a compose box (account picker; the account's signature is appended
  * automatically) and SMTP account management.
@@ -29,6 +69,9 @@ export default function InboxPage() {
   });
   const [accountForm, setAccountForm] = useState<any>(null);
   const [busy, setBusy] = useState(false);
+  // Theme for the email preview frame; kept in sync with the <html class="dark">
+  // toggle so switching light/dark re-renders the message in the matching palette.
+  const [dark, setDark] = useState(false);
 
   const load = useCallback(async () => {
     let query = supabase
@@ -69,6 +112,16 @@ export default function InboxPage() {
     load();
     loadAccounts();
   }, [load, loadAccounts]);
+
+  // Follow the app's light/dark class so the preview frame repaints on toggle.
+  useEffect(() => {
+    const root = document.documentElement;
+    const sync = () => setDark(root.classList.contains('dark'));
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(root, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, []);
 
   // New mail is there when you switch back to the tab, no manual reload, and
   // the Realtime subscription surfaces it while the inbox is open.
@@ -215,7 +268,7 @@ export default function InboxPage() {
                 must never run scripts or touch this origin's session. */}
             <iframe
               sandbox="allow-popups"
-              srcDoc={selected.html}
+              srcDoc={framedEmail(selected.html ?? '', dark)}
               title="Email content"
               className="card mt-4 h-[60vh] w-full"
             />
