@@ -33,6 +33,22 @@ test('the clients API sorts on a whitelist, searches safely, and counts the filt
   assert.match(route, /contact_links \( status \)/);
 });
 
+test('clients can be filtered by link status without losing the Link Stats counts', async () => {
+  const page = await readFile(new URL('../app/(app)/clients/page.tsx', import.meta.url), 'utf8');
+  // A dropdown wired to the linkStatus param that resets to the first page.
+  assert.match(page, /All link statuses/);
+  assert.match(page, /params\.set\('linkStatus', linkStatus\)/);
+  assert.match(page, /setPage\(0\), \[sort, asc, debouncedSearch, linkStatus\]/);
+
+  const route = await readFile(new URL('../app/api/clients/route.ts', import.meta.url), 'utf8');
+  // Only the three real statuses are accepted; the match is resolved via
+  // contact_links first (so the embedded counts stay whole), then applied as an
+  // id filter on the paginated, exact-counted query.
+  assert.match(route, /\['live', 'requested', 'removed'\]/);
+  assert.match(route, /from\('contact_links'\)/);
+  assert.match(route, /query\.in\('id', linkContactIds\)/);
+});
+
 test('the Link Data status sits under the URL, not in a shared flex row', async () => {
   const panel = await readFile(new URL('../components/ContactPanel.tsx', import.meta.url), 'utf8');
   assert.match(panel, /Removal status sits UNDER/);
