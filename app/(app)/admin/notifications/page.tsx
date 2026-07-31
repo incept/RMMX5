@@ -19,6 +19,11 @@ const EVENT_LABELS: Record<string, { title: string; hint: string; vars: string }
     hint: 'Fires when a client has N days left in their service period (checked by the cron tick).',
     vars: '{{name}} {{days_left}}',
   },
+  client_countdown_admin: {
+    title: 'Client countdown (internal)',
+    hint: 'Same trigger as the client countdown, but alerts the team members you choose below instead of the client.',
+    vars: '{{name}} {{days_left}}',
+  },
 };
 
 /** Admin: configurable email/SMS notifications for clients. */
@@ -26,18 +31,26 @@ export default function NotificationsPage() {
   const supabase = useMemo(() => createClient(), []);
   const [rules, setRules] = useState<any[]>([]);
   const [log, setLog] = useState<any[]>([]);
+  const [users, setUsers] = useState<any[]>([]);
 
   const load = useCallback(async () => {
-    const [r, l] = await Promise.all([
+    const [r, l, u] = await Promise.all([
       supabase.from('notification_rules').select('*').order('event'),
       supabase
         .from('notifications_log')
         .select('*, contacts ( name )')
         .order('created_at', { ascending: false })
         .limit(25),
+      // Recipients for the internal-countdown picker: active team members only.
+      supabase
+        .from('profiles')
+        .select('id, full_name, email, phone')
+        .eq('status', 'active')
+        .order('full_name'),
     ]);
     setRules(r.data ?? []);
     setLog(l.data ?? []);
+    setUsers(u.data ?? []);
   }, [supabase]);
 
   useEffect(() => {
@@ -91,15 +104,17 @@ export default function NotificationsPage() {
                   </label>
                 ))}
               </div>
-              <label className="flex items-center gap-1 text-sm">
-                <input
-                  type="checkbox"
-                  checked={!!rule.clients_only}
-                  onChange={(e) => update(rule.id, { clients_only: e.target.checked })}
-                />
-                Clients only
-              </label>
-              {rule.event === 'client_countdown' && (
+              {rule.event !== 'client_countdown_admin' && (
+                <label className="flex items-center gap-1 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={!!rule.clients_only}
+                    onChange={(e) => update(rule.id, { clients_only: e.target.checked })}
+                  />
+                  Clients only
+                </label>
+              )}
+              {(rule.event === 'client_countdown' || rule.event === 'client_countdown_admin') && (
                 <label className="flex items-center gap-1 text-sm">
                   Days-before thresholds:
                   <input
@@ -120,6 +135,55 @@ export default function NotificationsPage() {
                 </label>
               )}
             </div>
+
+            {rule.event === 'client_countdown_admin' && (
+              <div className="mt-3">
+                <label className="label">Recipients (team members)</label>
+                <div className="flex flex-wrap gap-1.5">
+                  {users.map((u) => {
+                    const ids: string[] = rule.config?.recipient_user_ids ?? [];
+                    const selected = ids.includes(u.id);
+                    return (
+                      <button
+                        key={u.id}
+                        type="button"
+                        onClick={() =>
+                          update(rule.id, {
+                            config: {
+                              ...rule.config,
+                              recipient_user_ids: selected
+                                ? ids.filter((x) => x !== u.id)
+                                : [...ids, u.id],
+                            },
+                          })
+                        }
+                        title={
+                          selected && !u.phone
+                            ? 'No phone on file — SMS will be skipped for this person'
+                            : u.email
+                        }
+                        className={`rounded-full px-3 py-1 text-xs font-medium ${
+                          selected
+                            ? 'bg-brand-600 text-white'
+                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                        }`}
+                      >
+                        {u.full_name || u.email}
+                        {selected && !u.phone && ' ⚠'}
+                      </button>
+                    );
+                  })}
+                  {users.length === 0 && (
+                    <span className="text-xs text-gray-400">No active users to notify.</span>
+                  )}
+                </div>
+                {(rule.channels ?? []).includes('sms') && (
+                  <p className="mt-1 text-xs text-gray-400">
+                    ⚠ = no phone on file; SMS is skipped for that person.
+                  </p>
+                )}
+              </div>
+            )}
 
             <div className="mt-3">
               <label className="label">

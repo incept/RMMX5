@@ -392,7 +392,12 @@ async function handleJob(job: any, worker: string, signal?: AbortSignal) {
     if (payload.channel === 'email' && payload.destination) {
       result = await sendViaEmailit({
         to: String(payload.destination),
-        subject: 'Update on your case',
+        // Client-facing alerts keep the default subject; internal alerts (e.g.
+        // the admin countdown) pass their own so the inbox line makes sense.
+        subject:
+          typeof payload.subject === 'string' && payload.subject
+            ? payload.subject
+            : 'Update on your case',
         html: `<p>${escapeHtml(payload.message).replaceAll('\n', '<br/>')}</p>`,
       });
     } else if (payload.channel === 'sms' && payload.destination) {
