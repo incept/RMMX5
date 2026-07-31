@@ -12,14 +12,14 @@
   --color-brand-700: #4338ca;
 
   /* Page background and raised surfaces (cards, panels, menus). Referenced by
-     the primitives below instead of literal bg-white / bg-gray-50 so both
-     themes are defined in exactly one place.
+     the primitives below — and by every bg-white, via a rule further down —
+     instead of literal colours, so both themes are defined in one place.
 
-     Canvas is a clear medium grey rather than near-white: cards/panels stay
-     white (surface), so raised content reads as raised instead of blending
-     into the page. Nudge this pair together to dial the contrast. */
-  --color-surface: #ffffff;
-  --color-canvas: #e4e7ec;
+     Both are greys now: surface (cards/panels) is a soft light grey and canvas
+     (the page) sits a step darker, so raised content still reads as raised
+     instead of blending in. Nudge this pair together to dial the darkness. */
+  --color-surface: #e4e7ec;
+  --color-canvas: #cdd3db;
 }
 
 /* ---------------------------------------------------------------------------
@@ -86,11 +86,17 @@
   color-scheme: dark;
 }
 
-/* Backgrounds that must NOT follow their variable into the light. Each pairs
-   with a text utility of the same name that has to move the other way. */
-:root.dark .bg-white {
+/* bg-white is used throughout as a raised-surface fill, so it tracks
+   --color-surface in BOTH themes: a soft grey in light mode, the dark surface
+   in dark mode. Light mode's surface is no longer pure white, so these surfaces
+   read a step above the canvas instead of glaring white. (Unlayered, so it wins
+   over Tailwind's own .bg-white utility.) */
+.bg-white {
   background-color: var(--color-surface);
 }
+
+/* Backgrounds that must NOT follow their variable into the light. Each pairs
+   with a text utility of the same name that has to move the other way. */
 :root.dark .bg-red-600 {
   background-color: #b91c1c;
 }
@@ -116,7 +122,7 @@ body {
 /* ---- Reusable primitives (Airtable/Monday-ish, light and dense) ---- */
 
 .btn {
-  @apply inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-surface px-3 py-1.5 text-sm font-medium text-gray-700 shadow-xs transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-surface px-3 py-1.5 text-sm font-medium text-gray-700 shadow-xs transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .btn-primary {
@@ -132,7 +138,7 @@ body {
 }
 
 .input {
-  @apply w-full rounded-lg border border-gray-200 bg-surface px-3 py-1.5 text-sm text-gray-900 placeholder-gray-400 outline-none transition-colors focus:border-brand-500 focus:ring-2 focus:ring-brand-100;
+  @apply w-full rounded-lg border border-gray-300 bg-surface px-3 py-1.5 text-sm text-gray-900 placeholder-gray-400 outline-none transition-colors focus:border-brand-500 focus:ring-2 focus:ring-brand-100;
 }
 
 .label {
@@ -140,7 +146,7 @@ body {
 }
 
 .card {
-  @apply rounded-xl border border-gray-200 bg-surface p-4 shadow-xs;
+  @apply rounded-xl border border-gray-300 bg-surface p-4 shadow-xs;
 }
 
 .panel-tab {
