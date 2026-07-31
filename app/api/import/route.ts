@@ -100,21 +100,23 @@ export async function POST(request: Request) {
       contactIds.push(...((data ?? []) as string[]));
     }
 
-    const { error: logError } = await admin.from('imports').upsert(
-      {
-        request_key: requestKey,
-        filename: text(body.filename ?? 'import', 255),
-        source: body.source === 'csv' ? 'csv' : 'monday',
-        mapping: body.mapping ?? {},
-        total_rows: rows.length,
-        imported_rows: contactIds.length,
-        status: 'done',
-        error: null,
-        created_by: auth.profile.id,
-      },
-      { onConflict: 'request_key' }
-    );
-    if (logError) throw logError;
+    // Plain insert, not upsert: imports.request_key has a PARTIAL unique index
+    // (where request_key is not null) that ON CONFLICT (request_key) cannot infer
+    // — it errors "no unique or exclusion constraint matching". A duplicate key
+    // is an idempotent re-run whose audit row already exists (fine to ignore);
+    // any other error is real.
+    const { error: logError } = await admin.from('imports').insert({
+      request_key: requestKey,
+      filename: text(body.filename ?? 'import', 255),
+      source: body.source === 'csv' ? 'csv' : 'monday',
+      mapping: body.mapping ?? {},
+      total_rows: rows.length,
+      imported_rows: contactIds.length,
+      status: 'done',
+      error: null,
+      created_by: auth.profile.id,
+    });
+    if (logError && logError.code !== '23505') throw logError;
 
     return NextResponse.json({
       imported: contactIds.length,
