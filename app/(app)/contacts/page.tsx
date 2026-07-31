@@ -1156,14 +1156,20 @@ export default function ContactsPage() {
                       onClick={() => setSelectedId(contact.id)}
                     >
                       {searchIcon(contact)}
-                      {contact.search_flag && (
-                        <span
-                          className="cursor-help text-amber-500"
-                          title={`Search needs a re-run: ${contact.search_flag}`}
-                        >
-                          ⚑
-                        </span>
-                      )}
+                      {contact.search_flag &&
+                        (/^Source temporarily unreachable/.test(contact.search_flag) ? (
+                          // A down source is neutral, not a warning: faint flag, plain tooltip.
+                          <span className="cursor-help text-gray-300" title={contact.search_flag}>
+                            ⚑
+                          </span>
+                        ) : (
+                          <span
+                            className="cursor-help text-amber-500"
+                            title={`Search needs a re-run: ${contact.search_flag}`}
+                          >
+                            ⚑
+                          </span>
+                        ))}
                       <span className="whitespace-nowrap text-xs font-medium">{contact.name}</span>
                       <NameSourceIcon source={contact.name_source} className="h-3 w-3" />
                       <span className="truncate text-[11px] font-light text-gray-400">

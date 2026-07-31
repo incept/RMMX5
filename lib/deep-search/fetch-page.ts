@@ -9,6 +9,7 @@ import { logDebug } from '@/lib/debug-log';
 import { finishUsage, reserveUsage } from '@/lib/usage';
 import { assertPublicWebUrl } from '@/lib/public-url';
 import { classifyLoadedPage } from './removed-page.ts';
+import { isUnreachableFailure } from './failure-classify.ts';
 
 /**
  * Page fetching for probes.
@@ -679,7 +680,9 @@ export async function logProbeFailure(domain: string, url: string, reason: strin
   await logDebug({
     level: 'warn',
     source: 'deep-search:probe',
-    message: `Probe of ${domain} could not be read: ${reason}`,
+    message: isUnreachableFailure(reason)
+      ? `Probe of ${domain} skipped — host unreachable, likely a temporary outage: ${reason}`
+      : `Probe of ${domain} could not be read: ${reason}`,
     context: { url },
     contactId,
   });
