@@ -35,8 +35,8 @@ test('probeLinkLiveness skips the billable tier and never reads a block as gone'
   // A definitive not-found with no block signal is gone; a block stays unknown.
   assert.match(lib, /goneSignal && !blockSignal/);
   assert.match(lib, /state: 'unknown'/);
-  // Content check: the page still naming the client means it's live.
-  assert.match(lib, /function pageMentionsName/);
+  // A loaded page is classified by the pure removed-page module.
+  assert.match(lib, /classifyLoadedPage/);
 });
 
 test('the scan enqueues heavy link_recheck jobs; the job records but never auto-flips', async () => {

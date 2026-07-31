@@ -8,6 +8,7 @@ import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
 import { finishUsage, reserveUsage } from '@/lib/usage';
 import { assertPublicWebUrl } from '@/lib/public-url';
+import { classifyLoadedPage } from './removed-page.ts';
 
 /**
  * Page fetching for probes.
@@ -684,21 +685,13 @@ export async function logProbeFailure(domain: string, url: string, reason: strin
   });
 }
 
-/** True when every token of the name appears as a whole word in the page text. */
-function pageMentionsName(text: string, name: string): boolean {
-  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  const parts = norm(name).split(' ').filter((p) => p.length >= 2);
-  if (parts.length === 0) return true; // no name to look for — can't call it gone
-  const haystack = ` ${norm(text)} `;
-  return parts.every((p) => haystack.includes(` ${p} `));
-}
-
 export type Liveness = { state: 'gone' | 'live' | 'unknown'; note: string };
 
 /**
  * Is a client's removal link still up? Reuses the probe tiers (free direct →
  * proxy → Chrome; the billable unlocker is skipped) and interprets the result
  * for REMOVAL rather than discovery:
+ *   - a page matching a per-site "removed page" fingerprint / placeholder → gone
  *   - a page that loads but no longer names the client → gone
  *   - a page that still names them → live
  *   - a definitive 404/410/"error page" with no block signal → gone
@@ -721,10 +714,17 @@ export async function probeLinkLiveness(
   }
 
   if (outcome.ok) {
-    const text = stripToText(outcome.html, url);
-    return pageMentionsName(text, name)
-      ? { state: 'live', note: `page still names the client (via ${outcome.via})` }
-      : { state: 'gone', note: `page loaded but no longer names the client (via ${outcome.via})` };
+    // A per-site "removed page" fingerprint or generic placeholder wording wins
+    // over the name check, so a takedown placeholder that still echoes the
+    // client's name is still read as gone. See removed-page.ts.
+    const state = classifyLoadedPage(url, name, outcome.html);
+    return {
+      state,
+      note:
+        state === 'live'
+          ? `page still names the client (via ${outcome.via})`
+          : `page reads as removed or no longer names the client (via ${outcome.via})`,
+    };
   }
 
   const reason = outcome.reason.toLowerCase();
