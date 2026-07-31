@@ -24,6 +24,7 @@ import {
   stateName,
 } from './facts.ts';
 import { fetchProbePage, linksFromText, logProbeFailure, stripToText } from './fetch-page.ts';
+import { isUnreachableFailure } from './failure-classify.ts';
 import { factsFromLlmRows, factsFromText, factsFromUrl, isNonRecordUrl } from './extract.ts';
 import { classifySerpResults, extractRowsWithLlm } from './llm.ts';
 
@@ -1285,10 +1286,26 @@ export async function runDeepSearchForContact(
     }).catch(() => {});
     if (!hasPartialResults) throw new Error(message);
   } else if (discoveryFailures.length || deadlineHit) {
-    healthWarning =
-      `Partial deep search: ${discoverySuccesses} of ${discoveryAttempts} external source ` +
-      `attempt(s) completed${deadlineHit ? ' before the time window closed' : ''}. ` +
-      'All candidates and learned facts were retained; confirm them, then run a secondary search.';
+    const unreachable = discoveryFailures.filter((f) => isUnreachableFailure(f));
+    if (unreachable.length === discoveryFailures.length && !deadlineHit) {
+      // Every failure this run was a source we could not reach at all
+      // (DNS/connection) — a site that is temporarily down, not a page the
+      // operator can fix. Re-running won't help until it is back, so word it
+      // plainly and prefix "Source temporarily unreachable" so the UI renders it
+      // neutral (white) instead of the amber "needs a re-run" banner.
+      const downSites = [
+        ...new Set(unreachable.map((f) => f.split(':')[0].trim()).filter(Boolean)),
+      ].join(', ');
+      healthWarning =
+        `Source temporarily unreachable: ${downSites} did not respond ` +
+        `(${discoverySuccesses} of ${discoveryAttempts} sources answered). All candidates and ` +
+        'learned facts were kept — this usually clears on its own once the source is back.';
+    } else {
+      healthWarning =
+        `Partial deep search: ${discoverySuccesses} of ${discoveryAttempts} external source ` +
+        `attempt(s) completed${deadlineHit ? ' before the time window closed' : ''}. ` +
+        'All candidates and learned facts were retained; confirm them, then run a secondary search.';
+    }
   }
 
   // Say plainly that the window closed early. The candidates above were still

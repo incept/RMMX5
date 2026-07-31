@@ -1237,17 +1237,26 @@ export default function ContactPanel({
 
           {tab === 'Link Data' && (
             <div className="space-y-4">
-              {contact.search_flag && (
-                <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                  <span className="mr-1">⚑</span>
-                  <span className="font-semibold">Search needs a re-run:</span>{' '}
-                  {contact.search_flag}. Fix the cause if it has one (add a city/state, or a
-                  commercial ip-api key), then press{' '}
-                  <span className="font-semibold">🕵 Deep search</span> below. If the reason is
-                  that a page is not indexed yet, wait a few days and re-run — a successful run
-                  clears this flag.
-                </div>
-              )}
+              {contact.search_flag &&
+                (/^Source temporarily unreachable/.test(contact.search_flag) ? (
+                  // A source was simply down (DNS/connection) — not a fault the
+                  // operator can fix, so it reads neutral (white) with no re-run push.
+                  <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">
+                    <span className="mr-1">⚑</span>
+                    {contact.search_flag} No action needed — it clears on its own once the source
+                    is back.
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    <span className="mr-1">⚑</span>
+                    <span className="font-semibold">Search needs a re-run:</span>{' '}
+                    {contact.search_flag}. Fix the cause if it has one (add a city/state, or a
+                    commercial ip-api key), then press{' '}
+                    <span className="font-semibold">🕵 Deep search</span> below. If the reason is
+                    that a page is not indexed yet, wait a few days and re-run — a successful run
+                    clears this flag.
+                  </div>
+                ))}
               {/*
                 Compact stat strip: number and label sit on one line, so the row
                 costs roughly a third of the height the stacked cards did and the
