@@ -1342,7 +1342,7 @@ export default function ContactPanel({
                         {link.position}
                       </span>
                       <input
-                        className="input flex-1"
+                        className="input min-w-0 flex-1"
                         placeholder={`Link ${link.position} URL`}
                         value={link.url}
                         onChange={(e) =>
@@ -1351,40 +1351,42 @@ export default function ContactPanel({
                           )
                         }
                       />
-                      {/* Removal work only starts once someone becomes a
-                          client — before that the tab is just the found
-                          links, so the status dropdown stays out of the way. */}
-                      {isClient && (
-                        <>
-                          <select
-                            className="input w-32"
-                            value={link.status}
-                            style={{ color: LINK_STATUS_COLORS[link.status] }}
-                            onChange={(e) =>
-                              setLinks((ls) =>
-                                ls.map((l, j) =>
-                                  j === i ? { ...l, status: e.target.value as LinkSlot['status'] } : l
-                                )
+                    </div>
+                    {/* Removal status sits UNDER the URL, not beside it. Beside it,
+                        the two shared a flex row and .input's w-full (it's an
+                        unlayered primitive, so it outranks the w-32 utility in
+                        Tailwind v4) ballooned the select and crushed the URL field.
+                        Status only matters once the contact is a client. */}
+                    {isClient && (
+                      <div className="mt-1 ml-8 flex items-center gap-2">
+                        <select
+                          className="rounded-lg border border-gray-200 bg-surface px-2 py-1 text-xs outline-none focus:border-brand-500"
+                          value={link.status}
+                          style={{ color: LINK_STATUS_COLORS[link.status] }}
+                          onChange={(e) =>
+                            setLinks((ls) =>
+                              ls.map((l, j) =>
+                                j === i ? { ...l, status: e.target.value as LinkSlot['status'] } : l
                               )
-                            }
-                          >
-                            <option value="live">Live</option>
-                            <option value="requested">Requested</option>
-                            <option value="removed">Removed</option>
-                          </select>
+                            )
+                          }
+                        >
+                          <option value="live">Live</option>
+                          <option value="requested">Requested</option>
+                          <option value="removed">Removed</option>
+                        </select>
+                        {link.difficulty ? (
                           <span
-                            className="w-10 text-center text-xs text-gray-400"
+                            className="text-xs text-gray-400"
                             title="Removal difficulty (from URL rules)"
                           >
-                            {link.difficulty ? `D${link.difficulty}` : ''}
+                            D{link.difficulty}
                           </span>
-                        </>
-                      )}
-                    </div>
-                    {/* The auto search fills these slots, and every match still
-                        gets eyeballed before we trust it — so the FULL url is
-                        laid out (wrapped, never truncated) as a click-out to
-                        the live page in a new tab. */}
+                        ) : null}
+                      </div>
+                    )}
+                    {/* The full URL, wrapped (never truncated), as a click-out to
+                        verify the match in a new tab. */}
                     {link.url.trim() && (
                       <a
                         href={/^https?:\/\//i.test(link.url.trim()) ? link.url.trim() : `https://${link.url.trim()}`}

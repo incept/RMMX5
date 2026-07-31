@@ -11,8 +11,8 @@ test('the clients grid drops Rep Score / Projected Revenue and shows coloured Li
   assert.match(page, /'live', color: '#EF4444'/);
   assert.match(page, /'requested', color: '#F59E0B'/);
   assert.match(page, /'removed', color: '#22C55E'/);
-  // Gross stays (admin-only).
-  assert.match(page, /isAdmin && <th className="grid-th">Gross<\/th>/);
+  // Gross stays as an admin-only column in the grid config.
+  assert.match(page, /gross: \{[\s\S]*?adminOnly: true/);
 });
 
 test('the clients API embeds link statuses and no longer selects revenue_projection', async () => {
