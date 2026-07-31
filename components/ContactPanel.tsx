@@ -6,7 +6,7 @@ import StatusPill, { type StatusOption } from '@/components/StatusPill';
 import { NameSourceIcon } from '@/components/NameSourceIcon';
 import { useMyRole } from '@/lib/use-my-role';
 
-const TABS = ['Contact Info', 'Link Data', 'Email', 'Calls', 'Activity', 'Files'] as const;
+const TABS = ['Link Data', 'Contact Info', 'Email', 'Calls', 'Activity', 'Files', 'Notes'] as const;
 type Tab = (typeof TABS)[number];
 
 interface LinkSlot {
@@ -41,8 +41,8 @@ function callDuration(seconds: number | null): string {
   return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
 }
 
-/** Slide-over panel: Contact Info (details + tracking data), Link Data, Email,
- * Calls, Activity, and Files. */
+/** Slide-over panel: Link Data, Contact Info (details + tracking data), Email,
+ * Calls, Activity, Files, and Notes (a free-form scratchpad per contact). */
 export default function ContactPanel({
   contactId,
   onClose,
@@ -61,7 +61,7 @@ export default function ContactPanel({
 }) {
   const supabase = useMemo(() => createClient(), []);
   const { isAdmin } = useMyRole(); // revenue figures are admin-only
-  const [tab, setTab] = useState<Tab>('Contact Info');
+  const [tab, setTab] = useState<Tab>('Link Data');
   const [contact, setContact] = useState<any>(null);
   const [contactLoadError, setContactLoadError] = useState('');
   const [links, setLinks] = useState<LinkSlot[]>([]);
@@ -2139,6 +2139,22 @@ export default function ContactPanel({
                 ))}
                 {files.length === 0 && <div className="text-sm text-gray-400">No files yet.</div>}
               </div>
+            </div>
+          )}
+
+          {tab === 'Notes' && (
+            <div className="space-y-3">
+              <p className="text-xs text-gray-400">
+                Free-form notes for this contact — background, context, reminders. Saved in place;
+                for a timestamped history, use the Activity tab.
+              </p>
+              <textarea
+                className="input min-h-96 leading-relaxed"
+                placeholder="Add notes about this contact…"
+                value={contact.notes ?? ''}
+                onChange={(e) => setField('notes', e.target.value)}
+              />
+              <div className="flex justify-end">{saveButton(['notes'])}</div>
             </div>
           )}
         </div>

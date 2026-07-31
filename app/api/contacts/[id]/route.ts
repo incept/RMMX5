@@ -56,7 +56,7 @@ export async function PATCH(request: Request, { params }: Params) {
   const allowed = [
     'name', 'city', 'state', 'email', 'phone', 'status_id', 'browser', 'ppc_kw',
     'source', 'ip', 'utm', 'stage_id', 'client_since', 'service_days', 'custom', 'owner_id',
-    'device', 'source_url', 'wp_user', 'gclid', 'signed_date', 'gross_revenue',
+    'device', 'source_url', 'wp_user', 'gclid', 'signed_date', 'gross_revenue', 'notes',
   ];
   const updates: Record<string, any> = {};
   for (const key of allowed) if (key in patch) updates[key] = patch[key];
@@ -75,6 +75,7 @@ export async function PATCH(request: Request, { params }: Params) {
     source_url: 2048,
     wp_user: 200,
     gclid: 500,
+    notes: 20000,
   };
   for (const [key, max] of Object.entries(stringLimits)) {
     if (key in updates && updates[key] != null) {
