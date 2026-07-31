@@ -8,6 +8,7 @@ import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
 import { finishUsage, reserveUsage } from '@/lib/usage';
 import { assertPublicWebUrl } from '@/lib/public-url';
+import { classifyLoadedPage } from './removed-page.ts';
 
 /**
  * Page fetching for probes.
@@ -445,7 +446,7 @@ async function browserFetch(
 
 export async function fetchProbePage(
   url: string,
-  opts?: { render?: boolean; needsBrowser?: boolean; signal?: AbortSignal }
+  opts?: { render?: boolean; needsBrowser?: boolean; noUnlocker?: boolean; signal?: AbortSignal }
 ): Promise<FetchOutcome> {
   const notes: string[] = [];
   await assertPublicWebUrl(url);
@@ -517,6 +518,13 @@ export async function fetchProbePage(
   }
 
   const directNote = notes.join('; ');
+
+  // Cheap callers (link re-checks) opt out of the billable tier: if the free
+  // tiers could not get a clean read, "couldn't tell, try later" is fine and a
+  // recheck must never spend an unlocker call per cycle per link.
+  if (opts?.noUnlocker) {
+    return { ok: false, blocked: true, reason: `${directNote}; unlocker skipped` };
+  }
 
   // Unlocker fallback. Uses the same /request endpoint as the SERP integration
   // but a different zone, so it is opt-in: no zone configured means no attempt.
@@ -675,4 +683,56 @@ export async function logProbeFailure(domain: string, url: string, reason: strin
     context: { url },
     contactId,
   });
+}
+
+export type Liveness = { state: 'gone' | 'live' | 'unknown'; note: string };
+
+/**
+ * Is a client's removal link still up? Reuses the probe tiers (free direct →
+ * proxy → Chrome; the billable unlocker is skipped) and interprets the result
+ * for REMOVAL rather than discovery:
+ *   - a page matching a per-site "removed page" fingerprint / placeholder → gone
+ *   - a page that loads but no longer names the client → gone
+ *   - a page that still names them → live
+ *   - a definitive 404/410/"error page" with no block signal → gone
+ *   - a challenge / 403-429-503 / dropped socket / timeout → UNKNOWN
+ *
+ * The last rule is the important one: these hosts block datacentre IPs
+ * intermittently, and a block must never be mistaken for a removal. Callers pair
+ * this with a consecutive-reads threshold and human confirmation.
+ */
+export async function probeLinkLiveness(
+  url: string,
+  name: string,
+  opts?: { signal?: AbortSignal }
+): Promise<Liveness> {
+  let outcome: FetchOutcome;
+  try {
+    outcome = await fetchProbePage(url, { render: true, noUnlocker: true, signal: opts?.signal });
+  } catch (e: any) {
+    return { state: 'unknown', note: `re-check could not start: ${e?.message ?? 'error'}` };
+  }
+
+  if (outcome.ok) {
+    // A per-site "removed page" fingerprint or generic placeholder wording wins
+    // over the name check, so a takedown placeholder that still echoes the
+    // client's name is still read as gone. See removed-page.ts.
+    const state = classifyLoadedPage(url, name, outcome.html);
+    return {
+      state,
+      note:
+        state === 'live'
+          ? `page still names the client (via ${outcome.via})`
+          : `page reads as removed or no longer names the client (via ${outcome.via})`,
+    };
+  }
+
+  const reason = outcome.reason.toLowerCase();
+  const goneSignal = /(http\s*4(0[049]|10))|not found|error page|empty body/.test(reason);
+  const blockSignal =
+    /(http\s*(4(0[13]|29)|503))|challenge|just a moment|checking your browser|attention required|captcha|socket|policy|classified as|blocked by|unavailable|timed out|timeout|cancelled|aborted/.test(
+      reason
+    );
+  if (goneSignal && !blockSignal) return { state: 'gone', note: outcome.reason.slice(0, 200) };
+  return { state: 'unknown', note: outcome.reason.slice(0, 200) };
 }
