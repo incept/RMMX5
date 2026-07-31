@@ -12,6 +12,24 @@ export const maxDuration = 120;
 const LEASE_SECONDS = 180;
 
 /**
+ * Fast scoring jobs drain in a batch each tick so an import's scoring backlog
+ * (a score_contact job per imported contact) can't starve email/SMS and other
+ * work queued behind it; the heavy/external jobs keep their one-per-tick pace.
+ * skip-locked makes the two claims safe to run together.
+ */
+async function drainQueue() {
+  const [fast, rest] = await Promise.all([
+    processQueuedJobs(20, { light: true }),
+    processQueuedJobs(1),
+  ]);
+  return {
+    claimed: fast.claimed + rest.claimed,
+    completed: fast.completed + rest.completed,
+    failed: fast.failed + rest.failed,
+  };
+}
+
+/**
  * Bounded heartbeat. Provider work lives in a durable queue and each tick
  * claims only a small batch, so scheduler overlap cannot multiply processes.
  */
@@ -44,7 +62,7 @@ export async function GET(request: Request) {
       processDueEnrollments(2),
       processCountdownNotifications(),
       syncMissedCalls(),
-      processQueuedJobs(1),
+      drainQueue(),
     ]);
     const outcome: Record<string, any> = {};
     let degraded = false;
