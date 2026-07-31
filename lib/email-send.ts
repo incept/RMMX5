@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 import { createAdminClient } from '@/lib/supabase/server';
 import { sendViaEmailit } from '@/lib/integrations/emailit';
+import { getSetting } from '@/lib/settings';
 import { logActivity } from '@/lib/activity';
 import { signTrackingOpen, signTrackingUrl } from '@/lib/signing';
 import { appBaseUrl } from '@/lib/app-url';
@@ -53,6 +54,14 @@ export async function sendCrmEmail(opts: {
   }
 
   const fromEmail = account?.from_email ?? 'via Emailit';
+
+  // #2: replies should land in the CRM inbox, not the raw From mailbox — point
+  // them at the Emailit-inbound reply address (Admin → Integrations) when set,
+  // on both the SMTP and Emailit paths below.
+  const { inbound_reply_address: inboundReplyAddress } = await getSetting<{
+    inbound_reply_address?: string;
+  }>('emailit');
+  const replyTo = inboundReplyAddress || undefined;
 
   // Create the message row first so we have an id for the tracking URLs.
   let { data: row, error: rowErr } = await supabase
@@ -141,6 +150,7 @@ export async function sendCrmEmail(opts: {
         to: opts.to,
         subject: opts.subject,
         html,
+        ...(replyTo ? { replyTo } : {}),
       });
       messageId = info.messageId;
       ok = true;
@@ -164,7 +174,7 @@ export async function sendCrmEmail(opts: {
         contactId: opts.contactId ?? null,
       }).catch(() => {});
     }
-    const r = await sendViaEmailit({ to: opts.to, subject: opts.subject, html });
+    const r = await sendViaEmailit({ to: opts.to, subject: opts.subject, html, replyTo });
     provider = 'emailit';
     ok = r.ok;
     // If SMTP also failed, surface both reasons.

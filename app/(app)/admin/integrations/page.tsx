@@ -73,11 +73,16 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
   {
     key: 'emailit',
     title: 'Emailit',
-    hint: 'Fallback email sender, client notifications, and signed bounce/complaint events.',
+    hint: 'Fallback email sender, client notifications, and signed bounce/complaint events. The inbound reply-to address (a mailbox on an Emailit-MX subdomain) is set as Reply-To on every send, so replies route back into the CRM inbox.',
     fields: [
       { key: 'api_key', label: 'API key', secret: true },
       { key: 'from_address', label: 'From address', placeholder: 'alerts@yourdomain.com' },
       { key: 'from_name', label: 'From name', placeholder: 'RMM-R1S' },
+      {
+        key: 'inbound_reply_address',
+        label: 'Inbound reply-to address',
+        placeholder: 'replies@inbound.yourdomain.com',
+      },
       { key: 'webhook_signing_secret', label: 'Webhook signing secret', secret: true, placeholder: 'whsec_…' },
     ],
   },
@@ -279,6 +284,13 @@ export default function IntegrationsPage() {
               <div className="font-mono">URL: {origin}/api/webhooks/emailit</div>
               <div className="mt-1">
                 Emailit supplies X-Emailit-Signature and X-Emailit-Timestamp automatically.
+              </div>
+              <div className="mt-2">
+                To capture replies, point the inbound reply-to address at a mailbox on a subdomain
+                whose MX record points at Emailit (e.g.{' '}
+                <span className="font-mono">replies@inbound.yourdomain.com</span>), then subscribe the{' '}
+                <span className="font-mono">email.received</span> event to the URL above. Replies then
+                land in the inbox instead of the raw From mailbox.
               </div>
             </div>
           )}

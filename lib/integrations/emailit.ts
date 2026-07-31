@@ -45,17 +45,25 @@ export async function sendViaEmailit(opts: {
   fromName?: string;
   replyTo?: string;
 }): Promise<{ ok: boolean; error?: string }> {
-  const cfg = await getSetting<{ api_key?: string; from_address?: string; from_name?: string }>('emailit');
+  const cfg = await getSetting<{
+    api_key?: string;
+    from_address?: string;
+    from_name?: string;
+    inbound_reply_address?: string;
+  }>('emailit');
   if (!cfg.api_key) return { ok: false, error: 'Emailit is not configured (Admin → Integrations).' };
 
   const fromAddress = cfg.from_address || 'alerts@example.com';
   const fromName = opts.fromName || cfg.from_name || 'RMMX5';
+  // #2: default replies to the Emailit-inbound address so they route back into
+  // the CRM inbox instead of the raw From mailbox (an explicit replyTo wins).
+  const replyTo = opts.replyTo || cfg.inbound_reply_address || undefined;
   const body = JSON.stringify({
     from: `${fromName} <${fromAddress}>`,
     to: opts.to,
     subject: opts.subject,
     html: opts.html,
-    ...(opts.replyTo ? { reply_to: opts.replyTo } : {}),
+    ...(replyTo ? { reply_to: replyTo } : {}),
   });
 
   const send = () =>
@@ -87,24 +95,21 @@ export async function sendViaEmailit(opts: {
   return { ok: true };
 }
 
-export type EmailitMessage = {
-  from: string;
-  to: string;
-  subject: string;
-  html: string;
-  text: string;
-  messageId: string | null;
-};
+export type EmailitBody = { html: string; text: string };
 
 /**
- * Fetches one received message's full content by id — the `em_…` id Emailit
- * sends in an `email.received` webhook, which carries only headers, not the
- * body. Inbound lives on the v2 API (the send path above is v1); the body is
- * returned under body.html / body.text.
+ * Fetches only the text + HTML body of a received message from Emailit's
+ * dedicated body endpoint (GET /v2/emails/{id}/body → { text, html }).
+ *
+ * The full GET /v2/emails/{id} returns attachments inline as base64, which can
+ * push even a modest message past our 1 MiB response cap and fail the webhook
+ * (finding #1). The sender / recipient / subject we need come from the webhook's
+ * own data.object, so the body is all we fetch here.
+ * Docs: https://emailit.com/docs/api-reference/emails/get/
  */
-export async function fetchEmailitMessage(
+export async function fetchEmailitBody(
   id: string
-): Promise<{ ok: true; message: EmailitMessage } | { ok: false; error: string }> {
+): Promise<{ ok: true; body: EmailitBody } | { ok: false; error: string }> {
   const cfg = await getSetting<{ api_key?: string }>('emailit');
   if (!cfg.api_key) return { ok: false, error: 'Emailit is not configured (Admin → Integrations).' };
   // The id arrives on a signature-verified webhook, but constrain it to the
@@ -113,34 +118,30 @@ export async function fetchEmailitMessage(
 
   let res: Response;
   try {
-    res = await fetch(`https://api.emailit.com/v2/emails/${id}`, {
+    res = await fetch(`https://api.emailit.com/v2/emails/${id}/body`, {
       method: 'GET',
       signal: AbortSignal.timeout(30_000),
       headers: { Authorization: `Bearer ${cfg.api_key}`, Accept: 'application/json' },
     });
   } catch (e: any) {
-    return { ok: false, error: `Emailit get-email request failed: ${e?.message ?? 'network error'}` };
+    return { ok: false, error: `Emailit get-body request failed: ${e?.message ?? 'network error'}` };
   }
 
   const bodyText = await readResponseText(res, 1024 * 1024);
   if (!res.ok) {
-    return { ok: false, error: `Emailit get-email failed: ${res.status} ${bodyText.slice(0, 300)}` };
+    return { ok: false, error: `Emailit get-body failed: ${res.status} ${bodyText.slice(0, 300)}` };
   }
   let data: any;
   try {
     data = JSON.parse(bodyText);
   } catch {
-    return { ok: false, error: 'Emailit get-email returned a non-JSON body' };
+    return { ok: false, error: 'Emailit get-body returned a non-JSON body' };
   }
   return {
     ok: true,
-    message: {
-      from: String(data?.from ?? data?.headers?.From ?? data?.headers?.from ?? ''),
-      to: String(data?.to ?? data?.headers?.To ?? data?.headers?.to ?? ''),
-      subject: String(data?.subject ?? data?.headers?.Subject ?? data?.headers?.subject ?? ''),
-      html: typeof data?.body?.html === 'string' ? data.body.html : '',
-      text: typeof data?.body?.text === 'string' ? data.body.text : '',
-      messageId: data?.message_id ? String(data.message_id) : null,
+    body: {
+      html: typeof data?.html === 'string' ? data.html : '',
+      text: typeof data?.text === 'string' ? data.text : '',
     },
   };
 }
