@@ -1,5 +1,4 @@
 import { createAdminClient } from '@/lib/supabase/server';
-import { enqueueJob } from '@/lib/job-queue';
 import { getSetting } from '@/lib/settings';
 import { probeLinkLiveness } from '@/lib/deep-search/fetch-page';
 import { logActivity } from '@/lib/activity';
@@ -7,43 +6,39 @@ import { logDebug } from '@/lib/debug-log';
 
 /**
  * Cron scan: claim a batch of due CLIENT removal links (status 'requested',
- * last checked more than the interval ago) and enqueue one link_recheck job
- * each. The claim stamps last_checked_at, so a link is enqueued at most once per
- * interval and overlapping ticks can't double-enqueue. The slow fetch happens in
- * the job on the heavy lane — never here in the tick.
+ * last checked more than the interval ago). The claim RPC both stamps
+ * last_checked_at AND inserts the link_recheck jobs in one transaction, so a
+ * failed enqueue rolls back the stamp (a link is never marked checked without a
+ * job behind it), and it caps how many recheck jobs may be in flight so a big
+ * first scan can't enqueue faster than the one-per-tick heavy lane drains and
+ * delay newly-submitted deep searches. The slow fetch happens in the job on the
+ * heavy lane — never here in the tick.
  *
- * Off-switch + cadence live in the 'link_recheck' setting (default: on, 8h,
- * clamped to 6-12h in the RPC).
+ * Off-switch + cadence + in-flight cap live in the 'link_recheck' setting
+ * (default: on, 8h clamped to 6-12h, 20 jobs max in flight).
  */
 export async function processLinkRechecks(limit = 10) {
-  const cfg = await getSetting<{ enabled?: boolean | string; interval_hours?: number | string }>(
-    'link_recheck'
-  );
+  const cfg = await getSetting<{
+    enabled?: boolean | string;
+    interval_hours?: number | string;
+    max_inflight?: number | string;
+  }>('link_recheck');
   if (cfg.enabled === false || cfg.enabled === 'false') return { claimed: 0, enqueued: 0 };
   const intervalHours = Number(cfg.interval_hours ?? 8);
+  const maxInflight = Number(cfg.max_inflight ?? 20);
 
   const supabase = createAdminClient();
   const { data: due, error } = await supabase.rpc('claim_due_link_rechecks', {
     p_limit: limit,
     p_interval_hours: Number.isFinite(intervalHours) ? intervalHours : 8,
+    p_max_inflight: Number.isFinite(maxInflight) ? maxInflight : 20,
   });
   if (error) throw new Error(error.message);
 
-  let enqueued = 0;
-  for (const link of due ?? []) {
-    // Hour-bucketed dedupe key: a link is claimed at most once per interval
-    // (>= 6h), so the bucket differs every cycle and a completed job never
-    // blocks the next one.
-    const bucket = new Date().toISOString().slice(0, 13);
-    await enqueueJob(
-      'link_recheck',
-      { linkId: link.id, contactId: link.contact_id },
-      `link-recheck:${link.id}:${bucket}`,
-      3 // a check that keeps erroring shouldn't retry forever
-    );
-    enqueued += 1;
-  }
-  return { claimed: due?.length ?? 0, enqueued };
+  // The RPC enqueued a link_recheck job for each returned link atomically with
+  // the claim, so there is no separate enqueue step (and no partial-failure gap).
+  const claimed = due?.length ?? 0;
+  return { claimed, enqueued: claimed };
 }
 
 /**
@@ -70,6 +65,10 @@ export async function runLinkRecheck(linkId: string, signal?: AbortSignal) {
   const { data: recorded, error: recordError } = await supabase.rpc('record_link_recheck', {
     p_link_id: linkId,
     p_result: result.state,
+    // Compare-and-set: only fold this result in if the row still holds the URL we
+    // actually probed. An edit mid-fetch changes the URL, so the stale result is
+    // dropped instead of advancing the new URL's streak.
+    p_expected_url: link.url,
   });
   if (recordError) throw new Error(recordError.message);
 
