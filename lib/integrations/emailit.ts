@@ -1,21 +1,41 @@
+import { createAdminClient } from '@/lib/supabase/server';
 import { getSetting } from '@/lib/settings';
 import { readResponseText } from '@/lib/request-limits';
 
 /**
  * Emailit caps requests at 2 per second (429 rate_limit_exceeded above that). A
- * drained delivery batch sends many emails back-to-back in one process, which
- * bursts past that cap, so every Emailit send goes through one serialized gate
- * that spaces calls >= EMAILIT_MIN_INTERVAL_MS apart — 1 send per 2s, well under
- * the limit. The gate is per process, which is exactly where the burst is: the
- * queue drains its delivery batch sequentially in the cron tick.
+ * drained delivery batch sends many emails back-to-back, which bursts past that
+ * cap, so every Emailit send goes through one serialized gate that spaces calls
+ * >= EMAILIT_MIN_INTERVAL_MS apart — 1 send per 2s, well under the limit.
+ *
+ * The gate has two layers: an in-process promise chain (so one process never
+ * fires concurrent reservations) plus a DB-coordinated slot (finding #9). The
+ * old gate was process-local, so several app processes could each send in the
+ * same second and still trip the cap; claim_provider_send_slot is a shared clock
+ * every process reserves against. If that RPC is unavailable the gate falls back
+ * to in-process spacing, so a database hiccup can never block mail entirely.
  */
 const EMAILIT_MIN_INTERVAL_MS = 2000;
 let emailitGate: Promise<unknown> = Promise.resolve();
 let lastEmailitSendAt = 0;
 
+async function reserveEmailitSlotMs(): Promise<number> {
+  try {
+    const { data, error } = await createAdminClient().rpc('claim_provider_send_slot', {
+      p_provider: 'emailit',
+      p_min_interval_ms: EMAILIT_MIN_INTERVAL_MS,
+    });
+    if (error || !data) throw new Error(error?.message ?? 'no send slot returned');
+    return new Date(data as string).getTime() - Date.now();
+  } catch {
+    // Local fallback: space sends within this process if the shared gate is down.
+    return lastEmailitSendAt + EMAILIT_MIN_INTERVAL_MS - Date.now();
+  }
+}
+
 function throttleEmailit<T>(fn: () => Promise<T>): Promise<T> {
   const run = emailitGate.then(async () => {
-    const wait = lastEmailitSendAt + EMAILIT_MIN_INTERVAL_MS - Date.now();
+    const wait = await reserveEmailitSlotMs();
     if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
     lastEmailitSendAt = Date.now();
     return fn();
@@ -30,7 +50,7 @@ function throttleEmailit<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Sends a transactional email via the Emailit API (v1).
+ * Sends a transactional email via the Emailit API (v2).
  * Docs: https://emailit.com/docs
  * Used as the fallback sender when no SMTP account is selected, and for
  * system notifications (client alerts, countdown reminders).
@@ -44,6 +64,7 @@ export async function sendViaEmailit(opts: {
   html: string;
   fromName?: string;
   replyTo?: string;
+  idempotencyKey?: string;
 }): Promise<{ ok: boolean; error?: string }> {
   const cfg = await getSetting<{
     api_key?: string;
@@ -66,15 +87,21 @@ export async function sendViaEmailit(opts: {
     ...(replyTo ? { reply_to: replyTo } : {}),
   });
 
+  // #9: send on v2 with an Idempotency-Key when the caller supplies a stable id
+  // (the email_messages row id, a notification id). Emailit dedupes a repeated
+  // key for 24h, so a job retry that already delivered cannot send a second copy.
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${cfg.api_key}`,
+    'Content-Type': 'application/json',
+  };
+  if (opts.idempotencyKey) headers['Idempotency-Key'] = opts.idempotencyKey;
+
   const send = () =>
     throttleEmailit(() =>
-      fetch('https://api.emailit.com/v1/emails', {
+      fetch('https://api.emailit.com/v2/emails', {
         method: 'POST',
         signal: AbortSignal.timeout(30_000),
-        headers: {
-          Authorization: `Bearer ${cfg.api_key}`,
-          'Content-Type': 'application/json',
-        },
+        headers,
         body,
       })
     );

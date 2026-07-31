@@ -410,6 +410,8 @@ async function handleJob(job: any, worker: string, signal?: AbortSignal) {
             ? payload.subject
             : 'Update on your case',
         html: `<p>${escapeHtml(payload.message).replaceAll('\n', '<br/>')}</p>`,
+        // #9: a retried notification that already sent is deduped by Emailit.
+        idempotencyKey: String(payload.notificationId),
       });
     } else if (payload.channel === 'sms' && payload.destination) {
       result = await sendSms(String(payload.destination), String(payload.message));
