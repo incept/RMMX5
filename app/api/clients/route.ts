@@ -5,12 +5,33 @@ import { apiFailure } from '@/lib/api-errors';
 
 const PAGE_SIZE = 100;
 
+// Columns the client grid may sort on. Anything else falls back to client_since.
+// gross is admin-only, matching its visibility.
+const SORT_COLUMNS: Record<string, { col: string; adminOnly?: boolean }> = {
+  name: { col: 'name' },
+  state: { col: 'state' },
+  signed_date: { col: 'signed_date' },
+  client_since: { col: 'client_since' },
+  gross_revenue: { col: 'gross_revenue', adminOnly: true },
+  source: { col: 'source' },
+  email: { col: 'email' },
+  phone: { col: 'phone' },
+};
+
 export async function GET(request: Request) {
   const auth = await requireUser();
   if ('error' in auth) return auth.error;
-  const rawPage = Number(new URL(request.url).searchParams.get('page') ?? 0);
+  const url = new URL(request.url);
+  const rawPage = Number(url.searchParams.get('page') ?? 0);
   const page = Number.isInteger(rawPage) && rawPage >= 0 ? Math.min(rawPage, 10_000) : 0;
   const isAdmin = ['admin', 'super_admin'].includes(auth.profile.role);
+
+  const chosen = SORT_COLUMNS[url.searchParams.get('sort') ?? ''];
+  const sortCol = chosen && (isAdmin || !chosen.adminOnly) ? chosen.col : 'client_since';
+  const ascending = url.searchParams.get('dir') !== 'desc';
+  // Strip PostgREST filter syntax before the term goes into an .or() string.
+  const q = (url.searchParams.get('q') ?? '').replace(/[,()%*:\\]/g, ' ').trim().slice(0, 100);
+
   const admin = createAdminClient();
 
   try {
@@ -24,19 +45,29 @@ export async function GET(request: Request) {
       'id, name, email, phone, state, source, stage_id, client_since, signed_date, service_days, contact_links ( status ), stages ( id, name, color )';
     let query = admin
       .from('contacts')
-      .select(isAdmin ? `${columns}, gross_revenue` : columns)
-      .order('client_since', { ascending: true })
+      .select(isAdmin ? `${columns}, gross_revenue` : columns, { count: 'exact' })
+      .order(sortCol, { ascending, nullsFirst: false })
+      .order('id', { ascending: true }) // stable tiebreaker so pages don't shuffle
       .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
     if (ids.length) query = query.or(`status_id.in.(${ids.join(',')}),client_since.not.is.null`);
     else query = query.not('client_since', 'is', null);
+    if (q) query = query.or(`name.ilike.%${q}%,email.ilike.%${q}%,phone.ilike.%${q}%`);
 
-    const [{ data, error }, { data: summary, error: summaryError }] = await Promise.all([
+    const [{ data, error, count }, { data: summary, error: summaryError }] = await Promise.all([
       query,
       auth.supabase.rpc('client_summary'),
     ]);
     if (error) throw error;
     if (summaryError) throw summaryError;
-    return NextResponse.json({ clients: data ?? [], summary: summary ?? { count: 0 } });
+    // Count comes from the (search-)filtered query so pagination is correct;
+    // the projected total stays the global figure from client_summary.
+    return NextResponse.json({
+      clients: data ?? [],
+      summary: {
+        count: count ?? summary?.count ?? 0,
+        projection_total: summary?.projection_total ?? 0,
+      },
+    });
   } catch (error) {
     return apiFailure('api:clients', error, { context: { page } });
   }
