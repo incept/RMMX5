@@ -180,11 +180,14 @@ async function fireAdminCountdown(
 export async function processCountdownNotifications(limit = 250) {
   const supabase = createAdminClient();
 
-  const { data: allRules } = await supabase
+  const { data: allRules, error: rulesError } = await supabase
     .from('notification_rules')
     .select('id, event, config, channels, template')
     .in('event', ['client_countdown', 'client_countdown_admin'])
     .eq('enabled', true);
+  // #8: surface a DB/RLS failure instead of treating it as "no rules". A silent
+  // null here previously returned {checked: 0} and the cron tick looked healthy.
+  if (rulesError) throw new Error(rulesError.message);
   if (!allRules?.length) return { checked: 0 };
 
   const clientRules = allRules.filter((r) => r.event === 'client_countdown');
@@ -201,11 +204,13 @@ export async function processCountdownNotifications(limit = 250) {
   ];
   const recipientsById = new Map<string, CountdownRecipient>();
   if (recipientIds.length) {
-    const { data: profiles } = await supabase
+    const { data: profiles, error: profilesError } = await supabase
       .from('profiles')
       .select('id, email, phone')
       .in('id', recipientIds)
       .eq('status', 'active');
+    // #8: a failure here previously dropped ALL internal recipients silently.
+    if (profilesError) throw new Error(profilesError.message);
     for (const profile of profiles ?? []) recipientsById.set(profile.id, profile as CountdownRecipient);
   }
 
