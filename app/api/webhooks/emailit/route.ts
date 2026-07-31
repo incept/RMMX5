@@ -7,7 +7,7 @@ import { verifyEmailitWebhook } from '@/lib/webhook-auth';
 import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receipts';
 import { readTextBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
-import { fetchEmailitMessage } from '@/lib/integrations/emailit';
+import { fetchEmailitBody } from '@/lib/integrations/emailit';
 import { recordInboundEmail } from '@/lib/inbound-email';
 
 /**
@@ -60,15 +60,19 @@ export async function POST(request: Request) {
     const claimedReceived = await claimWebhookReceipt('emailit', receivedEventId);
     if (!claimedReceived) return NextResponse.json({ ok: true, duplicate: true });
     try {
-      const full = await fetchEmailitMessage(String(emailId));
-      if (!full.ok) throw new Error(full.error);
+      // Headers (from/to/subject) come from the webhook's data.object; only the
+      // body needs a fetch. The dedicated /body endpoint avoids the full
+      // GET /emails/{id}, whose inline base64 attachments can push a modest
+      // message past the response cap and fail this handler (finding #1).
+      const fetched = await fetchEmailitBody(String(emailId));
+      if (!fetched.ok) throw new Error(fetched.error);
       const { contactId } = await recordInboundEmail({
-        from: full.message.from || String(object.from ?? ''),
-        to: full.message.to || String(object.to ?? ''),
-        subject: full.message.subject || String(object.subject ?? ''),
-        html: full.message.html,
-        text: full.message.text,
-        messageId: full.message.messageId ?? String(emailId),
+        from: String(object.from ?? ''),
+        to: String(object.to ?? ''),
+        subject: String(object.subject ?? ''),
+        html: fetched.body.html,
+        text: fetched.body.text,
+        messageId: String(object.message_id ?? emailId),
       });
       return NextResponse.json({ ok: true, contact_id: contactId });
     } catch (error: any) {
