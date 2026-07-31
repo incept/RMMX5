@@ -157,22 +157,23 @@ export async function POST(request: Request) {
     }
 
     const totalLinks = prepared.reduce((sum, row) => sum + row.links.length, 0);
-    const { error: logError } = await admin.from('imports').upsert(
-      {
-        request_key: requestKey,
-        filename: text(body.filename ?? 'client import', 255),
-        source: 'csv',
-        mapping: { kind: 'client-roster' },
-        total_rows: clients.length,
-        imported_rows: contactIds.length,
-        status: 'done',
-        error: null,
-        created_by: auth.profile.id,
-      },
-      { onConflict: 'request_key' }
-    );
-    // The audit row is bookkeeping; a failure here must not lose a done import.
-    if (logError) {
+    // Plain insert, not upsert: imports.request_key has a PARTIAL unique index
+    // (where request_key is not null) that ON CONFLICT (request_key) cannot infer
+    // — the "no unique or exclusion constraint matching" error. A duplicate key
+    // is an idempotent re-run (fine to ignore); any other error is real.
+    const { error: logError } = await admin.from('imports').insert({
+      request_key: requestKey,
+      filename: text(body.filename ?? 'client import', 255),
+      source: 'csv',
+      mapping: { kind: 'client-roster' },
+      total_rows: clients.length,
+      imported_rows: contactIds.length,
+      status: 'done',
+      error: null,
+      created_by: auth.profile.id,
+    });
+    // The audit row is bookkeeping; a real failure must not lose a done import.
+    if (logError && logError.code !== '23505') {
       await logDebug({
         source: 'api:import/clients',
         message: `client import audit log failed: ${logError.message}`,

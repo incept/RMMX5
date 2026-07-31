@@ -121,9 +121,12 @@ export async function sendCrmEmail(opts: {
   let ok = false;
   let error: string | undefined;
   let messageId: string | undefined;
+  let provider: 'smtp' | 'emailit' | null = null;
 
-  try {
-    if (account?.smtp_host) {
+  // Try the account's SMTP first, when one is configured.
+  if (account?.smtp_host) {
+    provider = 'smtp';
+    try {
       const transport = nodemailer.createTransport({
         host: account.smtp_host,
         port: account.smtp_port,
@@ -141,13 +144,31 @@ export async function sendCrmEmail(opts: {
       });
       messageId = info.messageId;
       ok = true;
-    } else {
-      const r = await sendViaEmailit({ to: opts.to, subject: opts.subject, html });
-      ok = r.ok;
-      error = r.error;
+    } catch (e: any) {
+      error = e.message;
     }
-  } catch (e: any) {
-    error = e.message;
+  }
+
+  // Emailit is the FALLBACK: reached when there is no SMTP account, OR when the
+  // SMTP send above failed. Previously this was an either/or — Emailit was used
+  // only when no SMTP account existed — so an SMTP failure never fell back,
+  // contradicting the documented behaviour.
+  if (!ok) {
+    const smtpError = provider === 'smtp' ? error : undefined;
+    if (smtpError) {
+      await logDebug({
+        level: 'warn',
+        source: 'email-send:fallback',
+        message: `SMTP send failed, falling back to Emailit: ${smtpError}`,
+        context: { to: opts.to, account: account?.name ?? null },
+        contactId: opts.contactId ?? null,
+      }).catch(() => {});
+    }
+    const r = await sendViaEmailit({ to: opts.to, subject: opts.subject, html });
+    provider = 'emailit';
+    ok = r.ok;
+    // If SMTP also failed, surface both reasons.
+    error = r.ok ? undefined : [smtpError, r.error].filter(Boolean).join(' → ');
   }
 
   const { error: statusError } = await supabase
@@ -176,7 +197,7 @@ export async function sendCrmEmail(opts: {
 
   if (!ok) {
     await logDebug({
-      source: account?.smtp_host ? 'email-send:smtp' : 'email-send:emailit',
+      source: provider === 'smtp' ? 'email-send:smtp' : 'email-send:emailit',
       message: error ?? 'Email delivery failed',
       context: {
         to: opts.to,
