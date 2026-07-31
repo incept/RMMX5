@@ -39,10 +39,12 @@ test('probeLinkLiveness skips the billable tier and never reads a block as gone'
   assert.match(lib, /classifyLoadedPage/);
 });
 
-test('the scan enqueues heavy link_recheck jobs; the job records but never auto-flips', async () => {
+test('the scan claims + atomically enqueues link_recheck jobs; the job records but never auto-flips', async () => {
   const lib = await read('../lib/link-recheck.ts');
   assert.match(lib, /claim_due_link_rechecks/);
-  assert.match(lib, /enqueueJob\(\s*'link_recheck'/);
+  // #3: enqueue moved INTO the claim RPC (atomic with the last_checked_at stamp),
+  // so the scan no longer enqueues in Node.
+  assert.doesNotMatch(lib, /enqueueJob\(\s*'link_recheck'/);
   assert.match(lib, /function runLinkRecheck/);
   assert.match(lib, /probeLinkLiveness/);
   assert.match(lib, /record_link_recheck/);
