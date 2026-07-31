@@ -57,6 +57,7 @@ const SECTIONS: Section[] = [
       { href: '/admin/url-rules', label: 'URL Rules & Scoring' },
       { href: '/admin/deep-search-sites', label: 'Deep Search Sites' },
       { href: '/admin/notifications', label: 'Notifications' },
+      { href: '/admin/link-removals', label: 'Link Removals' },
       { href: '/admin/integrations', label: 'Integrations & APIs' },
       { href: '/admin/debug', label: 'Debug Log' },
     ],

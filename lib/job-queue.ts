@@ -20,7 +20,8 @@ export type JobKind =
   | 'sms_delivery'
   | 'voicemail_delivery'
   | 'notification_delivery'
-  | 'contact_side_effects';
+  | 'contact_side_effects'
+  | 'link_recheck';
 
 function escapeHtml(value: unknown): string {
   return String(value)
@@ -244,6 +245,16 @@ async function handleJob(job: any, worker: string, signal?: AbortSignal) {
         focusDate,
       }
     );
+    return;
+  }
+
+  if (job.kind === 'link_recheck') {
+    // Re-check a client's requested removal link. Heavy (may spawn Chrome), so
+    // it rides the same one-per-tick lane as the searches, not the delivery
+    // batch. Dynamic import breaks the job-queue <-> link-recheck cycle.
+    const linkId = requiredPayloadUuid(payload, 'linkId', job.kind);
+    const { runLinkRecheck } = await import('@/lib/link-recheck');
+    await runLinkRecheck(linkId, signal);
     return;
   }
 

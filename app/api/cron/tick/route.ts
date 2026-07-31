@@ -7,6 +7,7 @@ import { verifyBearerSecret } from '@/lib/webhook-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { logDebug, errorMessage } from '@/lib/debug-log';
 import { processQueuedJobs } from '@/lib/job-queue';
+import { processLinkRechecks } from '@/lib/link-recheck';
 
 export const maxDuration = 120;
 const LEASE_SECONDS = 180;
@@ -57,12 +58,15 @@ export async function GET(request: Request) {
   }
 
   try {
-    const names = ['sequences', 'countdown', 'calls', 'jobs'] as const;
+    const names = ['sequences', 'countdown', 'calls', 'jobs', 'rechecks'] as const;
     const results = await Promise.allSettled([
       processDueEnrollments(2),
       processCountdownNotifications(),
       syncMissedCalls(),
       drainQueue(),
+      // Cheap: claims due client links and enqueues link_recheck jobs; the
+      // actual fetches run on the heavy lane, not in this tick.
+      processLinkRechecks(),
     ]);
     const outcome: Record<string, any> = {};
     let degraded = false;
