@@ -47,3 +47,14 @@ test('the notifications page shows an internal-countdown card with a recipient p
   assert.match(page, /from\('profiles'\)/);
   assert.match(page, /status', 'active'/);
 });
+
+test('the countdown scan surfaces DB errors instead of reporting nothing to do (#8)', async () => {
+  const lib = await readFile(new URL('../lib/notifications.ts', import.meta.url), 'utf8');
+  // Both queries in processCountdownNotifications capture and throw their error,
+  // so a DB/RLS failure can't masquerade as {checked: 0} or silently drop every
+  // internal recipient while the cron tick still looks healthy.
+  assert.match(lib, /const \{ data: allRules, error: rulesError \}/);
+  assert.match(lib, /if \(rulesError\) throw new Error\(rulesError\.message\)/);
+  assert.match(lib, /const \{ data: profiles, error: profilesError \}/);
+  assert.match(lib, /if \(profilesError\) throw new Error\(profilesError\.message\)/);
+});
