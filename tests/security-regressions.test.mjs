@@ -397,6 +397,25 @@ test('selected audit hardening protects credentials and marketing mutations', as
   assert.match(migration, /"enrollments admin write"/);
 });
 
+test('email_accounts_safe runs as invoker and never grants smtp_password', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/0042_email_accounts_safe_invoker.sql', import.meta.url),
+    'utf8'
+  );
+  // The advisor fix: the view respects RLS as the caller instead of the owner.
+  assert.match(migration, /alter view public\.email_accounts_safe set \(security_invoker = true\)/);
+  // Authenticated gets a COLUMN-level SELECT on the base table so the invoker can
+  // read the safe projection — the safe columns only, never the password.
+  const grant = migration.slice(
+    migration.indexOf('grant select ('),
+    migration.indexOf('on public.email_accounts to authenticated')
+  );
+  assert.ok(grant, 'a column-level grant to authenticated is present');
+  assert.match(grant, /from_email/);
+  assert.match(grant, /smtp_username/);
+  assert.doesNotMatch(grant, /smtp_password/);
+});
+
 test('sequence and deep-search workers use stable generation identities', async () => {
   const sequence = await readFile(new URL('../lib/sequence-runner.ts', import.meta.url), 'utf8');
   const queue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
