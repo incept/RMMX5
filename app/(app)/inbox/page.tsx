@@ -213,9 +213,17 @@ export default function InboxPage() {
           imap_allow_invalid_cert: !!f.imap_allow_invalid_cert,
         }),
       });
-      setImapTest(await res.json());
-    } catch {
-      setImapTest({ ok: false, error: 'Request failed' });
+      const data = await res.json().catch(() => ({}) as any);
+      // Always resolve to a definite ok/error so the button never appears to do
+      // nothing: a server 500 returns { message } with no `ok`, which rendered blank.
+      if (data?.ok) setImapTest({ ok: true, folders: data.folders });
+      else
+        setImapTest({
+          ok: false,
+          error: data?.error || data?.message || `Test failed (HTTP ${res.status})`,
+        });
+    } catch (e: any) {
+      setImapTest({ ok: false, error: e?.message || 'Request failed' });
     }
   }
 
@@ -587,8 +595,10 @@ export default function InboxPage() {
                         Connected · {imapTest.folders?.length ?? 0} folders
                       </span>
                     )}
-                    {imapTest && !imapTest.busy && imapTest.ok === false && (
-                      <span className="text-xs text-red-600">{imapTest.error}</span>
+                    {imapTest && !imapTest.busy && !imapTest.ok && (
+                      <span className="text-xs text-red-600">
+                        {imapTest.error || imapTest.message || 'Test failed — see the Debug Log'}
+                      </span>
                     )}
                   </div>
                   <p className="mt-1 text-xs text-gray-400">

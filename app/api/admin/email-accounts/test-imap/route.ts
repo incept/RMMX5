@@ -4,9 +4,26 @@ import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
+import { logDebug } from '@/lib/debug-log';
 
 // nodemailer/imapflow use Node sockets — never the edge runtime.
 export const runtime = 'nodejs';
+
+// Guards against a blocked port hanging the request past imapflow's own timeouts.
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(
+        () =>
+          reject(
+            new Error(`${label} timed out after ${Math.round(ms / 1000)}s — host/port unreachable or blocked`)
+          ),
+        ms
+      )
+    ),
+  ]);
+}
 
 /**
  * Validate a set of IMAP credentials before we build sync on top of them:
@@ -70,7 +87,7 @@ export async function POST(request: Request) {
     });
 
     try {
-      await client.connect();
+      await withTimeout(client.connect(), 20_000, 'IMAP connect');
       const boxes = await client.list();
       const folders = boxes.map((b) => b.path).slice(0, 200);
       await client.logout();
@@ -90,6 +107,11 @@ export async function POST(request: Request) {
       const detail = imapError?.authenticationFailed
         ? `authentication failed — check the username (often the full email address) and password (${reason})`
         : String(reason);
+      await logDebug({
+        level: 'warn',
+        source: 'email-accounts:test-imap',
+        message: `IMAP test failed for ${host}:${port} — ${detail}`,
+      }).catch(() => {});
       // A bad host/credential is an expected test outcome, not a 500.
       return NextResponse.json({ ok: false, error: detail.slice(0, 500) }, { status: 200 });
     }
