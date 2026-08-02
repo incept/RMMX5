@@ -68,6 +68,7 @@ export default function InboxPage() {
     requestKey: '',
   });
   const [accountForm, setAccountForm] = useState<any>(null);
+  const [imapTest, setImapTest] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   // Theme for the email preview frame; kept in sync with the <html class="dark">
   // toggle so switching light/dark re-renders the message in the matching palette.
@@ -175,9 +176,14 @@ export default function InboxPage() {
       smtp_secure: Number(f.smtp_port ?? 587) === 465,
       signature_html: f.signature_html ?? '',
       is_default: !!f.is_default,
+      imap_host: f.imap_host ?? '',
+      imap_port: Number(f.imap_port ?? 993),
+      imap_username: f.imap_username ?? '',
+      imap_enabled: !!f.imap_enabled,
     };
-    // Password is write-only: include it only when set (blank on edit = keep).
+    // Passwords are write-only: include only when set (blank on edit = keep).
     if (f.smtp_password) row.smtp_password = f.smtp_password;
+    if (f.imap_password) row.imap_password = f.imap_password;
     const res = await fetch(
       f.id ? `/api/admin/email-accounts/${encodeURIComponent(f.id)}` : '/api/admin/email-accounts',
       {
@@ -189,6 +195,29 @@ export default function InboxPage() {
     if (!res.ok) return alert((await res.json()).error ?? 'Could not save SMTP account');
     setAccountForm(null);
     loadAccounts();
+  }
+
+  // Validate IMAP credentials without saving: connect + list folders. Editing an
+  // account can leave the password blank to reuse the stored one.
+  async function testImap() {
+    const f = accountForm;
+    setImapTest({ busy: true });
+    try {
+      const res = await fetch('/api/admin/email-accounts/test-imap', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          accountId: f.id ?? null,
+          imap_host: f.imap_host,
+          imap_port: Number(f.imap_port ?? 993),
+          imap_username: f.imap_username,
+          imap_password: f.imap_password,
+        }),
+      });
+      setImapTest(await res.json());
+    } catch {
+      setImapTest({ ok: false, error: 'Request failed' });
+    }
   }
 
   return (
@@ -370,13 +399,16 @@ export default function InboxPage() {
               {viewer && ['admin', 'super_admin'].includes(viewer.role) && (
                 <button
                   className="btn btn-primary py-1"
-                  onClick={() =>
+                  onClick={() => {
+                    setImapTest(null);
                     setAccountForm({
                       smtp_port: 587,
                       smtp_secure: false,
+                      imap_port: 993,
+                      imap_enabled: false,
                       is_default: accounts.length === 0,
-                    })
-                  }
+                    });
+                  }}
                 >
                   + Add account
                 </button>
@@ -399,7 +431,13 @@ export default function InboxPage() {
                     </div>
                     {canManage && (
                       <>
-                        <button className="btn py-1" onClick={() => setAccountForm(a)}>
+                        <button
+                          className="btn py-1"
+                          onClick={() => {
+                            setImapTest(null);
+                            setAccountForm(a);
+                          }}
+                        >
                           Edit
                         </button>
                         <button
@@ -479,8 +517,71 @@ export default function InboxPage() {
                   />
                   Default account
                 </label>
+                <div className="col-span-2 mt-1 border-t border-gray-100 pt-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="label mb-0">Receiving (IMAP)</span>
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={!!accountForm.imap_enabled}
+                        onChange={(e) =>
+                          setAccountForm((f: any) => ({ ...f, imap_enabled: e.target.checked }))
+                        }
+                      />
+                      Enable receiving
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      ['imap_host', 'IMAP host'],
+                      ['imap_port', 'IMAP port'],
+                      ['imap_username', 'IMAP username'],
+                      ['imap_password', 'IMAP password'],
+                    ].map(([key, label]) => (
+                      <div key={key}>
+                        <label className="label">{label}</label>
+                        <input
+                          className="input"
+                          type={key === 'imap_password' ? 'password' : 'text'}
+                          placeholder={
+                            key === 'imap_password' && accountForm.id
+                              ? '•••••• (leave blank to keep)'
+                              : ''
+                          }
+                          value={accountForm[key] ?? ''}
+                          onChange={(e) =>
+                            setAccountForm((f: any) => ({ ...f, [key]: e.target.value }))
+                          }
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-2 flex items-center gap-3">
+                    <button
+                      type="button"
+                      className="btn py-1"
+                      disabled={imapTest?.busy}
+                      onClick={testImap}
+                    >
+                      {imapTest?.busy ? 'Testing…' : 'Test connection'}
+                    </button>
+                    {imapTest && !imapTest.busy && imapTest.ok && (
+                      <span className="text-xs text-green-600">
+                        Connected · {imapTest.folders?.length ?? 0} folders
+                      </span>
+                    )}
+                    {imapTest && !imapTest.busy && imapTest.ok === false && (
+                      <span className="text-xs text-red-600">{imapTest.error}</span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-gray-400">
+                    Port 993 = implicit TLS, 143 = STARTTLS. Sending still uses the SMTP settings
+                    above; IMAP is for receiving.
+                  </p>
+                </div>
+
                 <div className="col-span-2 flex justify-end gap-2">
-                  <button className="btn" onClick={() => setAccountForm(null)}>
+                  <button className="btn" onClick={() => { setImapTest(null); setAccountForm(null); }}>
                     Cancel
                   </button>
                   <button className="btn btn-primary" onClick={saveAccount}>
