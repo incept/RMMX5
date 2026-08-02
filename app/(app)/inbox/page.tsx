@@ -98,14 +98,11 @@ export default function InboxPage() {
       setViewer({ id: user.id, role: profile?.role ?? 'worker' });
     }
 
-    // Explicit column list: smtp_password is not readable from the browser
-    // (column-level grant in migration 0002) — it's write-only from the UI.
-    const { data } = await supabase
-      .from('email_accounts_safe')
-      .select(
-        'id, owner_id, name, from_name, from_email, smtp_host, smtp_port, smtp_username, smtp_secure, signature_html, is_default, created_at'
-      )
-      .order('name');
+    // The safe view already excludes every secret (smtp_password, imap_password),
+    // so `*` is safe here and picks up the IMAP fields the editor needs — without
+    // a hand-maintained column list that silently drops newly-added columns (which
+    // is exactly why saved IMAP settings appeared not to persist).
+    const { data } = await supabase.from('email_accounts_safe').select('*').order('name');
     setAccounts(data ?? []);
   }, [supabase]);
 
