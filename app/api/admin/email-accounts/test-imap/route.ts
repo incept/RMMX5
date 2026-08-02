@@ -74,11 +74,17 @@ export async function POST(request: Request) {
       } catch {
         /* already down */
       }
-      // A bad password / host is an expected outcome of a test, not a 500.
-      return NextResponse.json(
-        { ok: false, error: imapError?.message ?? 'IMAP connection failed' },
-        { status: 200 }
-      );
+      // Surface the server's actual reason. imapflow's bare `.message` is often
+      // just "Command failed"; the useful text lives in .responseText / .response,
+      // and auth failures set .authenticationFailed. TLS/cert problems (common on
+      // shared hosts whose mail cert is for the server hostname) show up here too.
+      const reason =
+        imapError?.responseText || imapError?.response || imapError?.message || 'connection failed';
+      const detail = imapError?.authenticationFailed
+        ? `authentication failed — check the username (often the full email address) and password (${reason})`
+        : String(reason);
+      // A bad host/credential is an expected test outcome, not a 500.
+      return NextResponse.json({ ok: false, error: detail.slice(0, 500) }, { status: 200 });
     }
   } catch (error) {
     return apiFailure('api:admin/email-accounts/test-imap', error);
