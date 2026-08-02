@@ -78,6 +78,7 @@ export default function InboxPage() {
     let query = supabase
       .from('email_messages')
       .select('*, contacts ( id, name )')
+      .is('hidden_at', null)
       .order('created_at', { ascending: false })
       .limit(200);
     if (filter !== 'all') query = query.eq('direction', filter);
@@ -227,6 +228,27 @@ export default function InboxPage() {
     }
   }
 
+  // Opening an inbound message marks it read — locally now, and \Seen on the
+  // mailbox (so Thunderbird / mobile reflect it) via the write-back job.
+  function openMessage(m: any) {
+    setSelected(m);
+    if (m.direction === 'inbound' && !m.seen) {
+      setMessages((list) => list.map((x) => (x.id === m.id ? { ...x, seen: true } : x)));
+      fetch(`/api/inbox/messages/${encodeURIComponent(m.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seen: true }),
+      }).catch(() => {});
+    }
+  }
+
+  async function deleteMessage(m: any) {
+    if (!confirm('Delete this message? A synced message also moves to Trash on the mailbox.')) return;
+    setMessages((list) => list.filter((x) => x.id !== m.id));
+    if (selected?.id === m.id) setSelected(null);
+    await fetch(`/api/inbox/messages/${encodeURIComponent(m.id)}`, { method: 'DELETE' }).catch(() => {});
+  }
+
   return (
     <div className="flex h-full">
       {/* Message list */}
@@ -259,7 +281,7 @@ export default function InboxPage() {
           {messages.map((m) => (
             <button
               key={m.id}
-              onClick={() => setSelected(m)}
+              onClick={() => openMessage(m)}
               className={`block w-full border-b border-gray-100 px-4 py-2.5 text-left hover:bg-gray-50 ${
                 selected?.id === m.id ? 'bg-brand-50/50' : ''
               }`}
@@ -268,9 +290,16 @@ export default function InboxPage() {
                 <span className={m.direction === 'inbound' ? 'text-green-600' : 'text-gray-400'}>
                   {m.direction === 'inbound' ? '←' : '→'}
                 </span>
-                <span className="flex-1 truncate text-sm font-medium">
+                <span
+                  className={`flex-1 truncate text-sm ${
+                    m.direction === 'inbound' && !m.seen ? 'font-bold' : 'font-medium'
+                  }`}
+                >
                   {m.contacts?.name ?? (m.direction === 'inbound' ? m.from_email : m.to_email)}
                 </span>
+                {m.direction === 'inbound' && !m.seen && (
+                  <span className="h-2 w-2 shrink-0 rounded-full bg-brand-600" title="Unread" />
+                )}
                 <span className="text-[10px] text-gray-400">
                   {new Date(m.created_at).toLocaleDateString()}
                 </span>
@@ -326,6 +355,9 @@ export default function InboxPage() {
                 ↩ Reply
               </button>
             )}
+            <button className="btn mt-4 ml-2 text-red-600" onClick={() => deleteMessage(selected)}>
+              🗑 Delete
+            </button>
           </div>
         ) : (
           <div className="flex h-full items-center justify-center text-sm text-gray-400">
