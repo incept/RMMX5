@@ -21,7 +21,8 @@ export type JobKind =
   | 'voicemail_delivery'
   | 'notification_delivery'
   | 'contact_side_effects'
-  | 'link_recheck';
+  | 'link_recheck'
+  | 'imap_sync';
 
 function escapeHtml(value: unknown): string {
   return String(value)
@@ -255,6 +256,17 @@ async function handleJob(job: any, worker: string, signal?: AbortSignal) {
     const linkId = requiredPayloadUuid(payload, 'linkId', job.kind);
     const { runLinkRecheck } = await import('@/lib/link-recheck');
     await runLinkRecheck(linkId, signal);
+    return;
+  }
+
+  if (job.kind === 'imap_sync') {
+    // Pull new inbound mail from the account's IMAP mailbox. Heavy (opens a
+    // network connection to the mail host — only the VPS worker can reach it), so
+    // it rides the one-per-tick heavy lane. Dynamic import keeps imapflow /
+    // mailparser out of the light-lane path.
+    const accountId = requiredPayloadUuid(payload, 'accountId', job.kind);
+    const { runImapSync } = await import('@/lib/integrations/imap-sync');
+    await runImapSync(accountId, signal);
     return;
   }
 
