@@ -172,7 +172,7 @@ export default function InboxPage() {
       smtp_host: f.smtp_host,
       smtp_port: Number(f.smtp_port ?? 587),
       smtp_username: f.smtp_username,
-      smtp_secure: !!f.smtp_secure,
+      smtp_secure: Number(f.smtp_port ?? 587) === 465,
       signature_html: f.signature_html ?? '',
       is_default: !!f.is_default,
     };
@@ -464,16 +464,11 @@ export default function InboxPage() {
                     }
                   />
                 </div>
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={!!accountForm.smtp_secure}
-                    onChange={(e) =>
-                      setAccountForm((f: any) => ({ ...f, smtp_secure: e.target.checked }))
-                    }
-                  />
-                  TLS on connect (port 465)
-                </label>
+                <div className="col-span-2 text-xs text-gray-500">
+                  {Number(accountForm.smtp_port) === 465
+                    ? 'Encryption: implicit TLS on connect (SSL) — standard for port 465.'
+                    : 'Encryption: STARTTLS — selected automatically for ports 587 and 25.'}
+                </div>
                 <label className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
