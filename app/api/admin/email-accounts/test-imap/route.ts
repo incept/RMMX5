@@ -24,13 +24,14 @@ export async function POST(request: Request) {
     let username = body.imap_username ? String(body.imap_username).trim() : '';
     let password = typeof body.imap_password === 'string' ? body.imap_password : '';
     let secure = body.imap_secure;
+    let allowInvalidCert = body.imap_allow_invalid_cert === true;
 
     // Editing without retyping the password: pull the stored one (and any
     // unspecified fields) from the account.
     if (body.accountId && !password) {
       const { data } = await createAdminClient()
         .from('email_accounts')
-        .select('imap_host, imap_port, imap_username, imap_password, imap_secure')
+        .select('imap_host, imap_port, imap_username, imap_password, imap_secure, imap_allow_invalid_cert')
         .eq('id', String(body.accountId))
         .maybeSingle();
       if (data) {
@@ -39,6 +40,9 @@ export async function POST(request: Request) {
         username = username || (data.imap_username ?? '');
         password = data.imap_password ?? '';
         if (secure === undefined) secure = data.imap_secure;
+        if (body.imap_allow_invalid_cert === undefined) {
+          allowInvalidCert = data.imap_allow_invalid_cert === true;
+        }
       }
     }
 
@@ -60,6 +64,9 @@ export async function POST(request: Request) {
       logger: false,
       greetingTimeout: 15_000,
       socketTimeout: 20_000,
+      // Opt-in: accept a mismatched/self-signed cert for this one mailbox (the
+      // exception a desktop client makes you approve on shared hosts like WPX).
+      ...(allowInvalidCert ? { tls: { rejectUnauthorized: false } } : {}),
     });
 
     try {
