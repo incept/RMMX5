@@ -177,6 +177,7 @@ export default function InboxPage() {
       imap_port: Number(f.imap_port ?? 993),
       imap_username: f.imap_username ?? '',
       imap_enabled: !!f.imap_enabled,
+      imap_allow_invalid_cert: !!f.imap_allow_invalid_cert,
     };
     // Passwords are write-only: include only when set (blank on edit = keep).
     if (f.smtp_password) row.smtp_password = f.smtp_password;
@@ -209,11 +210,20 @@ export default function InboxPage() {
           imap_port: Number(f.imap_port ?? 993),
           imap_username: f.imap_username,
           imap_password: f.imap_password,
+          imap_allow_invalid_cert: !!f.imap_allow_invalid_cert,
         }),
       });
-      setImapTest(await res.json());
-    } catch {
-      setImapTest({ ok: false, error: 'Request failed' });
+      const data = await res.json().catch(() => ({}) as any);
+      // Always resolve to a definite ok/error so the button never appears to do
+      // nothing: a server 500 returns { message } with no `ok`, which rendered blank.
+      if (data?.ok) setImapTest({ ok: true, folders: data.folders });
+      else
+        setImapTest({
+          ok: false,
+          error: data?.error || data?.message || `Test failed (HTTP ${res.status})`,
+        });
+    } catch (e: any) {
+      setImapTest({ ok: false, error: e?.message || 'Request failed' });
     }
   }
 
@@ -553,6 +563,24 @@ export default function InboxPage() {
                       </div>
                     ))}
                   </div>
+                  <label className="mt-2 flex items-start gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={!!accountForm.imap_allow_invalid_cert}
+                      onChange={(e) =>
+                        setAccountForm((f: any) => ({
+                          ...f,
+                          imap_allow_invalid_cert: e.target.checked,
+                        }))
+                      }
+                    />
+                    <span>
+                      Accept the mailbox server certificate even if it does not match the hostname
+                      (common on shared hosting like WPX — the exception a desktop client makes you
+                      approve).
+                    </span>
+                  </label>
                   <div className="mt-2 flex items-center gap-3">
                     <button
                       type="button"
@@ -567,8 +595,10 @@ export default function InboxPage() {
                         Connected · {imapTest.folders?.length ?? 0} folders
                       </span>
                     )}
-                    {imapTest && !imapTest.busy && imapTest.ok === false && (
-                      <span className="text-xs text-red-600">{imapTest.error}</span>
+                    {imapTest && !imapTest.busy && !imapTest.ok && (
+                      <span className="text-xs text-red-600">
+                        {imapTest.error || imapTest.message || 'Test failed — see the Debug Log'}
+                      </span>
                     )}
                   </div>
                   <p className="mt-1 text-xs text-gray-400">
