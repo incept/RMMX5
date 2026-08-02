@@ -136,10 +136,22 @@ export async function sendCrmEmail(opts: {
   if (account?.smtp_host) {
     provider = 'smtp';
     try {
+      // TLS mode follows the port, so an implicit-TLS ("secure on connect")
+      // handshake is never attempted against a STARTTLS port — the classic
+      // `tls_validate_record_header: wrong version number` failure. 465 is
+      // implicit TLS; 587 and 25 are STARTTLS. A non-standard port falls back to
+      // the account's stored flag.
+      const smtpSecure =
+        account.smtp_port === 465
+          ? true
+          : account.smtp_port === 587 || account.smtp_port === 25
+            ? false
+            : !!account.smtp_secure;
       const transport = nodemailer.createTransport({
         host: account.smtp_host,
         port: account.smtp_port,
-        secure: !!account.smtp_secure,
+        secure: smtpSecure,
+        requireTLS: !smtpSecure, // STARTTLS ports must still upgrade, never send cleartext
         auth: { user: account.smtp_username, pass: account.smtp_password },
         connectionTimeout: 15_000,
         greetingTimeout: 15_000,
