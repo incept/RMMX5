@@ -27,6 +27,27 @@ function accountValues(body: any, requirePassword: boolean) {
     is_default: body.is_default === true,
   };
   if (password) values.smtp_password = password.slice(0, 4096);
+
+  const imapPort = Number(body.imap_port ?? 993);
+  if (!Number.isInteger(imapPort) || imapPort < 1 || imapPort > 65_535) {
+    throw new Error('IMAP port must be between 1 and 65535');
+  }
+  const imapEnabled = body.imap_enabled === true;
+  const imapHost = body.imap_host ? String(body.imap_host).trim().slice(0, 253) : null;
+  const imapUsername = body.imap_username ? String(body.imap_username).trim().slice(0, 320) : null;
+  const imapPassword = typeof body.imap_password === 'string' ? body.imap_password : '';
+  if (imapEnabled && (!imapHost || !imapUsername)) {
+    throw new Error('IMAP host and username are required to enable receiving');
+  }
+  if (requirePassword && imapEnabled && !imapPassword) {
+    throw new Error('IMAP password is required to enable receiving');
+  }
+  values.imap_host = imapHost;
+  values.imap_port = imapPort;
+  values.imap_username = imapUsername;
+  values.imap_secure = body.imap_secure === undefined ? imapPort !== 143 : body.imap_secure === true;
+  values.imap_enabled = imapEnabled;
+  if (imapPassword) values.imap_password = imapPassword.slice(0, 4096);
   return values;
 }
 
