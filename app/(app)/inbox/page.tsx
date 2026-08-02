@@ -177,6 +177,7 @@ export default function InboxPage() {
       imap_port: Number(f.imap_port ?? 993),
       imap_username: f.imap_username ?? '',
       imap_enabled: !!f.imap_enabled,
+      imap_allow_invalid_cert: !!f.imap_allow_invalid_cert,
     };
     // Passwords are write-only: include only when set (blank on edit = keep).
     if (f.smtp_password) row.smtp_password = f.smtp_password;
@@ -209,6 +210,7 @@ export default function InboxPage() {
           imap_port: Number(f.imap_port ?? 993),
           imap_username: f.imap_username,
           imap_password: f.imap_password,
+          imap_allow_invalid_cert: !!f.imap_allow_invalid_cert,
         }),
       });
       setImapTest(await res.json());
@@ -553,6 +555,24 @@ export default function InboxPage() {
                       </div>
                     ))}
                   </div>
+                  <label className="mt-2 flex items-start gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={!!accountForm.imap_allow_invalid_cert}
+                      onChange={(e) =>
+                        setAccountForm((f: any) => ({
+                          ...f,
+                          imap_allow_invalid_cert: e.target.checked,
+                        }))
+                      }
+                    />
+                    <span>
+                      Accept the mailbox server certificate even if it does not match the hostname
+                      (common on shared hosting like WPX — the exception a desktop client makes you
+                      approve).
+                    </span>
+                  </label>
                   <div className="mt-2 flex items-center gap-3">
                     <button
                       type="button"

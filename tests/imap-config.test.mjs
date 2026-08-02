@@ -46,3 +46,20 @@ test('admin account routes accept and validate IMAP fields', async () => {
     assert.match(src, /IMAP port must be between 1 and 65535/);
   }
 });
+
+test('0044 adds the cert-trust flag and the connection honors it (opt-in)', async () => {
+  const m = await read('../supabase/migrations/0044_imap_cert_trust.sql');
+  assert.match(m, /add column if not exists imap_allow_invalid_cert boolean not null default false/);
+  assert.match(m, /imap_allow_invalid_cert/); // joins the safe view + grant
+
+  // The test connection relaxes TLS verification only when the flag is set.
+  const route = await read('../app/api/admin/email-accounts/test-imap/route.ts');
+  assert.match(route, /imap_allow_invalid_cert/);
+  assert.match(route, /allowInvalidCert \? \{ tls: \{ rejectUnauthorized: false \} \}/);
+
+  const create = await read('../app/api/admin/email-accounts/route.ts');
+  const update = await read('../app/api/admin/email-accounts/[id]/route.ts');
+  for (const src of [create, update]) {
+    assert.match(src, /values\.imap_allow_invalid_cert/);
+  }
+});

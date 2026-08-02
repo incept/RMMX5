@@ -47,6 +47,7 @@ function accountValues(body: any, requirePassword: boolean) {
   values.imap_username = imapUsername;
   values.imap_secure = body.imap_secure === undefined ? imapPort !== 143 : body.imap_secure === true;
   values.imap_enabled = imapEnabled;
+  values.imap_allow_invalid_cert = body.imap_allow_invalid_cert === true;
   if (imapPassword) values.imap_password = imapPassword.slice(0, 4096);
   return values;
 }
