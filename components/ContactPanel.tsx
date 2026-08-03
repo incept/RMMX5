@@ -84,6 +84,7 @@ export default function ContactPanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState('');
   const [compose, setCompose] = useState({ subject: '', html: '', accountId: '', requestKey: '' });
+  const [emailSent, setEmailSent] = useState(false);
   const [templates, setTemplates] = useState<any[]>([]);
   const [confirmUrlValue, setConfirmUrlValue] = useState('');
   const [countyValue, setCountyValue] = useState('');
@@ -711,6 +712,7 @@ export default function ContactPanel({
     const requestKey = compose.requestKey || crypto.randomUUID();
     if (!compose.requestKey) setCompose((c) => ({ ...c, requestKey }));
     setBusy('email');
+    setEmailSent(false);
     const res = await fetch('/api/email/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': requestKey },
@@ -725,6 +727,8 @@ export default function ContactPanel({
     if (res.ok) {
       setCompose({ subject: '', html: '', accountId: compose.accountId, requestKey: '' });
       loadEmailTab();
+      setEmailSent(true);
+      window.setTimeout(() => setEmailSent(false), 6000);
     } else {
       alert((await res.json()).error ?? 'Send failed');
     }
@@ -2014,9 +2018,16 @@ export default function ContactPanel({
                     minHeight={140}
                     placeholder="Message… (templates fill {{name}}, {{city}} for this contact)"
                   />
-                  <button className="btn btn-primary" disabled={busy === 'email'} onClick={sendEmail}>
-                    {busy === 'email' ? 'Sending…' : 'Send email'}
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button className="btn btn-primary" disabled={busy === 'email'} onClick={sendEmail}>
+                      {busy === 'email' ? 'Sending…' : 'Send email'}
+                    </button>
+                    {emailSent && (
+                      <span className="text-sm font-medium text-green-600 dark:text-green-400">
+                        ✓ Email queued for delivery
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
 
