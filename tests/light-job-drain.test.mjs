@@ -30,4 +30,8 @@ test('fast scoring jobs drain in a batch so a backlog cannot starve email/SMS', 
   assert.match(tick, /processQueuedJobs\(20, \{ light: true \}\)/);
   assert.match(tick, /processQueuedJobs\(3, \{ imap: true \}\)/);
   assert.match(tick, /drainQueue\(\)/);
+  // Lanes are fault-isolated: one lane failing (e.g. a claim_* function from an
+  // unapplied migration) must not take down email/SMS delivery on the light lane.
+  assert.match(tick, /Promise\.allSettled\(\[/);
+  assert.doesNotMatch(tick, /await Promise\.all\(\[\s*\n\s*processQueuedJobs\(20/);
 });
