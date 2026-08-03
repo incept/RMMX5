@@ -187,7 +187,15 @@ export async function sendCrmEmail(opts: {
         contactId: opts.contactId ?? null,
       }).catch(() => {});
     }
-    const r = await sendViaEmailit({ to: opts.to, subject: opts.subject, html, replyTo });
+    // Stable idempotency key = the message row id, so a retried delivery that
+    // already reached Emailit is deduped provider-side (finding #9).
+    const r = await sendViaEmailit({
+      to: opts.to,
+      subject: opts.subject,
+      html,
+      replyTo,
+      idempotencyKey: row.id,
+    });
     provider = 'emailit';
     ok = r.ok;
     // If SMTP also failed, surface both reasons.
