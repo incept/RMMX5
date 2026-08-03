@@ -20,7 +20,18 @@ export async function recordInboundEmail(input: {
   text?: string | null;
   messageId?: string | null;
   inReplyTo?: string | null;
-}): Promise<{ contactId: string | null; messageRowId: string | null }> {
+  accountId?: string | null;
+  // Present when the message came from an IMAP mailbox pull. Carries the columns
+  // that make the row deduplicable + reflectable, and the server's own delivery
+  // timestamp (ordering must not trust the sender-controlled Date header).
+  imap?: {
+    uid: number;
+    folder: string;
+    uidValidity: number;
+    seen: boolean;
+    internalDate?: Date | string | null;
+  };
+}): Promise<{ contactId: string | null; messageRowId: string | null; duplicate?: boolean }> {
   const admin = createAdminClient();
   const extracted = String(input.from).match(/[^\s<>"]+@[^\s<>"]+/)?.[0] ?? String(input.from);
   const fromEmail = extracted.trim().toLowerCase().slice(0, 320);
@@ -35,23 +46,44 @@ export async function recordInboundEmail(input: {
         .maybeSingle()
     : { data: null };
 
+  const imap = input.imap;
+  const insertRow: Record<string, unknown> = {
+    contact_id: contact?.id ?? null,
+    account_id: input.accountId ?? null,
+    direction: 'inbound',
+    from_email: fromEmail,
+    to_email: String(input.to ?? '').slice(0, 320),
+    subject: String(input.subject ?? '(no subject)').slice(0, 500),
+    html: String(input.html ?? input.text ?? '').slice(0, 750_000),
+    message_id: input.messageId ? String(input.messageId).slice(0, 1000) : null,
+    in_reply_to: input.inReplyTo ? String(input.inReplyTo).slice(0, 1000) : null,
+    status: 'received',
+    sent_at: new Date().toISOString(),
+  };
+  if (imap) {
+    insertRow.seen = imap.seen;
+    insertRow.imap_uid = imap.uid;
+    insertRow.imap_folder = imap.folder;
+    insertRow.imap_uidvalidity = imap.uidValidity;
+    if (imap.internalDate) insertRow.created_at = new Date(imap.internalDate).toISOString();
+  }
+
   const { data: message, error: messageError } = await admin
     .from('email_messages')
-    .insert({
-      contact_id: contact?.id ?? null,
-      direction: 'inbound',
-      from_email: fromEmail,
-      to_email: String(input.to ?? '').slice(0, 320),
-      subject: String(input.subject ?? '(no subject)').slice(0, 500),
-      html: String(input.html ?? input.text ?? '').slice(0, 750_000),
-      message_id: input.messageId ? String(input.messageId).slice(0, 1000) : null,
-      in_reply_to: input.inReplyTo ? String(input.inReplyTo).slice(0, 1000) : null,
-      status: 'received',
-      sent_at: new Date().toISOString(),
-    })
+    .insert(insertRow)
     .select('id')
     .single();
-  if (messageError) throw messageError;
+  if (messageError) {
+    // A synced message we already have (re-run overlap): the unique (account,
+    // folder, uidvalidity, uid) index rejects it. Return without re-running the
+    // reply side effects, so a resync can't re-stop sequences or re-log activity.
+    if (messageError.code === '23505' && imap) {
+      return { contactId: contact?.id ?? null, messageRowId: null, duplicate: true };
+    }
+    // Any other failure propagates so the caller (IMAP sync) aborts this run and
+    // retries from the previous cursor instead of skipping the message.
+    throw messageError;
+  }
 
   if (contact) {
     // Mark the latest outbound message to this contact as replied.

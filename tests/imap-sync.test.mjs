@@ -27,7 +27,8 @@ test('the sync engine pulls INBOX with imapflow + mailparser, gated on imap_enab
   assert.match(sync, /from 'imapflow'/);
   assert.match(sync, /from 'mailparser'/);
   assert.match(sync, /imap_enabled/);
-  assert.match(sync, /direction: 'inbound'/);
+  // Inbound rows now go through the SHARED recorder (reply side effects, #7).
+  assert.match(sync, /recordInboundEmail/);
   assert.match(sync, /imap_folder_state/);
   assert.match(sync, /export async function enqueueDueImapSyncs/);
 });

@@ -5,7 +5,7 @@ import { getSetting } from '@/lib/settings';
 import { logActivity } from '@/lib/activity';
 import { signTrackingOpen, signTrackingUrl } from '@/lib/signing';
 import { appBaseUrl } from '@/lib/app-url';
-import { logDebug } from '@/lib/debug-log';
+import { errorMessage, logDebug } from '@/lib/debug-log';
 
 /**
  * Central outbound email path. Every CRM email (compose, sequence step,
@@ -229,8 +229,19 @@ export async function sendCrmEmail(opts: {
   // Mirror interactive sends into the mailbox's Sent folder so Thunderbird / mobile
   // show them. Bulk list + sequence sends don't set appendToSent, so Sent stays clean.
   if (ok && opts.appendToSent && account?.imap_enabled) {
-    const { enqueueImapWriteback } = await import('@/lib/integrations/imap-sync');
-    await enqueueImapWriteback('append_sent', row.id).catch(() => {});
+    try {
+      const { enqueueImapAppendSent } = await import('@/lib/integrations/imap-sync');
+      await enqueueImapAppendSent(row.id);
+    } catch (appendError) {
+      // Non-fatal (the email was already sent), but not silent: a failed enqueue
+      // means the copy won't reach Sent, which is worth seeing in the debug log.
+      await logDebug({
+        level: 'warn',
+        source: 'email-send:append-sent',
+        message: `Could not queue Sent-folder copy for ${row.id}: ${errorMessage(appendError)}`,
+        contactId: opts.contactId ?? null,
+      }).catch(() => {});
+    }
   }
 
   if (!ok) {
