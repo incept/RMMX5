@@ -131,6 +131,7 @@ export async function POST(request: Request) {
       contactId: contact?.id ?? null,
       actorId: auth.profile.id,
       deliveryKey: key,
+      appendToSent: true,
     },
     `job:${key}`
   );

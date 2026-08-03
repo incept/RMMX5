@@ -26,6 +26,7 @@ export async function sendCrmEmail(opts: {
   actorId?: string | null;
   appendSignature?: boolean; // default true
   deliveryKey?: string | null;
+  appendToSent?: boolean; // interactive 1:1 sends: append a copy to the IMAP Sent folder
 }): Promise<{ ok: boolean; messageRowId: string; error?: string; duplicate?: boolean }> {
   const supabase = createAdminClient();
 
@@ -215,6 +216,13 @@ export async function sendCrmEmail(opts: {
       messageRowId: row.id,
       error: `Email provider result could not be recorded: ${statusError.message}`,
     };
+  }
+
+  // Mirror interactive sends into the mailbox's Sent folder so Thunderbird / mobile
+  // show them. Bulk list + sequence sends don't set appendToSent, so Sent stays clean.
+  if (ok && opts.appendToSent && account?.imap_enabled) {
+    const { enqueueImapWriteback } = await import('@/lib/integrations/imap-sync');
+    await enqueueImapWriteback('append_sent', row.id).catch(() => {});
   }
 
   if (!ok) {
