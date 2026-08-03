@@ -83,8 +83,15 @@ export async function runLinkRecheck(linkId: string, signal?: AbortSignal) {
         `Possible removal detected for ${link.url} after ${row.streak} consecutive ` +
         `"gone" reads — awaiting confirmation`,
     });
-  } else {
+  } else if (result.state !== 'live') {
+    // A routine "still live" re-check is the expected outcome and carries no
+    // signal — logging one per requested client link every re-check interval
+    // buried the debug log (and, since logDebug defaults to 'error', flagged the
+    // happy path as an error). Only the non-live outcomes are worth a trail:
+    //   'gone'    — a removal streak is building toward the confirm threshold,
+    //   'unknown' — the probe couldn't confirm liveness (a blocked/flaky source).
     await logDebug({
+      level: result.state === 'unknown' ? 'warn' : 'info',
       source: 'link-recheck',
       message: `re-check ${result.state}: ${result.note}`,
       context: { link_id: linkId, url: link.url, result: result.state, streak: row?.streak },
