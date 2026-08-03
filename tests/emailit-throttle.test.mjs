@@ -10,7 +10,7 @@ test('Emailit sends pass through a serialized 1-per-2s throttle to stay under th
   assert.match(lib, /lastEmailitSendAt/);
   // Every send goes through it.
   assert.match(lib, /const send = \(\) =>\s*throttleEmailit\(/);
-  assert.match(lib, /api\.emailit\.com\/v1\/emails/);
+  assert.match(lib, /api\.emailit\.com\/v2\/emails/);
   // A stray 429 is drained and retried once (already spaced by the throttle),
   // not failed outright.
   assert.match(lib, /res\.status === 429/);

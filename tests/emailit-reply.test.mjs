@@ -20,7 +20,7 @@ test('sendCrmEmail sets Reply-To on both the SMTP and Emailit paths', async () =
   assert.match(lib, /getSetting<\{[\s\S]*?inbound_reply_address\?: string[\s\S]*?\}>\('emailit'\)/);
   // SMTP transport carries replyTo when set; the Emailit fallback is passed it too.
   assert.match(lib, /\.\.\.\(replyTo \? \{ replyTo \} : \{\}\)/);
-  assert.match(lib, /sendViaEmailit\(\{ to: opts\.to, subject: opts\.subject, html, replyTo \}\)/);
+  assert.match(lib, /const r = await sendViaEmailit\(\{[\s\S]*?replyTo,[\s\S]*?\}\)/);
 });
 
 test('the integrations page exposes the inbound reply-to address field', async () => {
