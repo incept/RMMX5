@@ -22,7 +22,8 @@ export type JobKind =
   | 'notification_delivery'
   | 'contact_side_effects'
   | 'link_recheck'
-  | 'imap_sync';
+  | 'imap_sync'
+  | 'imap_writeback';
 
 function escapeHtml(value: unknown): string {
   return String(value)
@@ -267,6 +268,19 @@ async function handleJob(job: any, worker: string, signal?: AbortSignal) {
     const accountId = requiredPayloadUuid(payload, 'accountId', job.kind);
     const { runImapSync } = await import('@/lib/integrations/imap-sync');
     await runImapSync(accountId, signal);
+    return;
+  }
+
+  if (job.kind === 'imap_writeback') {
+    // Apply one CRM action (mark read / delete) back to the mailbox so Thunderbird
+    // and mobile see it. Heavy (IMAP connection) — runs on the VPS.
+    const messageId = requiredPayloadUuid(payload, 'messageId', job.kind);
+    const op = payload.op;
+    if (op !== 'seen' && op !== 'unseen' && op !== 'delete') {
+      throw nonRetryableError('imap_writeback job has an invalid op');
+    }
+    const { runImapWriteback } = await import('@/lib/integrations/imap-sync');
+    await runImapWriteback(op, messageId, signal);
     return;
   }
 

@@ -8,6 +8,9 @@ const FOLDER = 'INBOX';
 const INITIAL_BACKFILL = 200; // most-recent N messages imported on the first sync
 const MAX_PER_RUN = 100; // bounded so one job stays short; the next run continues
 const SYNC_BUCKET_MS = 3 * 60_000; // at most one queued sync per account per 3 min
+const RECONCILE_WINDOW = 200; // reflect server \Seen / deletions over this recent UID window
+
+type WritebackOp = 'seen' | 'unseen' | 'delete';
 
 function escapeHtml(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -71,15 +74,22 @@ export async function runImapSync(accountId: string, signal?: AbortSignal): Prom
       let processed = 0;
       for await (const msg of client.fetch(
         `${lastUid + 1}:*`,
-        { uid: true, source: true },
+        { uid: true, source: true, flags: true },
         { uid: true }
       )) {
         if (signal?.aborted) break;
         const uid = Number(msg.uid);
         if (uid <= lastUid) continue; // `X:*` re-lists the highest UID when X > highest
-        if (msg.source) await storeMessage(admin, account, uid, uidValidity, msg.source);
+        const seen = msg.flags instanceof Set ? msg.flags.has('\\Seen') : false;
+        if (msg.source) await storeMessage(admin, account, uid, uidValidity, msg.source, seen);
         if (uid > maxUid) maxUid = uid;
         if (++processed >= MAX_PER_RUN) break;
+      }
+
+      // Reflect server-side changes (Thunderbird / mobile) back into the CRM over a
+      // bounded recent window: \Seen changes, and messages deleted/moved away.
+      if (maxUid > 0) {
+        await reconcileRecent(client, admin, accountId, uidValidity, Math.max(1, maxUid - RECONCILE_WINDOW));
       }
 
       await admin.from('imap_folder_state').upsert(
@@ -105,7 +115,8 @@ async function storeMessage(
   account: { id: string; from_email: string | null },
   uid: number,
   uidValidity: number,
-  source: Buffer
+  source: Buffer,
+  seen: boolean
 ): Promise<void> {
   const parsed = await simpleParser(source);
   const fromEmail = parsed.from?.value?.[0]?.address ?? '';
@@ -143,6 +154,7 @@ async function storeMessage(
     message_id: parsed.messageId ?? null,
     in_reply_to: parsed.inReplyTo ?? null,
     status: 'received',
+    seen,
     imap_uid: uid,
     imap_folder: FOLDER,
     imap_uidvalidity: uidValidity,
@@ -156,6 +168,112 @@ async function storeMessage(
       message: `Could not store IMAP message uid ${uid} for account ${account.id}: ${error.message}`,
     }).catch(() => {});
   }
+}
+
+/**
+ * Reflect the server's current state back into the CRM over a bounded recent UID
+ * window: update the read flag, and hide messages that were deleted/moved away in
+ * another client (Thunderbird / mobile). Bounded, so it stays cheap each run.
+ */
+async function reconcileRecent(
+  client: ImapFlow,
+  admin: AdminClient,
+  accountId: string,
+  uidValidity: number,
+  sinceUid: number
+): Promise<void> {
+  const live = new Map<number, boolean>(); // uid -> seen, for what still exists on the server
+  for await (const msg of client.fetch(`${sinceUid}:*`, { uid: true, flags: true }, { uid: true })) {
+    live.set(Number(msg.uid), msg.flags instanceof Set ? msg.flags.has('\\Seen') : false);
+  }
+  const { data: rows } = await admin
+    .from('email_messages')
+    .select('id, imap_uid, seen')
+    .eq('account_id', accountId)
+    .eq('imap_folder', FOLDER)
+    .eq('imap_uidvalidity', uidValidity)
+    .gte('imap_uid', sinceUid)
+    .is('hidden_at', null);
+  for (const row of rows ?? []) {
+    const uid = Number(row.imap_uid);
+    if (!live.has(uid)) {
+      await admin
+        .from('email_messages')
+        .update({ hidden_at: new Date().toISOString() })
+        .eq('id', row.id);
+    } else if (live.get(uid) !== row.seen) {
+      await admin.from('email_messages').update({ seen: live.get(uid) }).eq('id', row.id);
+    }
+  }
+}
+
+async function findTrashPath(client: ImapFlow): Promise<string | null> {
+  const boxes = await client.list();
+  const special = boxes.find((b) => b.specialUse === '\\Trash');
+  if (special) return special.path;
+  const byName = boxes.find((b) => /(^|[./])trash$/i.test(b.path));
+  return byName?.path ?? null;
+}
+
+/** Apply one CRM action to the mailbox so other clients see it. */
+export async function runImapWriteback(
+  op: WritebackOp,
+  messageId: string,
+  signal?: AbortSignal
+): Promise<void> {
+  const admin = createAdminClient();
+  const { data: msg } = await admin
+    .from('email_messages')
+    .select('id, account_id, imap_uid, imap_folder')
+    .eq('id', messageId)
+    .maybeSingle();
+  if (!msg?.account_id || msg.imap_uid == null || !msg.imap_folder) return; // not a synced IMAP message
+
+  const { data: account } = await admin
+    .from('email_accounts')
+    .select('imap_host, imap_port, imap_username, imap_password, imap_secure, imap_enabled, imap_allow_invalid_cert')
+    .eq('id', msg.account_id)
+    .maybeSingle();
+  if (!account?.imap_enabled || !account.imap_host || !account.imap_password) return;
+
+  const port = Number(account.imap_port ?? 993);
+  const client = new ImapFlow({
+    host: String(account.imap_host),
+    port,
+    secure: imapSecure(port, account.imap_secure),
+    auth: { user: String(account.imap_username), pass: String(account.imap_password) },
+    logger: false,
+    greetingTimeout: 15_000,
+    socketTimeout: 30_000,
+    ...(account.imap_allow_invalid_cert ? { tls: { rejectUnauthorized: false } } : {}),
+  });
+
+  await client.connect();
+  try {
+    if (signal?.aborted) return;
+    const lock = await client.getMailboxLock(msg.imap_folder);
+    try {
+      const range = String(msg.imap_uid);
+      if (op === 'seen') {
+        await client.messageFlagsAdd(range, ['\\Seen'], { uid: true });
+      } else if (op === 'unseen') {
+        await client.messageFlagsRemove(range, ['\\Seen'], { uid: true });
+      } else {
+        const trash = await findTrashPath(client);
+        if (trash) await client.messageMove(range, trash, { uid: true });
+        else await client.messageDelete(range, { uid: true }); // no Trash folder: expunge
+      }
+    } finally {
+      lock.release();
+    }
+  } finally {
+    await client.logout().catch(() => {});
+  }
+}
+
+/** Queue a write-back op for one message (deduped per op + message). */
+export async function enqueueImapWriteback(op: WritebackOp, messageId: string): Promise<void> {
+  await enqueueJob('imap_writeback', { op, messageId }, `imap-wb:${op}:${messageId}`, 3);
 }
 
 /** Queue a sync for each receiving account — at most one per account per bucket. */
