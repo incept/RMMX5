@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
-import { enqueueImapWriteback } from '@/lib/integrations/imap-sync';
+import { enqueueImapReconcile } from '@/lib/integrations/imap-sync';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 
@@ -24,15 +24,21 @@ export async function POST(request: Request) {
     const admin = createAdminClient();
     const { data: rows, error } = await admin
       .from('email_messages')
-      .update({ hidden_at: new Date().toISOString() })
+      .update({ hidden_at: new Date().toISOString(), imap_wb_dirty: true })
       .in('id', ids)
       .is('hidden_at', null)
-      .select('id, imap_uid, direction');
+      .select('id, imap_uid, direction, account_id');
     if (error) throw error;
 
+    // One reconcile per DISTINCT account (over a single IMAP connection each),
+    // not one job per message — a 500-row delete no longer opens 500 connections
+    // into the one-per-tick heavy lane (finding #4). The dirty flags set above
+    // are what those reconciles converge.
+    const accounts = new Set<string>();
     for (const r of rows ?? []) {
-      if (r.imap_uid != null && r.direction === 'inbound') await enqueueImapWriteback('delete', r.id);
+      if (r.imap_uid != null && r.direction === 'inbound' && r.account_id) accounts.add(r.account_id);
     }
+    for (const accountId of accounts) await enqueueImapReconcile(accountId);
     return NextResponse.json({ ok: true, deleted: rows?.length ?? 0 });
   } catch (error) {
     return apiFailure('api:inbox/messages/bulk-delete', error);

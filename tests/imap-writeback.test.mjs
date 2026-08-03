@@ -14,10 +14,11 @@ test('0046 adds read state + the imap_writeback heavy job', async () => {
   );
 });
 
-test('write-back applies read/delete to the mailbox and reconciles server changes', async () => {
+test('write-back is a per-account state-convergent reconciler, not per-action', async () => {
   const sync = await read('../lib/integrations/imap-sync.ts');
-  assert.match(sync, /export async function runImapWriteback/);
-  assert.match(sync, /export async function enqueueImapWriteback/);
+  assert.match(sync, /export async function runImapReconcile/);
+  assert.match(sync, /export async function enqueueImapReconcile/);
+  assert.match(sync, /function reconcileWriteback/);
   assert.match(sync, /messageFlagsAdd/); // mark read
   assert.match(sync, /messageMove/); // delete -> Trash
   // Reconciliation hides server-deleted mail and updates the read flag.
@@ -25,11 +26,12 @@ test('write-back applies read/delete to the mailbox and reconciles server change
   assert.match(sync, /hidden_at/);
 });
 
-test('the queue routes imap_writeback', async () => {
+test('the queue routes imap_writeback for both append_sent and reconcile', async () => {
   const queue = await read('../lib/job-queue.ts');
   assert.match(queue, /\|\s*'imap_writeback'/);
   assert.match(queue, /job\.kind === 'imap_writeback'/);
-  assert.match(queue, /runImapWriteback\(op, messageId, signal\)/);
+  assert.match(queue, /runImapWriteback\('append_sent', messageId, signal\)/);
+  assert.match(queue, /runImapWriteback\('reconcile', accountId, signal\)/);
 });
 
 test('the inbox message route marks read + deletes, gated on a user', async () => {
@@ -37,7 +39,8 @@ test('the inbox message route marks read + deletes, gated on a user', async () =
   assert.match(route, /requireUser/);
   assert.match(route, /export async function PATCH/);
   assert.match(route, /export async function DELETE/);
-  assert.match(route, /enqueueImapWriteback/);
+  assert.match(route, /enqueueImapReconcile/);
+  assert.match(route, /imap_wb_dirty: true/); // set atomically with the state change
   assert.match(route, /hidden_at/);
 });
 

@@ -274,13 +274,17 @@ async function handleJob(job: any, worker: string, signal?: AbortSignal) {
   if (job.kind === 'imap_writeback') {
     // Apply one CRM action (mark read / delete) back to the mailbox so Thunderbird
     // and mobile see it. Heavy (IMAP connection) — runs on the VPS.
-    const messageId = requiredPayloadUuid(payload, 'messageId', job.kind);
     const op = payload.op;
-    if (op !== 'seen' && op !== 'unseen' && op !== 'delete' && op !== 'append_sent') {
+    const { runImapWriteback } = await import('@/lib/integrations/imap-sync');
+    if (op === 'append_sent') {
+      const messageId = requiredPayloadUuid(payload, 'messageId', job.kind);
+      await runImapWriteback('append_sent', messageId, signal);
+    } else if (op === 'reconcile') {
+      const accountId = requiredPayloadUuid(payload, 'accountId', job.kind);
+      await runImapWriteback('reconcile', accountId, signal);
+    } else {
       throw nonRetryableError('imap_writeback job has an invalid op');
     }
-    const { runImapWriteback } = await import('@/lib/integrations/imap-sync');
-    await runImapWriteback(op, messageId, signal);
     return;
   }
 

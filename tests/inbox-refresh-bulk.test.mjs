@@ -19,7 +19,7 @@ test('bulk delete soft-deletes many + moves synced ones to Trash', async () => {
   assert.match(route, /export async function POST/);
   assert.match(route, /\.in\('id', ids\)/);
   assert.match(route, /hidden_at/);
-  assert.match(route, /enqueueImapWriteback\('delete'/);
+  assert.match(route, /enqueueImapReconcile\(accountId\)/);
 });
 
 test('the inbox has refresh + multiselect delete', async () => {
