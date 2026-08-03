@@ -23,16 +23,37 @@ async function drainQueue() {
   // Three independent lanes (skip-locked makes concurrent claims safe): light,
   // imap, and the browser-heavy rest. IMAP has its own lane so a mailbox sync or
   // write-back reconcile never waits behind a deep search (finding #8).
-  const [fast, imap, rest] = await Promise.all([
+  //
+  // allSettled, NOT all: the lanes are independent, so one blowing up — e.g. an
+  // imap lane whose claim_imap_jobs function isn't there yet because migration
+  // 0051 hasn't been applied — must never take down email/SMS delivery on the
+  // light lane. A failed lane is logged and counted, not propagated.
+  const lanes = ['light', 'imap', 'heavy'] as const;
+  const settled = await Promise.allSettled([
     processQueuedJobs(20, { light: true }),
     processQueuedJobs(3, { imap: true }),
     processQueuedJobs(1),
   ]);
-  return {
-    claimed: fast.claimed + imap.claimed + rest.claimed,
-    completed: fast.completed + imap.completed + rest.completed,
-    failed: fast.failed + imap.failed + rest.failed,
-  };
+  let claimed = 0;
+  let completed = 0;
+  let failed = 0;
+  await Promise.all(
+    settled.map(async (r, i) => {
+      if (r.status === 'fulfilled') {
+        claimed += r.value.claimed;
+        completed += r.value.completed;
+        failed += r.value.failed;
+      } else {
+        failed += 1;
+        await logDebug({
+          level: 'error',
+          source: `cron:drain:${lanes[i]}`,
+          message: `Job lane failed to drain: ${errorMessage(r.reason)}`,
+        }).catch(() => {});
+      }
+    })
+  );
+  return { claimed, completed, failed };
 }
 
 /**
