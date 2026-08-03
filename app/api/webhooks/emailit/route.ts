@@ -81,6 +81,94 @@ export async function POST(request: Request) {
     }
   }
 
+  // Native engagement tracking: Emailit's own open/click tracking, enabled
+  // per-send in sendViaEmailit (tracking={loads,clicks}). email.loaded = open,
+  // email.clicked = click. The email_messages row id rides back as
+  // email.meta.message_row_id, so each event maps straight to its message;
+  // recipient is the fallback for mail sent before meta was attached. This is
+  // how EMAILIT-sent mail is tracked — SMTP-sent mail is tracked by the
+  // /api/track pixel + redirect instead, so the two never double-count.
+  const isOpen = eventType === 'email.loaded' || eventType.endsWith('.loaded');
+  const isClick = eventType === 'email.clicked' || eventType.endsWith('.clicked');
+  if (isOpen || isClick) {
+    const object = body?.data?.object ?? {};
+    const emailObj = object?.email ?? {};
+    const engagementEventId =
+      body?.event_id ?? object?.id ?? `emailit-${isClick ? 'click' : 'load'}:${emailObj?.id ?? ''}`;
+    const claimedEngagement = await claimWebhookReceipt('emailit', engagementEventId);
+    if (!claimedEngagement) return NextResponse.json({ ok: true, duplicate: true });
+    try {
+      const admin = createAdminClient();
+
+      // Prefer the exact row id we stamped as meta; fall back to recipient ->
+      // latest outbound (older mail, or a recipient with no meta).
+      let messageId: string | null =
+        typeof emailObj?.meta?.message_row_id === 'string' ? emailObj.meta.message_row_id : null;
+      let contactId: string | null = null;
+      if (messageId) {
+        const { data: row } = await admin
+          .from('email_messages')
+          .select('id, contact_id')
+          .eq('id', messageId)
+          .maybeSingle();
+        messageId = row?.id ?? null;
+        contactId = row?.contact_id ?? null;
+      }
+      if (!messageId) {
+        const rcpt = emailObj?.rcpt_to ?? object?.rcpt_to ?? null;
+        if (rcpt) {
+          const { data: contact } = await admin
+            .from('contacts')
+            .select('id')
+            .ilike('email', String(rcpt))
+            .limit(1)
+            .maybeSingle();
+          if (contact) {
+            const { data: lastOut } = await admin
+              .from('email_messages')
+              .select('id, contact_id')
+              .eq('contact_id', contact.id)
+              .eq('direction', 'outbound')
+              .order('created_at', { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            messageId = lastOut?.id ?? null;
+            contactId = lastOut?.contact_id ?? null;
+          }
+        }
+      }
+      // No CRM message to attribute (e.g. a system-notification email). Keep the
+      // claimed receipt so it isn't reprocessed, and move on.
+      if (!messageId) return NextResponse.json({ ok: true, ignored: 'no matching message' });
+
+      const clickedUrl =
+        isClick && typeof object?.link?.url === 'string' ? object.link.url : null;
+      // Same atomic, bucket-bounded counter the /api/track pixel uses, so an
+      // Emailit-tracked open/click increments open_count/click_count and lands
+      // in email_events identically to a self-tracked one.
+      const { data: counted } = await admin
+        .rpc('track_email_event_bounded', {
+          p_message_id: messageId,
+          p_event: isClick ? 'click' : 'open',
+          p_url: clickedUrl,
+          p_bucket_seconds: 60,
+        })
+        .maybeSingle<{ message_id: string; contact_id: string | null; counted: boolean }>();
+
+      const stopContact = counted?.contact_id ?? contactId;
+      if (counted?.counted && stopContact) {
+        await stopEnrollmentsFor(stopContact, isClick ? 'click' : 'open');
+      }
+      return NextResponse.json({ ok: true, counted: !!counted?.counted });
+    } catch (error: any) {
+      await releaseWebhookReceipt('emailit', engagementEventId);
+      return NextResponse.json(
+        { error: error?.message ?? 'Emailit engagement tracking failed' },
+        { status: 500 }
+      );
+    }
+  }
+
   if (!eventType.includes('bounce') && !eventType.includes('complaint')) {
     return NextResponse.json({ ok: true, ignored: eventType });
   }

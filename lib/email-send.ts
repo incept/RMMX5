@@ -111,22 +111,33 @@ export async function sendCrmEmail(opts: {
   if (rowErr || !row) return { ok: false, messageRowId: '', error: rowErr?.message ?? 'insert failed' };
 
   const appUrl = appBaseUrl();
+  const signature =
+    opts.appendSignature !== false && account?.signature_html
+      ? `<br/><br/>${account.signature_html}`
+      : '';
 
-  // Click tracking: route every http(s) link through /api/track/click.
-  // The HMAC (&s=) pins the redirect to URLs this app actually sent, so the
-  // endpoint can't be abused as an open redirect.
-  let html = opts.html.replace(
-    /href="(https?:\/\/[^"]+)"/gi,
-    (_m, url) =>
-      `href="${appUrl}/api/track/click?m=${row.id}&u=${encodeURIComponent(url)}&s=${signTrackingUrl(row.id, url)}"`
-  );
-
-  if (opts.appendSignature !== false && account?.signature_html) {
-    html += `<br/><br/>${account.signature_html}`;
-  }
-
-  // Open tracking pixel.
-  html += `<img src="${appUrl}/api/track/open?m=${row.id}&s=${signTrackingOpen(row.id)}" width="1" height="1" alt="" style="display:none"/>`;
+  // The two transports are instrumented differently, so they get two bodies:
+  //
+  //  - SMTP: WE instrument it. Every http(s) link is routed through
+  //    /api/track/click (the &s= HMAC pins the redirect to URLs this app
+  //    actually sent, so it can't be abused as an open redirect) and an open
+  //    pixel is appended. Emailit is not in the loop for an SMTP send, so this
+  //    is the only way it gets tracked.
+  //
+  //  - Emailit: EMAILIT instruments it natively (sendViaEmailit passes
+  //    tracking={loads,clicks} + meta.message_row_id) and reports opens/clicks
+  //    via the email.loaded / email.clicked webhooks. Its body must therefore
+  //    carry NEITHER our pixel NOR our rewritten links, or every open and click
+  //    would be counted twice (once by us, once by Emailit).
+  const smtpHtml =
+    opts.html.replace(
+      /href="(https?:\/\/[^"]+)"/gi,
+      (_m, url) =>
+        `href="${appUrl}/api/track/click?m=${row.id}&u=${encodeURIComponent(url)}&s=${signTrackingUrl(row.id, url)}"`
+    ) +
+    signature +
+    `<img src="${appUrl}/api/track/open?m=${row.id}&s=${signTrackingOpen(row.id)}" width="1" height="1" alt="" style="display:none"/>`;
+  const emailitHtml = opts.html + signature;
 
   let ok = false;
   let error: string | undefined;
@@ -162,7 +173,7 @@ export async function sendCrmEmail(opts: {
         from: account.from_name ? `"${account.from_name}" <${account.from_email}>` : account.from_email,
         to: opts.to,
         subject: opts.subject,
-        html,
+        html: smtpHtml,
         ...(replyTo ? { replyTo } : {}),
       });
       messageId = info.messageId;
@@ -188,13 +199,16 @@ export async function sendCrmEmail(opts: {
       }).catch(() => {});
     }
     // Stable idempotency key = the message row id, so a retried delivery that
-    // already reached Emailit is deduped provider-side (finding #9).
+    // already reached Emailit is deduped provider-side (finding #9). messageRowId
+    // turns on Emailit's native open/click tracking and stamps the row id as
+    // meta, so its engagement webhooks map back to this exact message.
     const r = await sendViaEmailit({
       to: opts.to,
       subject: opts.subject,
-      html,
+      html: emailitHtml,
       replyTo,
       idempotencyKey: row.id,
+      messageRowId: row.id,
     });
     provider = 'emailit';
     ok = r.ok;

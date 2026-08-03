@@ -65,6 +65,12 @@ export async function sendViaEmailit(opts: {
   fromName?: string;
   replyTo?: string;
   idempotencyKey?: string;
+  // The email_messages row this send belongs to. When present, Emailit's native
+  // open/click tracking is enabled for this send and the row id is attached as
+  // meta, so the email.loaded / email.clicked webhooks map straight back to it
+  // (see app/api/webhooks/emailit). Omitted for system notifications, which have
+  // no email_messages row and are not engagement-tracked.
+  messageRowId?: string;
 }): Promise<{ ok: boolean; error?: string }> {
   const cfg = await getSetting<{
     api_key?: string;
@@ -85,6 +91,17 @@ export async function sendViaEmailit(opts: {
     subject: opts.subject,
     html: opts.html,
     ...(replyTo ? { reply_to: replyTo } : {}),
+    // Enable Emailit's native open/click tracking for CRM mail and stamp the
+    // row id so its webhooks are unambiguously attributable. `tracking` is a
+    // per-send override of the domain default (loads = opens, clicks = clicks),
+    // so this works without touching the Emailit domain settings. `meta` is
+    // echoed back verbatim on every event as email.meta.
+    ...(opts.messageRowId
+      ? {
+          tracking: { loads: true, clicks: true },
+          meta: { message_row_id: opts.messageRowId },
+        }
+      : {}),
   });
 
   // #9: send on v2 with an Idempotency-Key when the caller supplies a stable id
