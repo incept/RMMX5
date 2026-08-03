@@ -518,7 +518,18 @@ export async function enqueueImapReconcile(accountId: string): Promise<void> {
 /** Queue a sync for each receiving account — at most one per account per bucket. */
 export async function enqueueDueImapSyncs(): Promise<{ enqueued: number }> {
   const admin = createAdminClient();
-  const { data: accounts } = await admin.from('email_accounts').select('id').eq('imap_enabled', true);
+  const { data: accounts, error } = await admin
+    .from('email_accounts')
+    .select('id')
+    .eq('imap_enabled', true);
+  if (error) {
+    await logDebug({
+      level: 'warn',
+      source: 'imap-sync',
+      message: `Could not list IMAP accounts for periodic sync: ${error.message}`,
+    }).catch(() => {});
+    return { enqueued: 0 };
+  }
   if (!accounts?.length) return { enqueued: 0 };
   const bucket = Math.floor(Date.now() / SYNC_BUCKET_MS);
   let enqueued = 0;
@@ -536,7 +547,18 @@ export async function enqueueDueImapSyncs(): Promise<{ enqueued: number }> {
  */
 export async function enqueueImapSyncNow(): Promise<{ enqueued: number }> {
   const admin = createAdminClient();
-  const { data: accounts } = await admin.from('email_accounts').select('id').eq('imap_enabled', true);
+  const { data: accounts, error } = await admin
+    .from('email_accounts')
+    .select('id')
+    .eq('imap_enabled', true);
+  if (error) {
+    await logDebug({
+      level: 'warn',
+      source: 'imap-sync',
+      message: `Could not list IMAP accounts for manual sync: ${error.message}`,
+    }).catch(() => {});
+    return { enqueued: 0 };
+  }
   if (!accounts?.length) return { enqueued: 0 };
   const bucket = Math.floor(Date.now() / 20_000);
   let enqueued = 0;

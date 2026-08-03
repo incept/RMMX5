@@ -22,10 +22,12 @@ test('fast scoring jobs drain in a batch so a backlog cannot starve email/SMS', 
   );
 
   const jobQueue = await readFile(new URL('../lib/job-queue.ts', import.meta.url), 'utf8');
-  assert.match(jobQueue, /opts\?\.light \? 'claim_light_jobs' : 'claim_jobs'/);
+  // Three lanes now: light, imap, and the heavy rest (finding #8).
+  assert.match(jobQueue, /opts\?\.light \? 'claim_light_jobs' : opts\?\.imap \? 'claim_imap_jobs' : 'claim_jobs'/);
 
   const tick = await readFile(new URL('../app/api/cron/tick/route.ts', import.meta.url), 'utf8');
-  // Each tick drains a priority batch of light jobs and one heavy job.
+  // Each tick drains a priority batch of light jobs, the imap lane, and one heavy job.
   assert.match(tick, /processQueuedJobs\(20, \{ light: true \}\)/);
+  assert.match(tick, /processQueuedJobs\(3, \{ imap: true \}\)/);
   assert.match(tick, /drainQueue\(\)/);
 });

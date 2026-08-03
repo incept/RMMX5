@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 import { logDebug } from '@/lib/debug-log';
+import { validateImapTarget } from '@/lib/imap-target';
 
 function accountValues(body: any, requirePassword: boolean) {
   const password = typeof body.smtp_password === 'string' ? body.smtp_password : '';
@@ -38,6 +39,10 @@ function accountValues(body: any, requirePassword: boolean) {
   const imapPassword = typeof body.imap_password === 'string' ? body.imap_password : '';
   if (imapEnabled && (!imapHost || !imapUsername)) {
     throw new Error('IMAP host and username are required to enable receiving');
+  }
+  if (imapEnabled) {
+    const targetError = validateImapTarget(imapHost!, imapPort); // SSRF guard (#5)
+    if (targetError) throw new Error(targetError);
   }
   if (requirePassword && imapEnabled && !imapPassword) {
     throw new Error('IMAP password is required to enable receiving');

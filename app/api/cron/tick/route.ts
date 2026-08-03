@@ -20,14 +20,18 @@ const LEASE_SECONDS = 180;
  * skip-locked makes the two claims safe to run together.
  */
 async function drainQueue() {
-  const [fast, rest] = await Promise.all([
+  // Three independent lanes (skip-locked makes concurrent claims safe): light,
+  // imap, and the browser-heavy rest. IMAP has its own lane so a mailbox sync or
+  // write-back reconcile never waits behind a deep search (finding #8).
+  const [fast, imap, rest] = await Promise.all([
     processQueuedJobs(20, { light: true }),
+    processQueuedJobs(3, { imap: true }),
     processQueuedJobs(1),
   ]);
   return {
-    claimed: fast.claimed + rest.claimed,
-    completed: fast.completed + rest.completed,
-    failed: fast.failed + rest.failed,
+    claimed: fast.claimed + imap.claimed + rest.claimed,
+    completed: fast.completed + imap.completed + rest.completed,
+    failed: fast.failed + imap.failed + rest.failed,
   };
 }
 

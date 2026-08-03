@@ -5,6 +5,7 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 import { logDebug } from '@/lib/debug-log';
+import { validateImapTarget } from '@/lib/imap-target';
 
 // nodemailer/imapflow use Node sockets — never the edge runtime.
 export const runtime = 'nodejs';
@@ -43,24 +44,28 @@ export async function POST(request: Request) {
     let secure = body.imap_secure;
     let allowInvalidCert = body.imap_allow_invalid_cert === true;
 
-    // Editing without retyping the password: pull the stored one (and any
-    // unspecified fields) from the account.
+    // Testing with the stored password (blank password + accountId): reuse the
+    // COMPLETE stored connection tuple and ignore any request-supplied host /
+    // username / port / TLS. Otherwise the stored password could be authenticated
+    // against an attacker-chosen host (finding #5).
     if (body.accountId && !password) {
       const { data } = await createAdminClient()
         .from('email_accounts')
         .select('imap_host, imap_port, imap_username, imap_password, imap_secure, imap_allow_invalid_cert')
         .eq('id', String(body.accountId))
         .maybeSingle();
-      if (data) {
-        host = host || (data.imap_host ?? '');
-        port = port || (data.imap_port ?? 993);
-        username = username || (data.imap_username ?? '');
-        password = data.imap_password ?? '';
-        if (secure === undefined) secure = data.imap_secure;
-        if (body.imap_allow_invalid_cert === undefined) {
-          allowInvalidCert = data.imap_allow_invalid_cert === true;
-        }
+      if (!data?.imap_password) {
+        return NextResponse.json(
+          { ok: false, error: 'No stored IMAP password for this account — enter the password to test.' },
+          { status: 400 }
+        );
       }
+      host = data.imap_host ?? '';
+      port = Number(data.imap_port ?? 993) || 993;
+      username = data.imap_username ?? '';
+      password = data.imap_password;
+      secure = data.imap_secure;
+      allowInvalidCert = data.imap_allow_invalid_cert === true;
     }
 
     if (!host || !username || !password) {
@@ -68,6 +73,11 @@ export async function POST(request: Request) {
         { ok: false, error: 'IMAP host, username and password are required to test.' },
         { status: 400 }
       );
+    }
+
+    const targetError = validateImapTarget(host, port);
+    if (targetError) {
+      return NextResponse.json({ ok: false, error: targetError }, { status: 400 });
     }
 
     // TLS follows the port (mirrors the SMTP fix): 993 = implicit TLS on connect,

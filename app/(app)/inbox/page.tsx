@@ -15,14 +15,21 @@ import { uploadEmailImage } from '@/lib/email-image-upload';
  * sandboxed iframe below (no scripts), so inbound mail that ships its own
  * styling renders as the sender built it — only the frame's defaults change.
  */
-function framedEmail(html: string, dark: boolean): string {
+function framedEmail(html: string, dark: boolean, blockImages: boolean): string {
   const bg = dark ? '#282c34' : '#ffffff'; // --color-surface, both themes
   const fg = dark ? '#f0f2f5' : '#111827'; // gray-900, both themes
   const link = dark ? '#a5b4fc' : '#4f46e5';
   const rule = dark ? '#474d59' : '#e5e7eb';
   const muted = dark ? '#b4bac3' : '#6b7280';
+  // Until the reader chooses "Load images", restrict images to inline data: URIs
+  // so remote images and 1x1 tracking pixels don't phone home on open. The
+  // sandbox already blocks scripts; this closes the remote-resource leak.
+  const csp = blockImages
+    ? '<meta http-equiv="Content-Security-Policy" content="img-src data:;">'
+    : '';
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+${csp}
 <base target="_blank">
 <style>
   :root { color-scheme: ${dark ? 'dark' : 'light'}; }
@@ -81,6 +88,7 @@ export default function InboxPage() {
   // Theme for the email preview frame; kept in sync with the <html class="dark">
   // toggle so switching light/dark re-renders the message in the matching palette.
   const [dark, setDark] = useState(false);
+  const [imagesLoaded, setImagesLoaded] = useState(false);
 
   const load = useCallback(async () => {
     let query = supabase
@@ -279,6 +287,7 @@ export default function InboxPage() {
   // mailbox (so Thunderbird / mobile reflect it) via the write-back job.
   function openMessage(m: any) {
     setSelected(m);
+    setImagesLoaded(false); // block remote images until the reader opts in
     if (m.direction === 'inbound' && !m.seen) {
       setMessages((list) => list.map((x) => (x.id === m.id ? { ...x, seen: true } : x)));
       fetch(`/api/inbox/messages/${encodeURIComponent(m.id)}`, {
@@ -445,11 +454,30 @@ export default function InboxPage() {
               {selected.from_email} → {selected.to_email} ·{' '}
               {new Date(selected.created_at).toLocaleString()}
             </div>
+            {/* Remote images are blocked on inbound mail until the reader opts in,
+                so tracking pixels don't fire on open. */}
+            {selected.direction === 'inbound' &&
+              !imagesLoaded &&
+              /<img\b/i.test(selected.html ?? '') && (
+                <div className="mt-4 flex items-center justify-between rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
+                  <span>Images blocked to protect your privacy.</span>
+                  <button
+                    className="btn py-1"
+                    onClick={() => setImagesLoaded(true)}
+                  >
+                    Load images
+                  </button>
+                </div>
+              )}
             {/* Sandboxed iframe: inbound email HTML is attacker-controlled, so it
                 must never run scripts or touch this origin's session. */}
             <iframe
               sandbox="allow-popups"
-              srcDoc={framedEmail(selected.html ?? '', dark)}
+              srcDoc={framedEmail(
+                selected.html ?? '',
+                dark,
+                selected.direction === 'inbound' && !imagesLoaded
+              )}
               title="Email content"
               className="card mt-4 h-[60vh] w-full"
             />
