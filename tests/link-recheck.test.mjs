@@ -60,6 +60,16 @@ test('the scan claims + atomically enqueues link_recheck jobs; the job records b
   assert.match(tick, /processLinkRechecks\(\)/);
 });
 
+test('a still-live re-check is not logged; only gone/unknown leave a trail, at the right level', async () => {
+  const lib = await read('../lib/link-recheck.ts');
+  // The happy path ('live') no longer writes a debug row — it was pure noise,
+  // logged at error level because logDebug defaults to 'error'.
+  assert.match(lib, /else if \(result\.state !== 'live'\)/);
+  // The non-live outcomes are logged, but never as 'error': unknown -> warn,
+  // gone -> info.
+  assert.match(lib, /level: result\.state === 'unknown' \? 'warn' : 'info'/);
+});
+
 test('the confirmation queue is admin-only with one-click confirm / dismiss', async () => {
   const route = await read('../app/api/link-removals/route.ts');
   assert.match(route, /requireAdmin/);
