@@ -1,5 +1,6 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
+import nodemailer from 'nodemailer';
 import { createAdminClient } from '@/lib/supabase/server';
 import { enqueueJob } from '@/lib/job-queue';
 import { logDebug } from '@/lib/debug-log';
@@ -10,7 +11,7 @@ const MAX_PER_RUN = 100; // bounded so one job stays short; the next run continu
 const SYNC_BUCKET_MS = 3 * 60_000; // at most one queued sync per account per 3 min
 const RECONCILE_WINDOW = 200; // reflect server \Seen / deletions over this recent UID window
 
-type WritebackOp = 'seen' | 'unseen' | 'delete';
+type WritebackOp = 'seen' | 'unseen' | 'delete' | 'append_sent';
 
 function escapeHtml(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -207,11 +208,13 @@ async function reconcileRecent(
   }
 }
 
-async function findTrashPath(client: ImapFlow): Promise<string | null> {
+// Find a special-use mailbox (\\Trash, \\Sent, …) by its SPECIAL-USE flag first,
+// then by a name heuristic, so it works across Dovecot / Gmail / etc. layouts.
+async function findFolder(client: ImapFlow, special: string, nameRe: RegExp): Promise<string | null> {
   const boxes = await client.list();
-  const special = boxes.find((b) => b.specialUse === '\\Trash');
-  if (special) return special.path;
-  const byName = boxes.find((b) => /(^|[./])trash$/i.test(b.path));
+  const bySpecial = boxes.find((b) => b.specialUse === special);
+  if (bySpecial) return bySpecial.path;
+  const byName = boxes.find((b) => nameRe.test(b.path));
   return byName?.path ?? null;
 }
 
@@ -224,10 +227,15 @@ export async function runImapWriteback(
   const admin = createAdminClient();
   const { data: msg } = await admin
     .from('email_messages')
-    .select('id, account_id, imap_uid, imap_folder')
+    .select(
+      'id, account_id, imap_uid, imap_folder, from_email, to_email, subject, html, message_id, created_at'
+    )
     .eq('id', messageId)
     .maybeSingle();
-  if (!msg?.account_id || msg.imap_uid == null || !msg.imap_folder) return; // not a synced IMAP message
+  if (!msg?.account_id) return;
+  // Flag/move ops act on a synced message's UID; append_sent works off the stored
+  // outbound content, so it does not need one.
+  if (op !== 'append_sent' && (msg.imap_uid == null || !msg.imap_folder)) return;
 
   const { data: account } = await admin
     .from('email_accounts')
@@ -251,7 +259,34 @@ export async function runImapWriteback(
   await client.connect();
   try {
     if (signal?.aborted) return;
-    const lock = await client.getMailboxLock(msg.imap_folder);
+
+    if (op === 'append_sent') {
+      const sent = await findFolder(client, '\\Sent', /(^|[./])sent( items| mail)?$/i);
+      if (!sent) {
+        await logDebug({
+          level: 'warn',
+          source: 'imap-sync',
+          message: `No Sent folder for account ${msg.account_id}; skipped appending message ${msg.id}`,
+        }).catch(() => {});
+        return;
+      }
+      // Rebuild the RFC822 message with nodemailer's stream transport (builds, does
+      // NOT send), then append it to Sent — flagged \Seen and dated to when it went.
+      const builder = nodemailer.createTransport({ streamTransport: true, buffer: true });
+      const built = await builder.sendMail({
+        from: msg.from_email || undefined,
+        to: msg.to_email,
+        subject: msg.subject || '',
+        html: msg.html || '',
+        messageId: msg.message_id || undefined,
+        date: msg.created_at ? new Date(msg.created_at) : new Date(),
+      });
+      const raw = (built as unknown as { message: Buffer }).message;
+      await client.append(sent, raw, ['\\Seen'], msg.created_at ? new Date(msg.created_at) : undefined);
+      return;
+    }
+
+    const lock = await client.getMailboxLock(msg.imap_folder!);
     try {
       const range = String(msg.imap_uid);
       if (op === 'seen') {
@@ -259,7 +294,7 @@ export async function runImapWriteback(
       } else if (op === 'unseen') {
         await client.messageFlagsRemove(range, ['\\Seen'], { uid: true });
       } else {
-        const trash = await findTrashPath(client);
+        const trash = await findFolder(client, '\\Trash', /(^|[./])trash$/i);
         if (trash) await client.messageMove(range, trash, { uid: true });
         else await client.messageDelete(range, { uid: true }); // no Trash folder: expunge
       }

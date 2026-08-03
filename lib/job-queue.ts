@@ -276,7 +276,7 @@ async function handleJob(job: any, worker: string, signal?: AbortSignal) {
     // and mobile see it. Heavy (IMAP connection) — runs on the VPS.
     const messageId = requiredPayloadUuid(payload, 'messageId', job.kind);
     const op = payload.op;
-    if (op !== 'seen' && op !== 'unseen' && op !== 'delete') {
+    if (op !== 'seen' && op !== 'unseen' && op !== 'delete' && op !== 'append_sent') {
       throw nonRetryableError('imap_writeback job has an invalid op');
     }
     const { runImapWriteback } = await import('@/lib/integrations/imap-sync');
@@ -319,6 +319,7 @@ async function handleJob(job: any, worker: string, signal?: AbortSignal) {
       contactId: (payload.contactId as string | null) ?? null,
       actorId: (payload.actorId as string | null) ?? null,
       deliveryKey: String(payload.deliveryKey),
+      appendToSent: payload.appendToSent === true,
     });
     if (!result.ok) throw new Error(result.error ?? 'Email delivery failed');
     return;

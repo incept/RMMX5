@@ -72,6 +72,8 @@ export default function InboxPage() {
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [searchRaw, setSearchRaw] = useState('');
+  const [search, setSearch] = useState('');
   // Theme for the email preview frame; kept in sync with the <html class="dark">
   // toggle so switching light/dark re-renders the message in the matching palette.
   const [dark, setDark] = useState(false);
@@ -84,9 +86,14 @@ export default function InboxPage() {
       .order('created_at', { ascending: false })
       .limit(200);
     if (filter !== 'all') query = query.eq('direction', filter);
+    // Strip PostgREST filter syntax before the term goes into an .or() string.
+    const term = search.replace(/[,()%*:\\]/g, ' ').trim();
+    if (term) {
+      query = query.or(`subject.ilike.%${term}%,from_email.ilike.%${term}%,to_email.ilike.%${term}%`);
+    }
     const { data } = await query;
     setMessages(data ?? []);
-  }, [supabase, filter]);
+  }, [supabase, filter, search]);
 
   const loadAccounts = useCallback(async () => {
     const {
@@ -126,6 +133,12 @@ export default function InboxPage() {
 
   // New mail is there when you switch back to the tab, no manual reload, and
   // the Realtime subscription surfaces it while the inbox is open.
+  // Debounce the search box so we don't query on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchRaw), 250);
+    return () => clearTimeout(t);
+  }, [searchRaw]);
+
   useAutoRefresh(load);
   useRealtimeRefresh('email_messages', load);
 
@@ -317,6 +330,14 @@ export default function InboxPage() {
           <button className="btn py-1" title="SMTP accounts" onClick={() => setShowAccounts(true)}>
             ⚙
           </button>
+        </div>
+        <div className="border-b border-gray-200 px-3 py-2">
+          <input
+            className="input py-1 text-sm"
+            placeholder="Search subject, from, to…"
+            value={searchRaw}
+            onChange={(e) => setSearchRaw(e.target.value)}
+          />
         </div>
         {selectedIds.size > 0 && (
           <div className="flex items-center gap-2 border-b border-gray-200 bg-brand-50/60 px-4 py-2 text-sm">
