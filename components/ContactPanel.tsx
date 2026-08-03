@@ -83,7 +83,7 @@ export default function ContactPanel({
   const [defaultServiceDays, setDefaultServiceDays] = useState(90);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState('');
-  const [compose, setCompose] = useState({ subject: '', html: '', accountId: '' });
+  const [compose, setCompose] = useState({ subject: '', html: '', accountId: '', requestKey: '' });
   const [templates, setTemplates] = useState<any[]>([]);
   const [confirmUrlValue, setConfirmUrlValue] = useState('');
   const [countyValue, setCountyValue] = useState('');
@@ -704,10 +704,16 @@ export default function ContactPanel({
 
   async function sendEmail() {
     if (!compose.subject || !compose.html) return alert('Subject and body required');
+    // The single-send route requires a valid Idempotency-Key. Reuse one stable key
+    // across retries of this compose (double-click, or resend after a failure) so a
+    // delivery that already went through is deduped, then clear it after success so
+    // the next email gets a fresh key.
+    const requestKey = compose.requestKey || crypto.randomUUID();
+    if (!compose.requestKey) setCompose((c) => ({ ...c, requestKey }));
     setBusy('email');
     const res = await fetch('/api/email/send', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': requestKey },
       body: JSON.stringify({
         contactId,
         subject: compose.subject,
@@ -717,7 +723,7 @@ export default function ContactPanel({
     });
     setBusy(null);
     if (res.ok) {
-      setCompose({ subject: '', html: '', accountId: compose.accountId });
+      setCompose({ subject: '', html: '', accountId: compose.accountId, requestKey: '' });
       loadEmailTab();
     } else {
       alert((await res.json()).error ?? 'Send failed');
