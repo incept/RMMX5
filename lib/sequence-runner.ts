@@ -10,7 +10,7 @@ export { renderTemplate };
 /**
  * Email sequence engine.
  *
- * A sequence = ordered steps (template + delay_days). Contacts are enrolled
+ * A sequence = ordered steps (inline email or template + delay_days). Contacts are enrolled
  * manually, when added to the sequence's list (`list_added`), or when their
  * status changes into one of `start_status_ids` (`status_change`).
  *
@@ -150,11 +150,16 @@ export async function processDueEnrollments(limit = 2): Promise<{ sent: number; 
         continue;
       }
 
-      const template = (nextStep as any).email_templates;
+      // A step carries its own inline body (new model); steps created before
+      // that fall back to their linked template.
+      const step = nextStep as any;
+      const template = step.email_templates;
+      const rawSubject = step.html ? (step.subject ?? '') : (template?.subject ?? '');
+      const rawHtml = step.html ? step.html : (template?.html ?? '');
       const result = await sendCrmEmail({
         to: contact.email,
-        subject: renderTemplate(template?.subject ?? '', contact),
-        html: renderTemplate(template?.html ?? '', contact, { html: true }),
+        subject: renderTemplate(rawSubject, contact),
+        html: renderTemplate(rawHtml, contact, { html: true }),
         accountId: sequence.send_account_id,
         contactId: contact.id,
         sequenceId: sequence.id,
