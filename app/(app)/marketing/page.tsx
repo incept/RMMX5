@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
+import RichTextEditor from '@/components/RichTextEditor';
+import { uploadEmailImage } from '@/lib/email-image-upload';
+import { sanitizeEmailHtml } from '@/lib/html-sanitize';
 
 const TABS = ['Sequences', 'Templates', 'Lists', 'Analytics'] as const;
 type Tab = (typeof TABS)[number];
@@ -22,6 +25,7 @@ export default function MarketingPage() {
   const [analyticsSort, setAnalyticsSort] = useState<'open_count' | 'click_count' | 'created_at'>('open_count');
 
   const [templateForm, setTemplateForm] = useState<any>(null);
+  const [templateSource, setTemplateSource] = useState(false);
   const [listForm, setListForm] = useState<any>(null);
   const [sequenceForm, setSequenceForm] = useState<any>(null);
   const [blast, setBlast] = useState<any>(null);
@@ -78,7 +82,7 @@ export default function MarketingPage() {
   async function saveTemplate() {
     const f = templateForm;
     if (!f.name) return alert('Name required');
-    const row = { name: f.name, subject: f.subject ?? '', html: f.html ?? '' };
+    const row = { name: f.name, subject: f.subject ?? '', html: sanitizeEmailHtml(f.html ?? '') };
     const { error } = f.id
       ? await supabase.from('email_templates').update(row).eq('id', f.id)
       : await supabase.from('email_templates').insert(row);
@@ -540,7 +544,10 @@ export default function MarketingPage() {
         <div>
           <button
             className="btn btn-primary mb-4"
-            onClick={() => setTemplateForm({ name: '', subject: '', html: '' })}
+            onClick={() => {
+              setTemplateSource(false);
+              setTemplateForm({ name: '', subject: '', html: '' });
+            }}
           >
             + New template
           </button>
@@ -552,7 +559,15 @@ export default function MarketingPage() {
                 <div className="mt-2 line-clamp-3 text-xs text-gray-400">
                   {t.html.replace(/<[^>]+>/g, ' ')}
                 </div>
-                <button className="btn mt-3 py-1" onClick={() => setTemplateForm(t)}>
+                <button
+                  className="btn mt-3 py-1"
+                  onClick={() => {
+                    // Existing table/scaffolded HTML would be normalized by the
+                    // rich editor's contentEditable — open those in source mode.
+                    setTemplateSource(/<(table|html|style)\b|<!doctype/i.test(t.html || ''));
+                    setTemplateForm(t);
+                  }}
+                >
                   Edit
                 </button>
               </div>
@@ -578,12 +593,32 @@ export default function MarketingPage() {
                     value={templateForm.subject}
                     onChange={(e) => setTemplateForm((f: any) => ({ ...f, subject: e.target.value }))}
                   />
-                  <textarea
-                    className="input min-h-48 font-mono text-xs"
-                    placeholder="HTML body… use {{name}}, {{city}}, {{state}} and custom-field keys"
-                    value={templateForm.html}
-                    onChange={(e) => setTemplateForm((f: any) => ({ ...f, html: e.target.value }))}
-                  />
+                  <div className="flex items-center justify-between">
+                    <span className="label mb-0">Body — {`{{name}}, {{city}}, {{state}}`} and custom keys</span>
+                    <button
+                      type="button"
+                      className="text-xs font-medium text-brand-700 hover:underline"
+                      onClick={() => setTemplateSource((s) => !s)}
+                    >
+                      {templateSource ? 'Rich editor' : 'HTML source'}
+                    </button>
+                  </div>
+                  {templateSource ? (
+                    <textarea
+                      className="input min-h-48 font-mono text-xs"
+                      placeholder="HTML body… use {{name}}, {{city}}, {{state}} and custom-field keys"
+                      value={templateForm.html}
+                      onChange={(e) => setTemplateForm((f: any) => ({ ...f, html: e.target.value }))}
+                    />
+                  ) : (
+                    <RichTextEditor
+                      value={templateForm.html ?? ''}
+                      onChange={(html) => setTemplateForm((f: any) => ({ ...f, html }))}
+                      onImageUpload={uploadEmailImage}
+                      minHeight={220}
+                      placeholder="Compose your template… placeholders like {{name}} are filled per contact when sent"
+                    />
+                  )}
                   <div className="flex justify-between">
                     {templateForm.id ? (
                       <button

@@ -1,6 +1,11 @@
 import { createAdminClient } from '@/lib/supabase/server';
 import { sendCrmEmail } from '@/lib/email-send';
 import { sequenceFailureUpdate } from '@/lib/sequence-retry';
+import { renderTemplate } from '@/lib/render-template';
+
+// Re-exported so existing importers (the send route, tests) keep working after
+// the pure implementation moved to lib/render-template.ts.
+export { renderTemplate };
 
 /**
  * Email sequence engine.
@@ -14,35 +19,6 @@ import { sequenceFailureUpdate } from '@/lib/sequence-retry';
  * steps send. The cron endpoint calls processDueEnrollments() to deliver
  * whatever is due.
  */
-
-const HTML_ESCAPES: Record<string, string> = {
-  '&': '&amp;',
-  '<': '&lt;',
-  '>': '&gt;',
-  '"': '&quot;',
-  "'": '&#39;',
-};
-
-/**
- * Render {{placeholders}} against a contact row.
- *
- * `html: true` escapes the SUBSTITUTED VALUES (never the template itself —
- * the admin's markup is trusted). Contact fields are attacker-supplied: a
- * form submission with `<a href=...>` in the name would otherwise be mailed
- * out as live markup under our sending domain. Subjects and SMS bodies are
- * plain text, so they render unescaped.
- */
-export function renderTemplate(
-  text: string,
-  contact: Record<string, any>,
-  opts?: { html?: boolean }
-): string {
-  return text.replace(/\{\{\s*(\w+)\s*\}\}/g, (_m, key) => {
-    const value = contact[key] ?? contact.custom?.[key] ?? '';
-    const str = value == null ? '' : String(value);
-    return opts?.html ? str.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]) : str;
-  });
-}
 
 export async function enrollContact(sequenceId: string, contactId: string) {
   const supabase = createAdminClient();

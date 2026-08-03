@@ -1,5 +1,8 @@
 export const CONTACT_FILE_MAX_BYTES = 10 * 1024 * 1024;
 export const VOICEMAIL_MAX_BYTES = 25 * 1024 * 1024;
+export const EMAIL_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+
+const EMAIL_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
 const ACTIVE_CONTENT_TYPES = new Set([
   'text/html',
@@ -40,6 +43,29 @@ export async function validateContactFileContent(file: File): Promise<string | n
       !startsWith(bytes, [0x47, 0x49, 0x46, 0x38, 0x37, 0x61]) &&
       !startsWith(bytes, [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]));
   return mismatch ? 'File contents do not match the declared file type' : null;
+}
+
+/**
+ * Validate an image destined for the public email-assets bucket. Restricted to
+ * raster formats (no SVG — it can carry script) and verified against magic bytes
+ * so a renamed file can't slip through on its declared MIME type alone.
+ */
+export async function validateEmailImage(file: File): Promise<string | null> {
+  if (!file.name || file.size <= 0) return 'A non-empty image file is required';
+  if (file.size > EMAIL_IMAGE_MAX_BYTES) return 'Images must be 5 MB or smaller';
+  const type = file.type.toLowerCase();
+  if (!EMAIL_IMAGE_TYPES.has(type)) return 'Only PNG, JPEG, GIF, or WebP images are allowed';
+  const bytes = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+  const ok =
+    (type === 'image/png' && startsWith(bytes, [0x89, 0x50, 0x4e, 0x47])) ||
+    (type === 'image/jpeg' && startsWith(bytes, [0xff, 0xd8, 0xff])) ||
+    (type === 'image/gif' &&
+      (startsWith(bytes, [0x47, 0x49, 0x46, 0x38, 0x37, 0x61]) ||
+        startsWith(bytes, [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]))) ||
+    (type === 'image/webp' &&
+      startsWith(bytes, [0x52, 0x49, 0x46, 0x46]) &&
+      String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP');
+  return ok ? null : 'Image contents do not match the declared file type';
 }
 
 export function validateVoicemailFile(file: File): string | null {
