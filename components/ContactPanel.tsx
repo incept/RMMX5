@@ -8,6 +8,7 @@ import { useMyRole } from '@/lib/use-my-role';
 import RichTextEditor, { type LinkPlaceholder } from '@/components/RichTextEditor';
 import { renderTemplate } from '@/lib/render-template';
 import { uploadEmailImage } from '@/lib/email-image-upload';
+import { framedEmail } from '@/lib/email-frame';
 
 const TABS = ['Link Data', 'Contact Info', 'Email', 'Calls', 'Activity', 'Files', 'Notes'] as const;
 type Tab = (typeof TABS)[number];
@@ -85,6 +86,14 @@ export default function ContactPanel({
   const [note, setNote] = useState('');
   const [compose, setCompose] = useState({ subject: '', html: '', accountId: '', requestKey: '' });
   const [emailSent, setEmailSent] = useState(false);
+  // Click a row in the email history to read the full message in a viewer.
+  const [viewingMessage, setViewingMessage] = useState<any | null>(null);
+  const [viewerImagesLoaded, setViewerImagesLoaded] = useState(false);
+  // Mirror the app's light/dark class so the message preview frame repaints on toggle.
+  const [dark, setDark] = useState(false);
+  // "Resend with edits" drops a past email back into the composer; scroll it
+  // into view so the operator sees the populated fields.
+  const composeRef = useRef<HTMLDivElement | null>(null);
   const [templates, setTemplates] = useState<any[]>([]);
   const [confirmUrlValue, setConfirmUrlValue] = useState('');
   const [countyValue, setCountyValue] = useState('');
@@ -138,6 +147,22 @@ export default function ContactPanel({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [siblingIds, onNavigate, goToSibling]);
+
+  // Follow the app's light/dark class so the message viewer frame repaints on toggle.
+  useEffect(() => {
+    const root = document.documentElement;
+    const sync = () => setDark(root.classList.contains('dark'));
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(root, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, []);
+
+  // Every fresh message opens with remote images blocked (inbound tracking
+  // pixels don't fire on open); the reader opts in per message.
+  useEffect(() => {
+    setViewerImagesLoaded(false);
+  }, [viewingMessage]);
 
   const load = useCallback(async () => {
     setContactLoadError('');
@@ -746,6 +771,24 @@ export default function ContactPanel({
     } else {
       alert((await res.json()).error ?? 'Send failed');
     }
+  }
+
+  // Load a past message back into the composer to send again with edits. A blank
+  // requestKey forces a fresh idempotency key on the next send, so the resend is
+  // treated as a new delivery instead of being deduped against the original.
+  function resendMessage(m: any) {
+    setCompose({
+      subject: m.subject ?? '',
+      html: m.html ?? '',
+      accountId: m.account_id ?? '',
+      requestKey: '',
+    });
+    setEmailSent(false);
+    setViewingMessage(null);
+    // Reveal the populated composer (it lives further down the Email tab).
+    window.requestAnimationFrame(() =>
+      composeRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    );
   }
 
   async function addNote() {
@@ -1985,7 +2028,7 @@ export default function ContactPanel({
                 </div>
               </div>
 
-              <div>
+              <div ref={composeRef}>
                 <div className="label">Compose</div>
                 <div className="space-y-2">
                   {accounts.length > 0 && (
@@ -2050,7 +2093,13 @@ export default function ContactPanel({
                 <div className="label">History</div>
                 <div className="space-y-1.5">
                   {messages.map((m) => (
-                    <div key={m.id} className="rounded-lg border border-gray-100 px-3 py-2 text-sm">
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => setViewingMessage(m)}
+                      className="block w-full rounded-lg border border-gray-100 px-3 py-2 text-left text-sm hover:border-brand-300 hover:bg-gray-50 dark:hover:bg-gray-50"
+                      title="View this email"
+                    >
                       <div className="flex items-center gap-2">
                         <span>{m.direction === 'outbound' ? '→' : '←'}</span>
                         <span className="flex-1 truncate font-medium">{m.subject}</span>
@@ -2065,7 +2114,7 @@ export default function ContactPanel({
                         {m.replied && <span className="text-green-600">replied</span>}
                         {m.bounced && <span className="text-red-600">bounced</span>}
                       </div>
-                    </div>
+                    </button>
                   ))}
                 </div>
               </div>
@@ -2237,6 +2286,86 @@ export default function ContactPanel({
           )}
         </div>
       </div>
+
+      {/* Sent/received email viewer: read the full message, or drop an outbound
+          one back into the composer to resend with edits. Its own overlay stops
+          the click from bubbling to the drawer's onClose. */}
+      {viewingMessage && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={(e) => {
+            e.stopPropagation();
+            setViewingMessage(null);
+          }}
+        >
+          <div
+            className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-xl bg-white p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-2">
+              <div className="min-w-0 flex-1">
+                <h2 className="truncate text-base font-semibold">
+                  {viewingMessage.subject || '(no subject)'}
+                </h2>
+                <div className="mt-0.5 truncate text-xs text-gray-500">
+                  {viewingMessage.from_email} → {viewingMessage.to_email} ·{' '}
+                  {new Date(viewingMessage.created_at).toLocaleString()}
+                </div>
+                <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-gray-400">
+                  <span>{viewingMessage.status}</span>
+                  {viewingMessage.open_count > 0 && <span>{viewingMessage.open_count} opens</span>}
+                  {viewingMessage.click_count > 0 && (
+                    <span>{viewingMessage.click_count} clicks</span>
+                  )}
+                  {viewingMessage.replied && <span className="text-green-600">replied</span>}
+                  {viewingMessage.bounced && <span className="text-red-600">bounced</span>}
+                </div>
+              </div>
+              <button type="button" className="btn py-1" onClick={() => setViewingMessage(null)}>
+                Close
+              </button>
+            </div>
+
+            {/* Remote images stay blocked on inbound mail until the reader opts
+                in, so tracking pixels don't fire when a message is opened here. */}
+            {viewingMessage.direction === 'inbound' &&
+              !viewerImagesLoaded &&
+              /<img\b/i.test(viewingMessage.html ?? '') && (
+                <div className="mt-3 flex items-center justify-between rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  <span>Images blocked to protect your privacy.</span>
+                  <button className="btn py-1" onClick={() => setViewerImagesLoaded(true)}>
+                    Load images
+                  </button>
+                </div>
+              )}
+
+            {/* Sandboxed iframe: message HTML must never run scripts or touch this
+                origin's session. */}
+            <iframe
+              sandbox="allow-popups"
+              srcDoc={framedEmail(
+                viewingMessage.html ?? '',
+                dark,
+                viewingMessage.direction === 'inbound' && !viewerImagesLoaded
+              )}
+              title="Email content"
+              className="card mt-3 w-full min-h-0 flex-1"
+            />
+
+            {viewingMessage.direction === 'outbound' && (
+              <div className="mt-3 flex justify-end">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => resendMessage(viewingMessage)}
+                >
+                  ✎ Resend with edits
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -57,7 +57,9 @@ test('changing the IMAP host/port/username requires re-entering the password', a
 // Remote images / tracking pixels are blocked until the reader opts in.
 test('the inbox blocks remote images until Load images is clicked', async () => {
   const inbox = await read('../app/(app)/inbox/page.tsx');
-  assert.match(inbox, /Content-Security-Policy" content="img-src data:;/);
+  // The image-blocking CSP now lives in the shared frame helper.
+  const frame = await read('../lib/email-frame.ts');
+  assert.match(frame, /Content-Security-Policy" content="img-src data:;/);
   assert.match(inbox, /Load images/);
   assert.match(inbox, /setImagesLoaded/);
 });
