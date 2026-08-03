@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { renderTemplate } from '@/lib/sequence-runner';
+import { withLinkPlaceholders } from '@/lib/link-placeholders';
 import { deliveryKey, MAX_BULK_RECIPIENTS, validIdempotencyKey } from '@/lib/bulk-delivery';
 import { enqueueJob } from '@/lib/job-queue';
 import { readJsonBody } from '@/lib/request-limits';
@@ -76,13 +77,14 @@ export async function POST(request: Request) {
     for (const member of (members ?? []) as any[]) {
       const contact = member.contacts;
       if (!contact?.email) continue;
+      const rendered = await withLinkPlaceholders(admin, contact, body.subject, body.html);
       const key = deliveryKey('email', requestKey, contact.id);
       const result = await enqueueJob(
         'email_delivery',
         {
           to: contact.email,
-          subject: renderTemplate(body.subject, contact),
-          html: renderTemplate(body.html, contact, { html: true }),
+          subject: renderTemplate(body.subject, rendered),
+          html: renderTemplate(body.html, rendered, { html: true }),
           accountId,
           contactId: contact.id,
           actorId: auth.profile.id,
@@ -126,12 +128,13 @@ export async function POST(request: Request) {
   const recipient = String(to);
   const recipientKey = contact?.id ?? recipient.trim().toLowerCase();
   const key = deliveryKey('email', requestKey, recipientKey);
+  const rendered = contact ? await withLinkPlaceholders(admin, contact, body.subject, body.html) : null;
   const queued = await enqueueJob(
     'email_delivery',
     {
       to: recipient,
-      subject: contact ? renderTemplate(body.subject, contact) : body.subject,
-      html: contact ? renderTemplate(body.html, contact, { html: true }) : body.html,
+      subject: rendered ? renderTemplate(body.subject, rendered) : body.subject,
+      html: rendered ? renderTemplate(body.html, rendered, { html: true }) : body.html,
       accountId,
       contactId: contact?.id ?? null,
       actorId: auth.profile.id,

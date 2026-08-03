@@ -41,7 +41,7 @@ test('all three compose surfaces import the editor + shared image uploader', asy
     '../components/ContactPanel.tsx',
   ]) {
     const src = await read(p);
-    assert.match(src, /import RichTextEditor from '@\/components\/RichTextEditor'/, `${p} editor`);
+    assert.match(src, /import RichTextEditor[^\n]*from '@\/components\/RichTextEditor'/, `${p} editor`);
   }
   const inbox = await read('../app/(app)/inbox/page.tsx');
   const cp = await read('../components/ContactPanel.tsx');

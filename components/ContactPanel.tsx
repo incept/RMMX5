@@ -5,7 +5,7 @@ import { createClient } from '@/lib/supabase/client';
 import StatusPill, { type StatusOption } from '@/components/StatusPill';
 import { NameSourceIcon } from '@/components/NameSourceIcon';
 import { useMyRole } from '@/lib/use-my-role';
-import RichTextEditor from '@/components/RichTextEditor';
+import RichTextEditor, { type LinkPlaceholder } from '@/components/RichTextEditor';
 import { renderTemplate } from '@/lib/render-template';
 import { uploadEmailImage } from '@/lib/email-image-upload';
 
@@ -701,6 +701,20 @@ export default function ContactPanel({
       setBusy(null);
     }
   }
+
+  // Offer this contact's removal links as insertable {{link N}} placeholders that
+  // resolve to the live URL at send time. Only slots with a real web URL appear.
+  const linkPlaceholders = useMemo(() => {
+    const withUrl = links.filter((l) => l.url && /^https?:\/\//i.test(l.url));
+    const items: LinkPlaceholder[] = withUrl.map((l) => ({
+      label: `Link ${l.position}: ${l.url}${l.status !== 'live' ? ` (${l.status})` : ''}`,
+      token: `{{link${l.position}}}`,
+    }));
+    if (withUrl.some((l) => l.status === 'live')) {
+      items.push({ label: 'All live links', token: '{{links}}', asLink: false });
+    }
+    return items;
+  }, [links]);
 
   async function sendEmail() {
     if (!compose.subject || !compose.html) return alert('Subject and body required');
@@ -2011,6 +2025,7 @@ export default function ContactPanel({
                     value={compose.html}
                     onChange={(html) => setCompose((c) => ({ ...c, html }))}
                     onImageUpload={uploadEmailImage}
+                    linkPlaceholders={linkPlaceholders}
                     minHeight={140}
                     placeholder="Message… (templates fill {{name}}, {{city}} for this contact)"
                   />

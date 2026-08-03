@@ -2,6 +2,7 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { sendCrmEmail } from '@/lib/email-send';
 import { sequenceFailureUpdate } from '@/lib/sequence-retry';
 import { renderTemplate } from '@/lib/render-template';
+import { withLinkPlaceholders } from '@/lib/link-placeholders';
 
 // Re-exported so existing importers (the send route, tests) keep working after
 // the pure implementation moved to lib/render-template.ts.
@@ -156,10 +157,12 @@ export async function processDueEnrollments(limit = 2): Promise<{ sent: number; 
       const template = step.email_templates;
       const rawSubject = step.html ? (step.subject ?? '') : (template?.subject ?? '');
       const rawHtml = step.html ? step.html : (template?.html ?? '');
+      // Resolve {{link1}}/{{links}} against this contact's removal links when used.
+      const rendered = await withLinkPlaceholders(supabase, contact, rawSubject, rawHtml);
       const result = await sendCrmEmail({
         to: contact.email,
-        subject: renderTemplate(rawSubject, contact),
-        html: renderTemplate(rawHtml, contact, { html: true }),
+        subject: renderTemplate(rawSubject, rendered),
+        html: renderTemplate(rawHtml, rendered, { html: true }),
         accountId: sequence.send_account_id,
         contactId: contact.id,
         sequenceId: sequence.id,

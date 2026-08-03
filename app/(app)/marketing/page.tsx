@@ -11,6 +11,16 @@ type Tab = (typeof TABS)[number];
 
 const STOP_TRIGGERS = ['open', 'click', 'reply', 'bounce', 'status_change'] as const;
 
+// Per-contact removal-link placeholders offered in template/sequence editors;
+// they resolve to each recipient's link URLs at send time.
+const LINK_PLACEHOLDERS = [
+  ...Array.from({ length: 14 }, (_, i) => ({
+    label: `Removal link ${i + 1}`,
+    token: `{{link${i + 1}}}`,
+  })),
+  { label: 'All live links', token: '{{links}}', asLink: false },
+];
+
 // Does a step's rich body carry anything worth sending? Mirrors the editor's own
 // empty check so blank steps are dropped on save.
 function stepHasBody(html: string): boolean {
@@ -540,6 +550,7 @@ export default function MarketingPage() {
                   value={step.html ?? ''}
                   onChange={(html) => updateStep(i, { html })}
                   onImageUpload={uploadEmailImage}
+                  linkPlaceholders={LINK_PLACEHOLDERS}
                   minHeight={150}
                   placeholder="Write this step's email… placeholders like {{name}} fill per contact when sent"
                 />
@@ -660,6 +671,7 @@ export default function MarketingPage() {
                       value={templateForm.html ?? ''}
                       onChange={(html) => setTemplateForm((f: any) => ({ ...f, html }))}
                       onImageUpload={uploadEmailImage}
+                      linkPlaceholders={LINK_PLACEHOLDERS}
                       minHeight={220}
                       placeholder="Compose your template… placeholders like {{name}} are filled per contact when sent"
                     />

@@ -38,6 +38,12 @@ function hasContent(html: string): boolean {
   return text.length > 0;
 }
 
+export interface LinkPlaceholder {
+  label: string;
+  token: string; // e.g. "{{link1}}"
+  asLink?: boolean; // true (default) inserts a clickable <a href={{token}}>; false inserts the token as text
+}
+
 export interface RichTextEditorProps {
   value: string;
   onChange: (html: string) => void;
@@ -45,6 +51,8 @@ export interface RichTextEditorProps {
   minHeight?: number;
   /** When provided, an "upload image" button appears; returns the hosted URL. */
   onImageUpload?: (file: File) => Promise<string>;
+  /** When non-empty, an "Insert link" dropdown offers these per-contact link tokens. */
+  linkPlaceholders?: LinkPlaceholder[];
 }
 
 export default function RichTextEditor({
@@ -53,6 +61,7 @@ export default function RichTextEditor({
   placeholder = 'Write your message…',
   minHeight = 180,
   onImageUpload,
+  linkPlaceholders,
 }: RichTextEditorProps) {
   const ref = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -142,6 +151,22 @@ export default function RichTextEditor({
     if (!input || !/^https?:\/\//i.test(input)) return;
     insertHtml(`<img src="${escapeAttr(input)}" alt="" style="max-width:100%;height:auto"/>`);
   }, [insertHtml, saveSelection]);
+
+  // Insert a per-contact link placeholder ({{link1}}, {{links}}, …) that resolves
+  // to the recipient's removal link(s) at send time. A single link becomes a
+  // clickable <a>; the "all links" token goes in as text (it's a multi-line list).
+  const insertLinkPlaceholder = useCallback(
+    (entry: LinkPlaceholder) => {
+      if (entry.asLink === false) {
+        insertHtml(escapeHtml(entry.token));
+      } else {
+        insertHtml(
+          `<a href="${escapeAttr(entry.token)}" target="_blank" rel="noopener noreferrer">${escapeHtml(entry.token)}</a>`
+        );
+      }
+    },
+    [insertHtml]
+  );
 
   const onFilePicked = useCallback(
     async (file: File | null) => {
@@ -243,6 +268,26 @@ export default function RichTextEditor({
         <TB label="Image by URL" onClick={addImageByUrl}>
           <LinkImageIcon />
         </TB>
+        {linkPlaceholders && linkPlaceholders.length > 0 && (
+          <select
+            className="h-7 rounded border border-gray-300 bg-surface px-1 text-xs text-gray-700"
+            title="Insert a contact link placeholder (filled per recipient at send)"
+            value=""
+            onMouseDown={saveSelection}
+            onChange={(e) => {
+              const entry = linkPlaceholders[Number(e.target.value)];
+              if (entry) insertLinkPlaceholder(entry);
+              e.currentTarget.value = '';
+            }}
+          >
+            <option value="">Insert link…</option>
+            {linkPlaceholders.map((p, i) => (
+              <option key={p.token + i} value={i}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        )}
         <Divider />
         <TB label="Clear formatting" onClick={() => exec('removeFormat')}>
           <span className="text-xs">T×</span>
