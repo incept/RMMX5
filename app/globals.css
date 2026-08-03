@@ -159,6 +159,43 @@ body {
   @apply border-brand-600 text-brand-700 dark:border-brand-500 dark:text-indigo-300;
 }
 
+/* Rich-text editor content (RichTextEditor.tsx). Tailwind's preflight resets
+   list/heading/quote styling, so restore just enough that the live edit surface
+   shows what the sent email will look like. */
+.rte-content ul {
+  list-style: disc;
+  margin: 0.35rem 0;
+  padding-left: 1.5rem;
+}
+.rte-content ol {
+  list-style: decimal;
+  margin: 0.35rem 0;
+  padding-left: 1.5rem;
+}
+.rte-content h2 {
+  @apply text-lg font-semibold;
+  margin: 0.4rem 0;
+}
+.rte-content h3 {
+  @apply text-base font-semibold;
+  margin: 0.3rem 0;
+}
+.rte-content a {
+  @apply text-brand-700 underline dark:text-indigo-300;
+}
+.rte-content blockquote {
+  @apply border-l-2 border-gray-300 pl-3 text-gray-500;
+  margin: 0.4rem 0;
+}
+.rte-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.375rem;
+}
+.rte-content p {
+  margin: 0.25rem 0;
+}
+
 /* Spreadsheet grid */
 .grid-th {
   @apply sticky top-0 z-10 border-b border-gray-200 bg-gray-50 px-3 py-2 text-left text-xs font-semibold tracking-wide whitespace-nowrap text-gray-500 uppercase select-none;

@@ -4,6 +4,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { useAutoRefresh } from '@/lib/use-auto-refresh';
 import { useRealtimeRefresh } from '@/lib/use-realtime-refresh';
+import RichTextEditor from '@/components/RichTextEditor';
+import { renderTemplate } from '@/lib/render-template';
+import { uploadEmailImage } from '@/lib/email-image-upload';
 
 /**
  * Wraps a message body in a minimal HTML document whose base styles track the
@@ -67,6 +70,7 @@ export default function InboxPage() {
     contactId: '',
     requestKey: '',
   });
+  const [templates, setTemplates] = useState<any[]>([]);
   const [accountForm, setAccountForm] = useState<any>(null);
   const [imapTest, setImapTest] = useState<any>(null);
   const [busy, setBusy] = useState(false);
@@ -142,6 +146,34 @@ export default function InboxPage() {
   useAutoRefresh(load);
   useRealtimeRefresh('email_messages', load);
 
+  useEffect(() => {
+    supabase
+      .from('email_templates')
+      .select('id, name, subject, html')
+      .order('name')
+      .then(({ data }) => setTemplates(data ?? []));
+  }, [supabase]);
+
+  // Fill the compose subject + body from a saved template. When the message is
+  // tied to a contact, {{name}}/{{city}}/… placeholders are resolved against it
+  // (values HTML-escaped); otherwise the raw placeholders are kept.
+  async function applyTemplate(templateId: string) {
+    const t = templates.find((x) => x.id === templateId);
+    if (!t) return;
+    let vars: Record<string, any> | null = null;
+    if (compose.contactId) {
+      const { data } = await supabase
+        .from('contacts')
+        .select('name, email, city, state, custom')
+        .eq('id', compose.contactId)
+        .maybeSingle();
+      vars = data ?? null;
+    }
+    const subject = vars ? renderTemplate(t.subject ?? '', vars) : (t.subject ?? '');
+    const html = vars ? renderTemplate(t.html ?? '', vars, { html: true }) : (t.html ?? '');
+    setCompose((c) => ({ ...c, subject: subject || c.subject, html }));
+  }
+
   async function sendCompose() {
     if (!compose.to || !compose.subject) return alert('To and subject required');
     setBusy(true);
@@ -151,7 +183,7 @@ export default function InboxPage() {
       body: JSON.stringify({
         to: compose.to,
         subject: compose.subject,
-        html: compose.html.replace(/\n/g, '<br/>'),
+        html: compose.html, // already HTML from the rich editor
         accountId: compose.accountId || null,
         contactId: compose.contactId || null,
       }),
@@ -456,7 +488,7 @@ export default function InboxPage() {
           className="fixed inset-0 z-40 flex items-center justify-center bg-black/20"
           onClick={() => setShowCompose(false)}
         >
-          <div className="w-full max-w-lg rounded-xl bg-white p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div className="w-full max-w-2xl rounded-xl bg-white p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <h2 className="mb-3 text-sm font-semibold">New email</h2>
             <div className="space-y-2">
               {accounts.length > 0 && (
@@ -485,11 +517,28 @@ export default function InboxPage() {
                 value={compose.subject}
                 onChange={(e) => setCompose((c) => ({ ...c, subject: e.target.value }))}
               />
-              <textarea
-                className="input min-h-32"
-                placeholder="Message… (your account signature is added automatically)"
+              {templates.length > 0 && (
+                <select
+                  className="input"
+                  value=""
+                  onChange={(e) => {
+                    if (e.target.value) applyTemplate(e.target.value);
+                    e.currentTarget.value = '';
+                  }}
+                >
+                  <option value="">Insert template…</option>
+                  {templates.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <RichTextEditor
                 value={compose.html}
-                onChange={(e) => setCompose((c) => ({ ...c, html: e.target.value }))}
+                onChange={(html) => setCompose((c) => ({ ...c, html }))}
+                onImageUpload={uploadEmailImage}
+                placeholder="Message… (your account signature is added automatically)"
               />
               <div className="flex justify-end gap-2">
                 <button className="btn" onClick={() => setShowCompose(false)}>

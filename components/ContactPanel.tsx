@@ -5,6 +5,9 @@ import { createClient } from '@/lib/supabase/client';
 import StatusPill, { type StatusOption } from '@/components/StatusPill';
 import { NameSourceIcon } from '@/components/NameSourceIcon';
 import { useMyRole } from '@/lib/use-my-role';
+import RichTextEditor from '@/components/RichTextEditor';
+import { renderTemplate } from '@/lib/render-template';
+import { uploadEmailImage } from '@/lib/email-image-upload';
 
 const TABS = ['Link Data', 'Contact Info', 'Email', 'Calls', 'Activity', 'Files', 'Notes'] as const;
 type Tab = (typeof TABS)[number];
@@ -81,6 +84,7 @@ export default function ContactPanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState('');
   const [compose, setCompose] = useState({ subject: '', html: '', accountId: '' });
+  const [templates, setTemplates] = useState<any[]>([]);
   const [confirmUrlValue, setConfirmUrlValue] = useState('');
   const [countyValue, setCountyValue] = useState('');
   const [reverseResult, setReverseResult] = useState<string | null>(null);
@@ -207,7 +211,7 @@ export default function ContactPanel({
   }, [supabase, contactId]);
 
   const loadEmailTab = useCallback(async () => {
-    const [messagesRes, enrollRes, memberRes, listsRes, accountsRes] = await Promise.all([
+    const [messagesRes, enrollRes, memberRes, listsRes, accountsRes, templatesRes] = await Promise.all([
       supabase
         .from('email_messages')
         .select('*')
@@ -224,13 +228,28 @@ export default function ContactPanel({
         .eq('contact_id', contactId),
       supabase.from('email_lists').select('id, name').order('name'),
       supabase.from('email_accounts_safe').select('id, name, from_email').order('name'),
+      supabase.from('email_templates').select('id, name, subject, html').order('name'),
     ]);
     setMessages(messagesRes.data ?? []);
     setEnrollments(enrollRes.data ?? []);
     setListMemberships(memberRes.data ?? []);
     setAllLists(listsRes.data ?? []);
     setAccounts(accountsRes.data ?? []);
+    setTemplates(templatesRes.data ?? []);
   }, [supabase, contactId]);
+
+  // Fill the composer from a saved template, resolving {{name}}/{{city}}/…
+  // against this contact (substituted values are HTML-escaped).
+  function applyTemplate(templateId: string) {
+    const t = templates.find((x) => x.id === templateId);
+    if (!t) return;
+    const vars = contact ?? {};
+    setCompose((c) => ({
+      ...c,
+      subject: renderTemplate(t.subject ?? '', vars) || c.subject,
+      html: renderTemplate(t.html ?? '', vars, { html: true }),
+    }));
+  }
 
   const loadFiles = useCallback(async () => {
     const res = await fetch(`/api/contacts/${contactId}/files`);
@@ -692,7 +711,7 @@ export default function ContactPanel({
       body: JSON.stringify({
         contactId,
         subject: compose.subject,
-        html: compose.html.replace(/\n/g, '<br/>'),
+        html: compose.html, // already HTML from the rich editor
         accountId: compose.accountId || null,
       }),
     });
@@ -1965,11 +1984,29 @@ export default function ContactPanel({
                     value={compose.subject}
                     onChange={(e) => setCompose((c) => ({ ...c, subject: e.target.value }))}
                   />
-                  <textarea
-                    className="input min-h-24"
-                    placeholder="Message… ({{name}}, {{city}} placeholders work)"
+                  {templates.length > 0 && (
+                    <select
+                      className="input"
+                      value=""
+                      onChange={(e) => {
+                        if (e.target.value) applyTemplate(e.target.value);
+                        e.currentTarget.value = '';
+                      }}
+                    >
+                      <option value="">Insert template…</option>
+                      {templates.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <RichTextEditor
                     value={compose.html}
-                    onChange={(e) => setCompose((c) => ({ ...c, html: e.target.value }))}
+                    onChange={(html) => setCompose((c) => ({ ...c, html }))}
+                    onImageUpload={uploadEmailImage}
+                    minHeight={140}
+                    placeholder="Message… (templates fill {{name}}, {{city}} for this contact)"
                   />
                   <button className="btn btn-primary" disabled={busy === 'email'} onClick={sendEmail}>
                     {busy === 'email' ? 'Sending…' : 'Send email'}

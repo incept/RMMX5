@@ -6,6 +6,7 @@ import { deliveryKey, MAX_BULK_RECIPIENTS, validIdempotencyKey } from '@/lib/bul
 import { enqueueJob } from '@/lib/job-queue';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
+import { sanitizeEmailHtml } from '@/lib/html-sanitize';
 
 export async function POST(request: Request) {
   const auth = await requireAdmin();
@@ -17,7 +18,11 @@ export async function POST(request: Request) {
     return apiFailure('api:email/send', error);
   }
   body.subject = String(body.subject ?? '').trim().slice(0, 500);
-  body.html = String(body.html ?? '').slice(0, 250_000);
+  // Rich-editor / ad-hoc compose HTML enters here; strip executable constructs
+  // before it is stored and mailed. Placeholders ({{name}}) are plain text and
+  // pass through untouched. Sequence/campaign template sends don't hit this
+  // route — those are sanitized at template-save time.
+  body.html = sanitizeEmailHtml(String(body.html ?? '').slice(0, 250_000));
 
   if (!body.subject || !body.html) {
     return NextResponse.json({ error: 'subject and html required' }, { status: 400 });
