@@ -11,6 +11,16 @@ import crypto from 'crypto';
 
 const secret = () => process.env.CRON_SECRET ?? '';
 
+/**
+ * Whether a signing secret is configured at all. The tracking endpoints use
+ * this to tell "no secret on this host" apart from "secret present but the
+ * signature still didn't match" (a secret MISMATCH between the host that signed
+ * the link and the host verifying it) — two very different tracking failures.
+ */
+export function trackingSecretConfigured(): boolean {
+  return !!secret();
+}
+
 export function signTrackingUrl(messageId: string, url: string): string {
   return crypto
     .createHmac('sha256', secret())
