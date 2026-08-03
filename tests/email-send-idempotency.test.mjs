@@ -25,3 +25,9 @@ test('every compose surface sends an Idempotency-Key header', async () => {
   const marketing = await read('../app/(app)/marketing/page.tsx');
   assert.match(marketing, /'Idempotency-Key': blast\.requestKey/);
 });
+
+test('a successful contact send shows a confirmation message', async () => {
+  const cp = await read('../components/ContactPanel.tsx');
+  assert.match(cp, /setEmailSent\(true\)/); // set on a 2xx response
+  assert.match(cp, /Email queued for delivery/); // the visible confirmation
+});
