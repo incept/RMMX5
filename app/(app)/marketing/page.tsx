@@ -11,6 +11,14 @@ type Tab = (typeof TABS)[number];
 
 const STOP_TRIGGERS = ['open', 'click', 'reply', 'bounce', 'status_change'] as const;
 
+// Does a step's rich body carry anything worth sending? Mirrors the editor's own
+// empty check so blank steps are dropped on save.
+function stepHasBody(html: string): boolean {
+  const s = String(html ?? '');
+  if (/<(img|hr|table|blockquote)\b/i.test(s)) return true;
+  return s.replace(/<[^>]*>/g, '').replace(/&nbsp;/gi, ' ').trim().length > 0;
+}
+
 /** Email marketing hub: templates, lists, sequences (with start/stop triggers), analytics. */
 export default function MarketingPage() {
   const supabase = useMemo(() => createClient(), []);
@@ -115,7 +123,7 @@ export default function MarketingPage() {
       start_status_ids: [],
       stop_on: ['reply', 'bounce'],
       stop_status_ids: [],
-      steps: [{ template_id: '', delay_days: 0 }],
+      steps: [{ subject: '', html: '', delay_days: 0 }],
     });
   }
 
@@ -126,8 +134,40 @@ export default function MarketingPage() {
       send_account_id: seq.send_account_id ?? '',
       steps: [...(seq.sequence_steps ?? [])]
         .sort((a: any, b: any) => a.step_order - b.step_order)
-        .map((s: any) => ({ template_id: s.template_id ?? '', delay_days: s.delay_days })),
+        .map((s: any) => {
+          if (s.html) return { subject: s.subject ?? '', html: s.html, delay_days: s.delay_days };
+          // Legacy step linked to a template: pull the template's content inline
+          // so it shows in the editor (and becomes self-contained on save).
+          const t = templates.find((x) => x.id === s.template_id);
+          return {
+            subject: s.subject ?? t?.subject ?? '',
+            html: t?.html ?? '',
+            delay_days: s.delay_days,
+          };
+        }),
     });
+  }
+
+  // ---- Sequence step helpers ----------------------------------------------
+  function updateStep(i: number, patch: any) {
+    setSequenceForm((f: any) => ({
+      ...f,
+      steps: f.steps.map((s: any, j: number) => (j === i ? { ...s, ...patch } : s)),
+    }));
+  }
+  function removeStep(i: number) {
+    setSequenceForm((f: any) => ({ ...f, steps: f.steps.filter((_: any, j: number) => j !== i) }));
+  }
+  function addStep() {
+    setSequenceForm((f: any) => ({
+      ...f,
+      steps: [...(f.steps ?? []), { subject: '', html: '', delay_days: 2 }],
+    }));
+  }
+  function applyStepTemplate(i: number, templateId: string) {
+    const t = templates.find((x) => x.id === templateId);
+    if (!t) return;
+    updateStep(i, { subject: t.subject ?? '', html: t.html ?? '' });
   }
 
   async function saveSequence() {
@@ -163,14 +203,19 @@ export default function MarketingPage() {
       sequenceId = data.id;
     }
 
-    const steps = (f.steps ?? [])
-      .filter((s: any) => s.template_id)
-      .map((s: any, i: number) => ({
-        sequence_id: sequenceId,
-        step_order: i + 1,
-        template_id: s.template_id,
-        delay_days: Number(s.delay_days ?? 0),
-      }));
+    const withBody = (f.steps ?? []).filter((s: any) => stepHasBody(s.html));
+    if (withBody.some((s: any) => !String(s.subject ?? '').trim())) {
+      setBusy(false);
+      return alert('Each step needs a subject line.');
+    }
+    const steps = withBody.map((s: any, i: number) => ({
+      sequence_id: sequenceId,
+      step_order: i + 1,
+      template_id: null, // inline steps are self-contained (no live template link)
+      subject: String(s.subject ?? '').slice(0, 500),
+      html: sanitizeEmailHtml(s.html ?? ''),
+      delay_days: Number(s.delay_days ?? 0),
+    }));
     if (steps.length) await supabase.from('sequence_steps').insert(steps);
 
     setBusy(false);
@@ -442,65 +487,65 @@ export default function MarketingPage() {
           <div className="mt-4">
             <label className="label">Steps</label>
             {(sequenceForm.steps ?? []).map((step: any, i: number) => (
-              <div key={i} className="mb-2 flex items-center gap-2">
-                <span className="w-6 text-right font-mono text-xs text-gray-400">{i + 1}</span>
-                <select
-                  className="input flex-1"
-                  value={step.template_id}
-                  onChange={(e) =>
-                    setSequenceForm((f: any) => ({
-                      ...f,
-                      steps: f.steps.map((s: any, j: number) =>
-                        j === i ? { ...s, template_id: e.target.value } : s
-                      ),
-                    }))
-                  }
-                >
-                  <option value="">Choose template…</option>
-                  {templates.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}
-                    </option>
-                  ))}
-                </select>
-                <span className="text-xs text-gray-400">wait</span>
+              <div key={i} className="mb-3 rounded-lg border border-gray-300 bg-surface p-3">
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-100 font-mono text-xs text-gray-500">
+                    {i + 1}
+                  </span>
+                  <span className="text-xs text-gray-400">wait</span>
+                  <input
+                    className="input w-16"
+                    type="number"
+                    min={0}
+                    value={step.delay_days}
+                    onChange={(e) => updateStep(i, { delay_days: e.target.value })}
+                  />
+                  <span className="text-xs text-gray-400">
+                    {i === 0 ? 'days after enrollment' : 'days after previous step'}
+                  </span>
+                  <div className="flex-1" />
+                  {templates.length > 0 && (
+                    <select
+                      className="input w-44"
+                      value=""
+                      title="Prefill this step from a saved template"
+                      onChange={(e) => {
+                        if (e.target.value) applyStepTemplate(i, e.target.value);
+                        e.currentTarget.value = '';
+                      }}
+                    >
+                      <option value="">Start from template…</option>
+                      {templates.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <button
+                    className="btn btn-ghost py-1 text-red-500"
+                    title="Remove step"
+                    onClick={() => removeStep(i)}
+                  >
+                    ✕
+                  </button>
+                </div>
                 <input
-                  className="input w-20"
-                  type="number"
-                  min={0}
-                  value={step.delay_days}
-                  onChange={(e) =>
-                    setSequenceForm((f: any) => ({
-                      ...f,
-                      steps: f.steps.map((s: any, j: number) =>
-                        j === i ? { ...s, delay_days: e.target.value } : s
-                      ),
-                    }))
-                  }
+                  className="input mb-2"
+                  placeholder="Subject — {{name}}, {{city}} placeholders work"
+                  value={step.subject ?? ''}
+                  onChange={(e) => updateStep(i, { subject: e.target.value })}
                 />
-                <span className="text-xs text-gray-400">days</span>
-                <button
-                  className="btn btn-ghost py-1 text-red-500"
-                  onClick={() =>
-                    setSequenceForm((f: any) => ({
-                      ...f,
-                      steps: f.steps.filter((_: any, j: number) => j !== i),
-                    }))
-                  }
-                >
-                  ✕
-                </button>
+                <RichTextEditor
+                  value={step.html ?? ''}
+                  onChange={(html) => updateStep(i, { html })}
+                  onImageUpload={uploadEmailImage}
+                  minHeight={150}
+                  placeholder="Write this step's email… placeholders like {{name}} fill per contact when sent"
+                />
               </div>
             ))}
-            <button
-              className="btn py-1"
-              onClick={() =>
-                setSequenceForm((f: any) => ({
-                  ...f,
-                  steps: [...(f.steps ?? []), { template_id: '', delay_days: 2 }],
-                }))
-              }
-            >
+            <button className="btn py-1" onClick={addStep}>
               + Add step
             </button>
           </div>
