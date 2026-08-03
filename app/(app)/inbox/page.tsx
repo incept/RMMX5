@@ -70,6 +70,8 @@ export default function InboxPage() {
   const [accountForm, setAccountForm] = useState<any>(null);
   const [imapTest, setImapTest] = useState<any>(null);
   const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   // Theme for the email preview frame; kept in sync with the <html class="dark">
   // toggle so switching light/dark re-renders the message in the matching palette.
   const [dark, setDark] = useState(false);
@@ -249,6 +251,42 @@ export default function InboxPage() {
     await fetch(`/api/inbox/messages/${encodeURIComponent(m.id)}`, { method: 'DELETE' }).catch(() => {});
   }
 
+  // Reload the list now, and kick an immediate server pull (periodic sync is ~3 min).
+  async function refreshInbox() {
+    setRefreshing(true);
+    fetch('/api/inbox/sync', { method: 'POST' }).catch(() => {});
+    await load();
+    setRefreshing(false);
+  }
+
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function deleteSelected() {
+    const ids = [...selectedIds];
+    if (!ids.length) return;
+    if (
+      !confirm(
+        `Delete ${ids.length} message${ids.length > 1 ? 's' : ''}? Synced messages also move to Trash on the mailbox.`
+      )
+    )
+      return;
+    setMessages((list) => list.filter((x) => !selectedIds.has(x.id)));
+    if (selected && selectedIds.has(selected.id)) setSelected(null);
+    setSelectedIds(new Set());
+    await fetch('/api/inbox/messages/bulk-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    }).catch(() => {});
+  }
+
   return (
     <div className="flex h-full">
       {/* Message list */}
@@ -273,46 +311,71 @@ export default function InboxPage() {
           >
             ✎
           </button>
+          <button className="btn py-1" title="Refresh" disabled={refreshing} onClick={refreshInbox}>
+            {refreshing ? '…' : '⟳'}
+          </button>
           <button className="btn py-1" title="SMTP accounts" onClick={() => setShowAccounts(true)}>
             ⚙
           </button>
         </div>
+        {selectedIds.size > 0 && (
+          <div className="flex items-center gap-2 border-b border-gray-200 bg-brand-50/60 px-4 py-2 text-sm">
+            <span>{selectedIds.size} selected</span>
+            <button className="btn btn-danger ml-auto py-1" onClick={deleteSelected}>
+              🗑 Delete
+            </button>
+            <button className="btn py-1" onClick={() => setSelectedIds(new Set())}>
+              Clear
+            </button>
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto">
           {messages.map((m) => (
-            <button
+            <div
               key={m.id}
-              onClick={() => openMessage(m)}
-              className={`block w-full border-b border-gray-100 px-4 py-2.5 text-left hover:bg-gray-50 ${
-                selected?.id === m.id ? 'bg-brand-50/50' : ''
+              className={`flex items-start border-b border-gray-100 hover:bg-gray-50 ${
+                selected?.id === m.id || selectedIds.has(m.id) ? 'bg-brand-50/50' : ''
               }`}
             >
-              <div className="flex items-center gap-2">
-                <span className={m.direction === 'inbound' ? 'text-green-600' : 'text-gray-400'}>
-                  {m.direction === 'inbound' ? '←' : '→'}
-                </span>
-                <span
-                  className={`flex-1 truncate text-sm ${
-                    m.direction === 'inbound' && !m.seen ? 'font-bold' : 'font-medium'
-                  }`}
-                >
-                  {m.contacts?.name ?? (m.direction === 'inbound' ? m.from_email : m.to_email)}
-                </span>
-                {m.direction === 'inbound' && !m.seen && (
-                  <span className="h-2 w-2 shrink-0 rounded-full bg-brand-600" title="Unread" />
-                )}
-                <span className="text-[10px] text-gray-400">
-                  {new Date(m.created_at).toLocaleDateString()}
-                </span>
-              </div>
-              <div className="mt-0.5 truncate text-xs text-gray-500">{m.subject}</div>
-              <div className="mt-0.5 flex gap-2 text-[10px] text-gray-400">
-                <span>{m.status}</span>
-                {m.open_count > 0 && <span>👁 {m.open_count}</span>}
-                {m.click_count > 0 && <span>🖱 {m.click_count}</span>}
-                {m.replied && <span className="text-green-600">replied</span>}
-                {m.bounced && <span className="text-red-600">bounced</span>}
-              </div>
-            </button>
+              <input
+                type="checkbox"
+                className="mt-3.5 ml-3"
+                checked={selectedIds.has(m.id)}
+                onChange={() => toggleSelect(m.id)}
+                aria-label="Select message"
+              />
+              <button
+                onClick={() => openMessage(m)}
+                className="block min-w-0 flex-1 px-3 py-2.5 text-left"
+              >
+                <div className="flex items-center gap-2">
+                  <span className={m.direction === 'inbound' ? 'text-green-600' : 'text-gray-400'}>
+                    {m.direction === 'inbound' ? '←' : '→'}
+                  </span>
+                  <span
+                    className={`flex-1 truncate text-sm ${
+                      m.direction === 'inbound' && !m.seen ? 'font-bold' : 'font-medium'
+                    }`}
+                  >
+                    {m.contacts?.name ?? (m.direction === 'inbound' ? m.from_email : m.to_email)}
+                  </span>
+                  {m.direction === 'inbound' && !m.seen && (
+                    <span className="h-2 w-2 shrink-0 rounded-full bg-brand-600" title="Unread" />
+                  )}
+                  <span className="text-[10px] text-gray-400">
+                    {new Date(m.created_at).toLocaleDateString()}
+                  </span>
+                </div>
+                <div className="mt-0.5 truncate text-xs text-gray-500">{m.subject}</div>
+                <div className="mt-0.5 flex gap-2 text-[10px] text-gray-400">
+                  <span>{m.status}</span>
+                  {m.open_count > 0 && <span>👁 {m.open_count}</span>}
+                  {m.click_count > 0 && <span>🖱 {m.click_count}</span>}
+                  {m.replied && <span className="text-green-600">replied</span>}
+                  {m.bounced && <span className="text-red-600">bounced</span>}
+                </div>
+              </button>
+            </div>
           ))}
           {messages.length === 0 && (
             <div className="px-4 py-10 text-center text-sm text-gray-400">No messages yet.</div>

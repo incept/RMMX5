@@ -289,3 +289,21 @@ export async function enqueueDueImapSyncs(): Promise<{ enqueued: number }> {
   }
   return { enqueued };
 }
+
+/**
+ * Manual "sync now": queue a fresh pull for each receiving account on a short
+ * (20s) bucket, so rapid refresh clicks dedupe but a refresh still forces a new
+ * pull — unlike the 3-minute periodic bucket above.
+ */
+export async function enqueueImapSyncNow(): Promise<{ enqueued: number }> {
+  const admin = createAdminClient();
+  const { data: accounts } = await admin.from('email_accounts').select('id').eq('imap_enabled', true);
+  if (!accounts?.length) return { enqueued: 0 };
+  const bucket = Math.floor(Date.now() / 20_000);
+  let enqueued = 0;
+  for (const a of accounts) {
+    await enqueueJob('imap_sync', { accountId: a.id }, `imap-sync:${a.id}:manual:${bucket}`, 3);
+    enqueued += 1;
+  }
+  return { enqueued };
+}
