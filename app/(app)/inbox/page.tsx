@@ -7,53 +7,7 @@ import { useRealtimeRefresh } from '@/lib/use-realtime-refresh';
 import RichTextEditor from '@/components/RichTextEditor';
 import { renderTemplate } from '@/lib/render-template';
 import { uploadEmailImage } from '@/lib/email-image-upload';
-
-/**
- * Wraps a message body in a minimal HTML document whose base styles track the
- * app theme, so a sent message reads as part of the CRM instead of the bare
- * white / black / serif block a raw fragment renders as. Still injected into the
- * sandboxed iframe below (no scripts), so inbound mail that ships its own
- * styling renders as the sender built it — only the frame's defaults change.
- */
-function framedEmail(html: string, dark: boolean, blockImages: boolean): string {
-  const bg = dark ? '#282c34' : '#ffffff'; // --color-surface, both themes
-  const fg = dark ? '#f0f2f5' : '#111827'; // gray-900, both themes
-  const link = dark ? '#a5b4fc' : '#4f46e5';
-  const rule = dark ? '#474d59' : '#e5e7eb';
-  const muted = dark ? '#b4bac3' : '#6b7280';
-  // Until the reader chooses "Load images", restrict images to inline data: URIs
-  // so remote images and 1x1 tracking pixels don't phone home on open. The
-  // sandbox already blocks scripts; this closes the remote-resource leak.
-  const csp = blockImages
-    ? '<meta http-equiv="Content-Security-Policy" content="img-src data:;">'
-    : '';
-  return `<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-${csp}
-<base target="_blank">
-<style>
-  :root { color-scheme: ${dark ? 'dark' : 'light'}; }
-  html, body { margin: 0; }
-  body {
-    padding: 12px;
-    background: ${bg};
-    color: ${fg};
-    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-    font-size: 14px;
-    line-height: 1.55;
-    overflow-wrap: break-word;
-  }
-  a { color: ${link}; }
-  img, table { max-width: 100%; }
-  table { border-collapse: collapse; }
-  blockquote {
-    margin: 0 0 0 0.8em;
-    padding-left: 0.8em;
-    border-left: 3px solid ${rule};
-    color: ${muted};
-  }
-</style></head><body>${html}</body></html>`;
-}
+import { framedEmail } from '@/lib/email-frame';
 
 /**
  * Unified inbox: every inbound + outbound email across all SMTP accounts,
