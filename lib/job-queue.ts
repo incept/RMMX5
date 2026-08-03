@@ -744,19 +744,20 @@ const JOB_LEASE_SECONDS = 300;
 const JOB_LEASE_ABORT_MARGIN_SECONDS = 60;
 
 /** Claims a deliberately small batch so one cron invocation has a hard ceiling. */
-export async function processQueuedJobs(limit = 1, opts?: { light?: boolean }) {
+export async function processQueuedJobs(limit = 1, opts?: { light?: boolean; imap?: boolean }) {
   const worker = randomUUID();
   const supabase = createAdminClient();
-  // The light path claims only the cheap, batchable kinds (see claim_light_jobs)
-  // so a scoring backlog can't starve the heavy/external one-per-tick path.
-  const { data: jobs, error } = await supabase.rpc(
-    opts?.light ? 'claim_light_jobs' : 'claim_jobs',
-    {
-      p_worker: worker,
-      p_limit: Math.min(Math.max(limit, 1), opts?.light ? 100 : 2),
-      p_lease_seconds: JOB_LEASE_SECONDS,
-    }
-  );
+  // Three lanes, each with its own claimer so none starves the others:
+  //  - light: cheap, batchable kinds (scoring/deliveries), claim_light_jobs
+  //  - imap:  imap_sync / imap_writeback, claim_imap_jobs (finding #8)
+  //  - heavy: everything else (deep search, link checks), claim_jobs
+  const rpc = opts?.light ? 'claim_light_jobs' : opts?.imap ? 'claim_imap_jobs' : 'claim_jobs';
+  const cap = opts?.light ? 100 : opts?.imap ? 20 : 2;
+  const { data: jobs, error } = await supabase.rpc(rpc, {
+    p_worker: worker,
+    p_limit: Math.min(Math.max(limit, 1), cap),
+    p_lease_seconds: JOB_LEASE_SECONDS,
+  });
   if (error) throw new Error(error.message);
 
   let completed = 0;

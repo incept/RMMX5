@@ -4,10 +4,17 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 import { logDebug } from '@/lib/debug-log';
+import { validateImapTarget } from '@/lib/imap-target';
 
 type Params = { params: Promise<{ id: string }> };
 
-function accountValues(body: any) {
+type ExistingImap = {
+  imap_host: string | null;
+  imap_port: number | null;
+  imap_username: string | null;
+} | null;
+
+function accountValues(body: any, existing?: ExistingImap) {
   const port = Number(body.smtp_port ?? 587);
   if (!body.name || !body.from_email || !body.smtp_host || !body.smtp_username) {
     throw new Error('Name, from email, SMTP host and username are required');
@@ -40,14 +47,37 @@ function accountValues(body: any) {
   if (imapEnabled && (!imapHost || !imapUsername)) {
     throw new Error('IMAP host and username are required to enable receiving');
   }
+  const newImapPassword =
+    typeof body.imap_password === 'string' && body.imap_password
+      ? body.imap_password.slice(0, 4096)
+      : null;
+
+  if (imapEnabled) {
+    const targetError = validateImapTarget(imapHost!, imapPort);
+    if (targetError) throw new Error(targetError);
+    // Require re-entering the password whenever the connection identity changes,
+    // so a stored password is never silently re-pointed at a new host / user
+    // (finding #5). A first-time setup (no stored host) also requires it.
+    const identityChanged =
+      !existing ||
+      (existing.imap_host ?? null) !== imapHost ||
+      Number(existing.imap_port ?? 993) !== imapPort ||
+      (existing.imap_username ?? null) !== imapUsername;
+    if (identityChanged && !newImapPassword) {
+      throw new Error(
+        'Re-enter the IMAP password to change the mailbox host, port, or username.'
+      );
+    }
+  }
+
   values.imap_host = imapHost;
   values.imap_port = imapPort;
   values.imap_username = imapUsername;
   values.imap_secure = body.imap_secure === undefined ? imapPort !== 143 : body.imap_secure === true;
   values.imap_enabled = imapEnabled;
   values.imap_allow_invalid_cert = body.imap_allow_invalid_cert === true;
-  if (typeof body.imap_password === 'string' && body.imap_password) {
-    values.imap_password = body.imap_password.slice(0, 4096);
+  if (newImapPassword) {
+    values.imap_password = newImapPassword;
   }
   return values;
 }
@@ -58,9 +88,17 @@ export async function PATCH(request: Request, { params }: Params) {
   const { id } = await params;
   try {
     const body = await readJsonBody(request, 128 * 1024);
-    const { data, error } = await createAdminClient()
+    const admin = createAdminClient();
+    // Load the current connection identity so a host/port/username change without
+    // a fresh password can be rejected (finding #5).
+    const { data: existing } = await admin
       .from('email_accounts')
-      .update(accountValues(body))
+      .select('imap_host, imap_port, imap_username')
+      .eq('id', id)
+      .maybeSingle();
+    const { data, error } = await admin
+      .from('email_accounts')
+      .update(accountValues(body, existing))
       .eq('id', id)
       .select('id')
       .maybeSingle();
