@@ -11,6 +11,7 @@ import { processLinkRechecks } from '@/lib/link-recheck';
 import { enqueueDueImapSyncs } from '@/lib/integrations/imap-sync';
 import { checkSchemaVersion } from '@/lib/schema-version';
 import { pruneUnreferencedEmailAssets } from '@/lib/email-assets';
+import { monitorBrowserWorker } from '@/lib/browser-worker-health';
 
 export const maxDuration = 120;
 const LEASE_SECONDS = 180;
@@ -95,7 +96,15 @@ export async function GET(request: Request) {
         context: { expected: schema.expected, actual: schema.actual },
       }).catch(() => {});
     }
-    const names = ['sequences', 'countdown', 'calls', 'jobs', 'rechecks', 'imapsync'] as const;
+    const names = [
+      'sequences',
+      'countdown',
+      'calls',
+      'jobs',
+      'rechecks',
+      'imapsync',
+      'browser',
+    ] as const;
     const results = await Promise.allSettled([
       processDueEnrollments(2),
       processCountdownNotifications(),
@@ -107,6 +116,9 @@ export async function GET(request: Request) {
       // Cheap: enqueues an imap_sync job per receiving account; the mailbox fetch
       // runs on the heavy lane (the VPS), not in this tick.
       enqueueDueImapSyncs(),
+      // Throttled /healthz probe of the browser worker; alerts admins when the
+      // tier that reads arrests.org is set up but not working.
+      monitorBrowserWorker(),
     ]);
     const outcome: Record<string, any> = { schema };
     let degraded = !schema.ok;

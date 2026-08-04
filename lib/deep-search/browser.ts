@@ -11,6 +11,11 @@ import { getSetting } from '@/lib/settings';
 import { logDebug } from '@/lib/debug-log';
 import { assertPublicHttpsUrl, assertPublicWebUrl } from '@/lib/public-url';
 import { readResponseText } from '@/lib/request-limits';
+import {
+  classifyProbeBrowser,
+  type BrowserTierState,
+  type ProbeBrowserConfig,
+} from '@/lib/browser-worker-status';
 
 /**
  * Headless Chrome, for the hosts that only a real browser can reach.
@@ -180,19 +185,25 @@ async function resolveExecutable(): Promise<string | null> {
  * used only when no local executable exists, so a Chrome-capable host never
  * pays a network hop it doesn't need.
  */
-async function resolveRemote(): Promise<{ url: URL; secret: string } | null> {
-  const cfg = await getSetting<{
-    enabled?: string | boolean;
-    remote_url?: string;
-    remote_secret?: string;
-  }>('probe_browser');
-  if (cfg.enabled === false || cfg.enabled === 'false') return null;
-  const secret = cfg.remote_secret?.trim();
-  if (!cfg.remote_url || !secret) return null;
+type RemoteResolution =
+  | { ok: true; url: URL; secret: string }
+  | { ok: false; reason: string; detail: string };
+
+async function resolveRemote(): Promise<RemoteResolution> {
+  const cfg = await getSetting<ProbeBrowserConfig>('probe_browser');
+  const classified = classifyProbeBrowser(cfg);
+  if (!classified.ok) return { ok: false, reason: classified.reason, detail: classified.detail };
   try {
-    return { url: await assertPublicHttpsUrl(cfg.remote_url), secret };
-  } catch {
-    return null;
+    // assertPublicHttpsUrl re-validates AND resolves DNS at use time: a URL that
+    // saved fine can still fail here if it no longer resolves from this host or
+    // resolves to a private address — a distinct 'bad_url', not "unconfigured".
+    return { ok: true, url: await assertPublicHttpsUrl(classified.url), secret: classified.secret };
+  } catch (e: any) {
+    return {
+      ok: false,
+      reason: 'bad_url',
+      detail: `the remote worker URL did not validate/resolve: ${e?.message ?? 'invalid URL'}`,
+    };
   }
 }
 
@@ -236,8 +247,10 @@ async function fetchWithRemoteBrowser(
     };
   }
   const remote = await resolveRemote();
-  if (!remote) {
-    return { ok: false, unavailable: true, reason: 'no Chrome executable configured or found' };
+  if (!remote.ok) {
+    // Name the actual cause (secret blank / URL unresolvable / disabled) rather
+    // than the old catch-all, so the debug log and the health alert are actionable.
+    return { ok: false, unavailable: true, reason: `no browser worker available — ${remote.detail}` };
   }
   try {
     const signals = [AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS)];
@@ -300,9 +313,52 @@ export async function browserAvailable(): Promise<boolean> {
     return true;
   }
   const remote = await resolveRemote();
-  const value = remote ? await remoteHealthy(remote) : false;
+  const value = remote.ok ? await remoteHealthy(remote) : false;
   availabilityCache = { value, at: Date.now() };
   return value;
+}
+
+export type BrowserTierStatus = { state: BrowserTierState; detail: string; via?: 'local' | 'remote' };
+
+/**
+ * A single, specific read of whether the browser tier can serve a page right
+ * now — used by the cron health monitor so an alert can name the actual cause
+ * instead of the old catch-all "no Chrome". Does its own /healthz probe and
+ * deliberately does NOT touch the hot path's circuit breaker or availability
+ * cache, so monitoring can never perturb live fetches.
+ */
+export async function browserTierStatus(): Promise<BrowserTierStatus> {
+  const local = await resolveExecutable();
+  if (local) return { state: 'healthy', via: 'local', detail: `local Chrome (${local})` };
+
+  const remote = await resolveRemote();
+  if (!remote.ok) {
+    // A blank secret or an unusable URL is a broken setup worth an alert; a
+    // disabled or entirely-blank tier is off by choice and is not.
+    const state: BrowserTierState =
+      remote.reason === 'no_secret' || remote.reason === 'bad_url' ? 'misconfigured' : 'off';
+    return { state, detail: remote.detail };
+  }
+
+  try {
+    const res = await fetch(new URL('/healthz', remote.url), {
+      signal: AbortSignal.timeout(REMOTE_HEALTH_TIMEOUT_MS),
+      cache: 'no-store',
+    });
+    const data = JSON.parse(await readResponseText(res, 16 * 1024));
+    if (!res.ok || data?.ok !== true) {
+      return { state: 'unhealthy', detail: `worker /healthz returned HTTP ${res.status}` };
+    }
+    if (data?.chrome !== true) {
+      return { state: 'unhealthy', detail: 'worker is up but reports no Chrome (chrome:false)' };
+    }
+    return { state: 'healthy', via: 'remote', detail: 'remote worker healthy' };
+  } catch (e: any) {
+    return {
+      state: 'unreachable',
+      detail: `worker /healthz did not answer: ${e?.message ?? 'unknown error'}`,
+    };
+  }
 }
 
 function touchIdleTimer() {
