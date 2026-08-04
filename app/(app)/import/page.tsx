@@ -161,15 +161,35 @@ export default function ImportPage() {
       )}
 
       {result && (
-        <div className="mt-6 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-800">
-          Imported <strong>{result.imported}</strong> of {result.total} rows.
-          {result.errors?.length > 0 && (
-            <div className="mt-1 text-red-700">Errors: {result.errors.join(' | ')}</div>
+        <>
+          <div className="mt-6 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-800">
+            Imported <strong>{result.imported}</strong> of {result.total} rows.
+            {result.errors?.length > 0 && (
+              <div className="mt-1 text-red-700">Errors: {result.errors.join(' | ')}</div>
+            )}
+            <a href="/contacts" className="mt-1 block font-medium underline">
+              Go to contacts →
+            </a>
+          </div>
+          {result.skippedLinkCount > 0 && (
+            <div className="mt-2 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              <div className="font-medium">
+                {result.skippedLinkCount} link {result.skippedLinkCount === 1 ? 'value was' : 'values were'} skipped
+                as invalid URLs — the contacts still imported.
+              </div>
+              <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs">
+                {result.warnings.map((w: string, i: number) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+              {result.skippedLinkCount > result.warnings.length && (
+                <div className="mt-1 text-xs">
+                  …and {result.skippedLinkCount - result.warnings.length} more.
+                </div>
+              )}
+            </div>
           )}
-          <a href="/contacts" className="mt-1 block font-medium underline">
-            Go to contacts →
-          </a>
-        </div>
+        </>
       )}
     </div>
   );

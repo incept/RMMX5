@@ -6,6 +6,9 @@ import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 import { logDebug } from '@/lib/debug-log';
 import { parseImportDate } from '@/lib/import-date';
+import { normalizeImportUrl } from '@/lib/import-url';
+
+const MAX_REPORTED_WARNINGS = 100;
 
 const MAX_IMPORT_ROWS = 1000;
 const IMPORT_BODY_BYTES = 5 * 1024 * 1024;
@@ -60,8 +63,10 @@ export async function POST(request: Request) {
   const usable = rows.filter((row) => row.name || row.email);
 
   // Validate and normalise the entire request before the first transaction.
-  // A malformed URL can no longer leave earlier contacts partially inserted.
+  // A malformed link cell no longer sinks the whole import: it is normalised
+  // when possible, skipped when not, and reported back as a warning.
   const prepared: Record<string, any>[] = [];
+  const skippedLinks: string[] = [];
   for (let rowIndex = 0; rowIndex < usable.length; rowIndex++) {
     const row = usable[rowIndex];
     const links: { position: number; url: string; status: string }[] = [];
@@ -71,13 +76,14 @@ export async function POST(request: Request) {
       ? text(row.link_status, 20).toLowerCase()
       : 'live';
     for (let position = 1; position <= 14; position++) {
-      const url = text(row[`link${position}`], 2048);
-      if (!url) continue;
-      if (!/^https?:\/\//i.test(url)) {
-        return NextResponse.json(
-          { error: `Row ${rowIndex + 1}, link ${position}: only HTTP(S) URLs are allowed` },
-          { status: 400 }
+      const raw = text(row[`link${position}`], 2048);
+      if (!raw) continue;
+      const url = normalizeImportUrl(raw);
+      if (!url) {
+        skippedLinks.push(
+          `Row ${rowIndex + 1}, link ${position}: skipped "${raw.slice(0, 80)}" — not an HTTP/HTTPS link`
         );
+        continue;
       }
       links.push({ position, url, status: linkStatus });
     }
@@ -151,6 +157,9 @@ export async function POST(request: Request) {
       total: rows.length,
       skipped: rows.length - usable.length,
       errors: [],
+      // Malformed link cells that were dropped so the rest could import.
+      warnings: skippedLinks.slice(0, MAX_REPORTED_WARNINGS),
+      skippedLinkCount: skippedLinks.length,
     });
   } catch (error) {
     await logDebug({
