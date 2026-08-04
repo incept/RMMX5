@@ -1,9 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import { useAutoRefresh } from '@/lib/use-auto-refresh';
+import { useRealtimeRefresh } from '@/lib/use-realtime-refresh';
 import ThemeToggle from '@/components/ThemeToggle';
 
 interface Leaf {
@@ -69,7 +71,9 @@ const OPEN_LS = 'rmmx5-nav-open';
 export default function Sidebar({ role, userName }: { role: string; userName: string }) {
   const pathname = usePathname();
   const router = useRouter();
+  const supabase = useMemo(() => createClient(), []);
   const [open, setOpen] = useState<Record<string, boolean>>({ crm: true, outreach: true, admin: false });
+  const [unread, setUnread] = useState(0);
 
   useEffect(() => {
     try {
@@ -79,6 +83,25 @@ export default function Sidebar({ role, userName }: { role: string; userName: st
       /* defaults are fine */
     }
   }, []);
+
+  // Unread inbound mail drives the Inbox badge. Realtime keeps it live (a new
+  // message bumps it; reading one flips `seen` and drops it); focus + a slow
+  // interval are the fallback when Realtime isn't delivering.
+  const loadUnread = useCallback(async () => {
+    const { count } = await supabase
+      .from('email_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('direction', 'inbound')
+      .eq('seen', false)
+      .is('hidden_at', null);
+    setUnread(count ?? 0);
+  }, [supabase]);
+
+  useEffect(() => {
+    loadUnread();
+  }, [loadUnread]);
+  useAutoRefresh(loadUnread, { intervalMs: 60_000 });
+  useRealtimeRefresh('email_messages', loadUnread);
 
   function toggle(id: string) {
     setOpen((o) => {
@@ -98,6 +121,7 @@ export default function Sidebar({ role, userName }: { role: string; userName: st
 
   const leafRow = (item: Leaf, nested: boolean) => {
     const active = isActive(item.href);
+    const badge = item.href === '/inbox' ? unread : 0;
     return (
       <Link
         key={item.href}
@@ -111,6 +135,14 @@ export default function Sidebar({ role, userName }: { role: string; userName: st
         }`}
       >
         {item.label}
+        {badge > 0 && (
+          <span
+            className="ml-auto min-w-[18px] shrink-0 rounded-full bg-red-500 px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none text-white"
+            title={`${badge} unread message${badge === 1 ? '' : 's'}`}
+          >
+            {badge > 99 ? '99+' : badge}
+          </span>
+        )}
       </Link>
     );
   };
@@ -147,6 +179,13 @@ export default function Sidebar({ role, userName }: { role: string; userName: st
                   <path d="M6 3l5 5-5 5V3z" />
                 </svg>
                 {section.label}
+                {/* When Messaging is collapsed, a dot still flags unread inbox mail. */}
+                {!expanded && section.id === 'outreach' && unread > 0 && (
+                  <span
+                    className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-red-500"
+                    title={`${unread} unread message${unread === 1 ? '' : 's'}`}
+                  />
+                )}
               </button>
               {expanded && (
                 <div className="mt-0.5 mb-1 ml-[17px] border-l border-gray-200 pl-2">
