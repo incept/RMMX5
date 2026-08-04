@@ -56,7 +56,10 @@ test('the editor offers a link-placeholder dropdown; email surfaces pass tokens'
   assert.match(cp, /linkPlaceholders=\{linkPlaceholders\}/);
   assert.match(cp, /token: `\{\{link\$\{l\.position\}\}\}`/);
 
+  // The placeholder list is now shared; the marketing sequence-step editor
+  // still offers it.
+  const shared = await read('../lib/template-placeholders.ts');
+  assert.match(shared, /export const LINK_PLACEHOLDERS/);
   const mk = await read('../app/(app)/marketing/page.tsx');
-  assert.match(mk, /const LINK_PLACEHOLDERS =/);
   assert.match(mk, /linkPlaceholders=\{LINK_PLACEHOLDERS\}/);
 });

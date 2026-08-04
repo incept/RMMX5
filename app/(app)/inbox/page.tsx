@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/client';
 import { useAutoRefresh } from '@/lib/use-auto-refresh';
 import { useRealtimeRefresh } from '@/lib/use-realtime-refresh';
 import RichTextEditor from '@/components/RichTextEditor';
+import TemplateManager from '@/components/TemplateManager';
 import { renderTemplate } from '@/lib/render-template';
 import { uploadEmailImage } from '@/lib/email-image-upload';
 import { framedEmail } from '@/lib/email-frame';
@@ -43,6 +44,7 @@ export default function InboxPage() {
   // toggle so switching light/dark re-renders the message in the matching palette.
   const [dark, setDark] = useState(false);
   const [imagesLoaded, setImagesLoaded] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
 
   const load = useCallback(async () => {
     let query = supabase
@@ -108,13 +110,16 @@ export default function InboxPage() {
   useAutoRefresh(load);
   useRealtimeRefresh('email_messages', load);
 
-  useEffect(() => {
+  const loadTemplates = useCallback(() => {
     supabase
       .from('email_templates')
       .select('id, name, subject, html')
       .order('name')
       .then(({ data }) => setTemplates(data ?? []));
   }, [supabase]);
+  useEffect(() => {
+    loadTemplates();
+  }, [loadTemplates]);
 
   // Fill the compose subject + body from a saved template. When the message is
   // tied to a contact, {{name}}/{{city}}/… placeholders are resolved against it
@@ -318,6 +323,13 @@ export default function InboxPage() {
             }}
           >
             ✎
+          </button>
+          <button
+            className="btn py-1"
+            title="Email templates"
+            onClick={() => setShowTemplates(true)}
+          >
+            🗎
           </button>
           <button className="btn py-1" title="Refresh" disabled={refreshing} onClick={refreshInbox}>
             {refreshing ? '…' : '⟳'}
@@ -764,6 +776,29 @@ export default function InboxPage() {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Email templates: create / edit / delete right from the inbox. The same
+          manager the Email Marketing hub uses; changes refresh the composer's
+          "Insert template…" picker. */}
+      {showTemplates && (
+        <div
+          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/20 p-6"
+          onClick={() => setShowTemplates(false)}
+        >
+          <div
+            className="w-full max-w-4xl rounded-xl bg-white p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-sm font-semibold">Email templates</h2>
+              <button className="btn py-1" onClick={() => setShowTemplates(false)}>
+                Close
+              </button>
+            </div>
+            <TemplateManager templates={templates} onChanged={loadTemplates} />
           </div>
         </div>
       )}

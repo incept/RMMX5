@@ -77,11 +77,14 @@ test('send route sanitizes compose HTML server-side', async () => {
   assert.match(route, /sanitizeEmailHtml\(String\(body\.html/);
 });
 
-test('marketing template save sanitizes stored HTML + offers an HTML-source toggle', async () => {
+test('template save sanitizes stored HTML + offers an HTML-source toggle', async () => {
+  // Template create/edit is now a shared component used by both the marketing
+  // hub and the inbox.
+  const editor = await read('../components/TemplateEditorModal.tsx');
+  assert.match(editor, /sanitizeEmailHtml\(form\.html/);
+  assert.match(editor, /HTML source/);
   const mk = await read('../app/(app)/marketing/page.tsx');
-  assert.match(mk, /sanitizeEmailHtml\(f\.html/);
-  assert.match(mk, /templateSource/);
-  assert.match(mk, /HTML source/);
+  assert.match(mk, /<TemplateManager/);
 });
 
 test('renderTemplate lives in a pure, server-free module and is re-exported', async () => {
