@@ -36,3 +36,27 @@ test('the list-add endpoint is admin-only and de-dups membership', async () => {
   assert.match(route, /\.in\('contact_id', ids\)/);
   assert.match(route, /toAdd\.map\(\(contact_id\) => \(\{ list_id: id, contact_id \}\)\)/);
 });
+
+test('the bulk bar can email the selection through a template-aware composer', async () => {
+  const page = await read('../app/(app)/contacts/page.tsx');
+  assert.match(page, /import BulkEmailComposer from '@\/components\/BulkEmailComposer'/);
+  assert.match(page, /setEmailComposerFor\(\[\.\.\.selected\]\)/);
+  assert.match(page, /<BulkEmailComposer/);
+
+  const composer = await read('../components/BulkEmailComposer.tsx');
+  // Template picker + rich editor, sending the raw body (server renders per recipient).
+  assert.match(composer, /Insert template…/);
+  assert.match(composer, /RichTextEditor/);
+  assert.match(composer, /contactIds/);
+  assert.match(composer, /'Idempotency-Key': requestKey/);
+});
+
+test('the send route fans a bulk send out per selected contact', async () => {
+  const route = await read('../app/api/email/send/route.ts');
+  assert.match(route, /Array\.isArray\(body\.contactIds\) && body\.contactIds\.length > 0/);
+  // Admin-gated, capped, and one delivery job per recipient with placeholders resolved.
+  assert.match(route, /Admin access required for bulk sends/);
+  assert.match(route, /Bulk sends are limited to \$\{MAX_BULK_RECIPIENTS\}/);
+  assert.match(route, /withLinkPlaceholders\(admin, contact, body\.subject, body\.html\)/);
+  assert.match(route, /enqueueJob\(\s*'email_delivery'/);
+});

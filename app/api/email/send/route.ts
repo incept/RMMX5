@@ -98,6 +98,60 @@ export async function POST(request: Request) {
     return NextResponse.json({ queued, duplicates }, { status: 202 });
   }
 
+  // Bulk send to an explicit selection of contacts (the contacts-grid composer).
+  // Same per-recipient fan-out as a list send — placeholders + removal links are
+  // resolved per contact and one delivery job is enqueued each — just sourced
+  // from an id list instead of a list's membership.
+  if (Array.isArray(body.contactIds) && body.contactIds.length > 0) {
+    if (!['admin', 'super_admin'].includes(auth.profile.role)) {
+      return NextResponse.json({ error: 'Admin access required for bulk sends' }, { status: 403 });
+    }
+    const requestKey = request.headers.get('idempotency-key');
+    if (!validIdempotencyKey(requestKey)) {
+      return NextResponse.json({ error: 'A valid Idempotency-Key header is required' }, { status: 400 });
+    }
+    const ids = [...new Set(body.contactIds.map(String))];
+    if (ids.length > MAX_BULK_RECIPIENTS) {
+      return NextResponse.json(
+        { error: `Bulk sends are limited to ${MAX_BULK_RECIPIENTS} recipients per request` },
+        { status: 413 }
+      );
+    }
+    const { data: recipients, error } = await admin
+      .from('contacts')
+      .select('id, name, email, city, state, custom')
+      .in('id', ids);
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+    let queued = 0;
+    let duplicates = 0;
+    let skipped = 0;
+    for (const contact of (recipients ?? []) as any[]) {
+      if (!contact?.email) {
+        skipped += 1;
+        continue;
+      }
+      const rendered = await withLinkPlaceholders(admin, contact, body.subject, body.html);
+      const key = deliveryKey('email', requestKey, contact.id);
+      const result = await enqueueJob(
+        'email_delivery',
+        {
+          to: contact.email,
+          subject: renderTemplate(body.subject, rendered),
+          html: renderTemplate(body.html, rendered, { html: true }),
+          accountId,
+          contactId: contact.id,
+          actorId: auth.profile.id,
+          deliveryKey: key,
+        },
+        `job:${key}`
+      );
+      if (result.queued) queued += 1;
+      if (result.duplicate) duplicates += 1;
+    }
+    return NextResponse.json({ queued, duplicates, skipped }, { status: 202 });
+  }
+
   let to = body.to as string | undefined;
   let contact: any = null;
   if (body.contactId) {

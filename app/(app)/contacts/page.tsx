@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import StatusPill, { type StatusOption } from '@/components/StatusPill';
 import ContactPanel from '@/components/ContactPanel';
+import BulkEmailComposer from '@/components/BulkEmailComposer';
 import { NameSourceIcon } from '@/components/NameSourceIcon';
 import { useMyRole } from '@/lib/use-my-role';
 import { useAutoRefresh } from '@/lib/use-auto-refresh';
@@ -150,6 +151,8 @@ export default function ContactsPage() {
   // Email lists + sequences for the bulk "add to list / start sequence" actions.
   const [lists, setLists] = useState<{ id: string; name: string }[]>([]);
   const [sequences, setSequences] = useState<{ id: string; name: string }[]>([]);
+  // Selected contact ids captured when the bulk email composer is opened.
+  const [emailComposerFor, setEmailComposerFor] = useState<string[] | null>(null);
   const [editEmailId, setEditEmailId] = useState<string | null>(null);
   const [emailDraft, setEmailDraft] = useState('');
   const [toast, setToast] = useState('');
@@ -1399,6 +1402,18 @@ export default function ContactsPage() {
               ))}
             </select>
           </label>
+          {isAdmin && (
+            <>
+              <span className="h-3.5 w-px bg-gray-200" />
+              <button
+                className="text-xs font-medium text-brand-700 hover:text-brand-800 disabled:text-gray-300"
+                disabled={bulkBusy}
+                onClick={() => setEmailComposerFor([...selected])}
+              >
+                ✉ Email
+              </button>
+            </>
+          )}
           {isAdmin && lists.length > 0 && (
             <label className="flex items-center gap-1.5 text-xs text-gray-600">
               Add to list
@@ -1461,6 +1476,19 @@ export default function ContactsPage() {
             Clear
           </button>
         </div>
+      )}
+
+      {/* ── bulk email composer ── */}
+      {emailComposerFor && emailComposerFor.length > 0 && (
+        <BulkEmailComposer
+          contactIds={emailComposerFor}
+          onClose={() => setEmailComposerFor(null)}
+          onSent={(message) => {
+            setEmailComposerFor(null);
+            setSelected(new Set());
+            flash(message);
+          }}
+        />
       )}
 
       {/* ── toast ── */}
