@@ -47,6 +47,16 @@ export async function POST(request: Request) {
   if (statusesError) return apiFailure('api:import', statusesError);
   const statusByName = new Map((statuses ?? []).map((s) => [s.name.toLowerCase(), s.id]));
   const defaultStatus = statusByName.get('new') ?? null;
+
+  // Custom-field targets from the wizard arrive keyed "custom:<field_key>". Only
+  // keys that still exist as custom fields are honoured, so a stale mapping (or a
+  // forged key) can never write an arbitrary column into contacts.custom.
+  const { data: customFieldRows, error: customFieldsError } = await admin
+    .from('custom_fields')
+    .select('field_key');
+  if (customFieldsError) return apiFailure('api:import', customFieldsError);
+  const customKeys = new Set((customFieldRows ?? []).map((f) => f.field_key as string));
+
   const usable = rows.filter((row) => row.name || row.email);
 
   // Validate and normalise the entire request before the first transaction.
@@ -71,6 +81,19 @@ export async function POST(request: Request) {
       }
       links.push({ position, url, status: linkStatus });
     }
+
+    // Gather values mapped onto admin-defined custom fields; stored as a JSONB
+    // map on contacts.custom, keyed by field_key — the same shape the contact
+    // panel reads and writes.
+    const custom: Record<string, string> = {};
+    for (const [key, value] of Object.entries(row)) {
+      if (!key.startsWith('custom:')) continue;
+      const fieldKey = key.slice('custom:'.length);
+      if (!customKeys.has(fieldKey)) continue;
+      const cleaned = text(value, 2000);
+      if (cleaned) custom[fieldKey] = cleaned;
+    }
+
     prepared.push({
       name: text(row.name || row.email || '(no name)', 300),
       email: text(row.email, 320) || null,
@@ -89,6 +112,7 @@ export async function POST(request: Request) {
       ip: text(row.ip, 64) || null,
       utm: text(row.utm, 1000) || null,
       links,
+      custom,
     });
   }
 
