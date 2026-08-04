@@ -10,6 +10,30 @@ const UUID_PATTERN =
 const STATE_CODES = new Set(
   'AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY'.split(' ')
 );
+const SEARCH_PLACEHOLDERS = new Set([
+  'name',
+  'first',
+  'middle',
+  'last',
+  'county',
+  'county_slug',
+  'state',
+  'state_lower',
+  'state_name',
+  'from_date',
+  'to_date',
+]);
+const RECORD_PLACEHOLDERS = new Set(['record_id', 'county_slug']);
+const DATE_PLACEHOLDERS = new Set([
+  'state_name',
+  'state',
+  'county',
+  'county_slug',
+  'yyyy',
+  'month_name',
+  'mm',
+  'dd',
+]);
 
 /** A hostname like "arrests.org" — no scheme, path, or spaces. */
 function normalizeDomain(raw: unknown): string {
@@ -24,6 +48,33 @@ function normalizeDomain(raw: unknown): string {
 function optionalUrlTemplate(raw: unknown): string | null {
   const value = String(raw ?? '').trim().slice(0, 2000);
   return value || null;
+}
+
+function validateUrlTemplate(
+  value: string,
+  label: string,
+  domain: string,
+  allowedPlaceholders: Set<string>
+): string | null {
+  if (!/^https?:\/\//i.test(value)) return `The ${label} must be a full http(s) URL`;
+  for (const match of value.matchAll(/\{([^{}]+)\}/g)) {
+    if (!allowedPlaceholders.has(match[1])) {
+      return `The ${label} contains an unsupported placeholder: {${match[1]}}`;
+    }
+  }
+  if (/[{}]/.test(value.replace(/\{[^{}]+\}/g, ''))) {
+    return `The ${label} contains malformed placeholder braces`;
+  }
+  try {
+    const parsed = new URL(value.replace(/\{[^{}]+\}/g, 'placeholder'));
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    if (host !== domain && !host.endsWith(`.${domain}`)) {
+      return `The ${label} must stay on ${domain} or one of its subdomains`;
+    }
+  } catch {
+    return `The ${label} is not a valid URL template`;
+  }
+  return null;
 }
 
 type SiteRow = {
@@ -52,16 +103,32 @@ function buildSiteRow(body: any): { row: SiteRow } | { error: string } {
   }
 
   const search_template = String(body.search_template ?? '').trim().slice(0, 2000);
-  if (!/^https?:\/\//i.test(search_template)) {
-    return { error: 'The search URL template must be a full http(s) URL' };
-  }
   const record_url_template = optionalUrlTemplate(body.record_url_template);
   const date_url_template = optionalUrlTemplate(body.date_url_template);
-  if (record_url_template && !/^https?:\/\//i.test(record_url_template)) {
-    return { error: 'The record URL template must be a full http(s) URL' };
+  const searchError = validateUrlTemplate(
+    search_template,
+    'search URL template',
+    domain,
+    SEARCH_PLACEHOLDERS
+  );
+  if (searchError) return { error: searchError };
+  if (record_url_template) {
+    const error = validateUrlTemplate(
+      record_url_template,
+      'record URL template',
+      domain,
+      RECORD_PLACEHOLDERS
+    );
+    if (error) return { error };
   }
-  if (date_url_template && !/^https?:\/\//i.test(date_url_template)) {
-    return { error: 'The date URL template must be a full http(s) URL' };
+  if (date_url_template) {
+    const error = validateUrlTemplate(
+      date_url_template,
+      'date URL template',
+      domain,
+      DATE_PLACEHOLDERS
+    );
+    if (error) return { error };
   }
 
   if (!['national', 'state', 'county'].includes(body.scope)) {

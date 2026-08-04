@@ -13,7 +13,9 @@ test('the probe-sites API supports full CRUD, admin-gated and validated', async 
   assert.equal((route.match(/requireAdmin\(\)/g) ?? []).length, 4, 'every verb requires admin');
   // The two NOT NULL columns are validated before an insert/update.
   assert.match(route, /A valid domain is required/);
-  assert.match(route, /search URL template must be a full http\(s\) URL/);
+  assert.match(route, /must be a full http\(s\) URL/);
+  assert.match(route, /unsupported placeholder/);
+  assert.match(route, /must stay on \$\{domain\}/);
   // A duplicate domain is a 409, not a 500.
   assert.match(route, /error\?\.code === '23505'/);
   assert.match(route, /status: 409/);

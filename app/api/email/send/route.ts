@@ -2,12 +2,71 @@ import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { renderTemplate } from '@/lib/sequence-runner';
-import { withLinkPlaceholders } from '@/lib/link-placeholders';
+import {
+  loadLinkPlaceholdersForContacts,
+  templateUsesLinks,
+  withLinkPlaceholders,
+} from '@/lib/link-placeholders';
 import { deliveryKey, MAX_BULK_RECIPIENTS, validIdempotencyKey } from '@/lib/bulk-delivery';
-import { enqueueJob } from '@/lib/job-queue';
+import { enqueueJob, enqueueJobsBatch } from '@/lib/job-queue';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 import { sanitizeEmailHtml } from '@/lib/html-sanitize';
+
+type BulkContact = {
+  id: string;
+  name?: string | null;
+  email?: string | null;
+  city?: string | null;
+  state?: string | null;
+  custom?: Record<string, unknown> | null;
+};
+
+async function enqueueBulkEmail(
+  admin: ReturnType<typeof createAdminClient>,
+  contacts: BulkContact[],
+  input: {
+    subject: string;
+    html: string;
+    accountId: string | null;
+    actorId: string;
+    requestKey: string;
+    missing?: number;
+  }
+) {
+  const deliverable = contacts.filter((contact) => !!contact.email);
+  const linkVars = templateUsesLinks(input.subject, input.html)
+    ? await loadLinkPlaceholdersForContacts(
+        admin,
+        deliverable.map((contact) => contact.id)
+      )
+    : new Map<string, Record<string, string>>();
+  const jobs = deliverable.map((contact) => {
+    const rendered = { ...contact, ...(linkVars.get(contact.id) ?? {}) };
+    const key = deliveryKey('email', input.requestKey, contact.id);
+    return {
+      kind: 'email_delivery' as const,
+      payload: {
+        to: contact.email!,
+        subject: renderTemplate(input.subject, rendered),
+        html: renderTemplate(input.html, rendered, { html: true }),
+        accountId: input.accountId,
+        contactId: contact.id,
+        actorId: input.actorId,
+        deliveryKey: key,
+      },
+      dedupe_key: `job:${key}`,
+      max_attempts: 5,
+    };
+  });
+  const result = jobs.length
+    ? await enqueueJobsBatch(jobs)
+    : { queued: 0, duplicates: 0, retried: 0 };
+  return {
+    ...result,
+    skipped: contacts.length - deliverable.length + (input.missing ?? 0),
+  };
+}
 
 export async function POST(request: Request) {
   const auth = await requireAdmin();
@@ -72,30 +131,17 @@ export async function POST(request: Request) {
       );
     }
 
-    let queued = 0;
-    let duplicates = 0;
-    for (const member of (members ?? []) as any[]) {
-      const contact = member.contacts;
-      if (!contact?.email) continue;
-      const rendered = await withLinkPlaceholders(admin, contact, body.subject, body.html);
-      const key = deliveryKey('email', requestKey, contact.id);
-      const result = await enqueueJob(
-        'email_delivery',
-        {
-          to: contact.email,
-          subject: renderTemplate(body.subject, rendered),
-          html: renderTemplate(body.html, rendered, { html: true }),
-          accountId,
-          contactId: contact.id,
-          actorId: auth.profile.id,
-          deliveryKey: key,
-        },
-        `job:${key}`
-      );
-      if (result.queued) queued += 1;
-      if (result.duplicate) duplicates += 1;
-    }
-    return NextResponse.json({ queued, duplicates }, { status: 202 });
+    const contacts = (members ?? [])
+      .map((member: any) => member.contacts)
+      .filter(Boolean) as BulkContact[];
+    const result = await enqueueBulkEmail(admin, contacts, {
+      subject: body.subject,
+      html: body.html,
+      accountId,
+      actorId: auth.profile.id,
+      requestKey: requestKey!,
+    });
+    return NextResponse.json(result, { status: 202 });
   }
 
   // Bulk send to an explicit selection of contacts (the contacts-grid composer).
@@ -110,7 +156,12 @@ export async function POST(request: Request) {
     if (!validIdempotencyKey(requestKey)) {
       return NextResponse.json({ error: 'A valid Idempotency-Key header is required' }, { status: 400 });
     }
-    const ids = [...new Set(body.contactIds.map(String))];
+    const ids: string[] = [...new Set<string>((body.contactIds as unknown[]).map(String))];
+    const UUID_PATTERN =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (ids.some((id) => !UUID_PATTERN.test(id))) {
+      return NextResponse.json({ error: 'contactIds must contain valid UUIDs' }, { status: 400 });
+    }
     if (ids.length > MAX_BULK_RECIPIENTS) {
       return NextResponse.json(
         { error: `Bulk sends are limited to ${MAX_BULK_RECIPIENTS} recipients per request` },
@@ -123,33 +174,16 @@ export async function POST(request: Request) {
       .in('id', ids);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-    let queued = 0;
-    let duplicates = 0;
-    let skipped = 0;
-    for (const contact of (recipients ?? []) as any[]) {
-      if (!contact?.email) {
-        skipped += 1;
-        continue;
-      }
-      const rendered = await withLinkPlaceholders(admin, contact, body.subject, body.html);
-      const key = deliveryKey('email', requestKey, contact.id);
-      const result = await enqueueJob(
-        'email_delivery',
-        {
-          to: contact.email,
-          subject: renderTemplate(body.subject, rendered),
-          html: renderTemplate(body.html, rendered, { html: true }),
-          accountId,
-          contactId: contact.id,
-          actorId: auth.profile.id,
-          deliveryKey: key,
-        },
-        `job:${key}`
-      );
-      if (result.queued) queued += 1;
-      if (result.duplicate) duplicates += 1;
-    }
-    return NextResponse.json({ queued, duplicates, skipped }, { status: 202 });
+    const contacts = (recipients ?? []) as BulkContact[];
+    const result = await enqueueBulkEmail(admin, contacts, {
+      subject: body.subject,
+      html: body.html,
+      accountId,
+      actorId: auth.profile.id,
+      requestKey: requestKey!,
+      missing: ids.length - contacts.length,
+    });
+    return NextResponse.json(result, { status: 202 });
   }
 
   let to = body.to as string | undefined;

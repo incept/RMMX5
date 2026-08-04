@@ -28,7 +28,13 @@ test('neutralizes javascript: links, keeps safe ones', () => {
 test('defeats whitespace/entity-obfuscated javascript scheme', () => {
   assert.match(sanitizeEmailHtml('<a href="java\tscript:alert(1)">x</a>'), /href="#"/);
   assert.match(sanitizeEmailHtml('<a href="java&#09;script:alert(1)">x</a>'), /href="#"/);
+  assert.match(sanitizeEmailHtml('<a href="java&#x73;cript&colon;alert(1)">x</a>'), /href="#"/);
   assert.match(sanitizeEmailHtml('<a href="  javascript:alert(1)">x</a>'), /href="#"/);
+  assert.match(sanitizeEmailHtml('<a href=javascript:alert(1)>x</a>'), /href="#"/);
+});
+
+test('strips srcdoc parsing contexts', () => {
+  assert.doesNotMatch(sanitizeEmailHtml('<div srcdoc="<script>x()</script>">safe</div>'), /srcdoc/i);
 });
 
 test('allows data:image but blocks other data: URIs', () => {

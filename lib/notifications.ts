@@ -83,6 +83,7 @@ export async function fireNotification(
           'notification_delivery',
           {
             notificationId: reservation.id,
+            contactId: contact.id,
             channel,
             destination: destination ?? null,
             message,

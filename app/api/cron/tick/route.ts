@@ -9,6 +9,8 @@ import { logDebug, errorMessage } from '@/lib/debug-log';
 import { processQueuedJobs } from '@/lib/job-queue';
 import { processLinkRechecks } from '@/lib/link-recheck';
 import { enqueueDueImapSyncs } from '@/lib/integrations/imap-sync';
+import { checkSchemaVersion } from '@/lib/schema-version';
+import { pruneUnreferencedEmailAssets } from '@/lib/email-assets';
 
 export const maxDuration = 120;
 const LEASE_SECONDS = 180;
@@ -84,6 +86,15 @@ export async function GET(request: Request) {
   }
 
   try {
+    const schema = await checkSchemaVersion(admin);
+    if (!schema.ok) {
+      await logDebug({
+        level: 'error',
+        source: 'cron:schema',
+        message: schema.error ?? 'Database schema is incompatible with this deployment',
+        context: { expected: schema.expected, actual: schema.actual },
+      }).catch(() => {});
+    }
     const names = ['sequences', 'countdown', 'calls', 'jobs', 'rechecks', 'imapsync'] as const;
     const results = await Promise.allSettled([
       processDueEnrollments(2),
@@ -97,8 +108,8 @@ export async function GET(request: Request) {
       // runs on the heavy lane (the VPS), not in this tick.
       enqueueDueImapSyncs(),
     ]);
-    const outcome: Record<string, any> = {};
-    let degraded = false;
+    const outcome: Record<string, any> = { schema };
+    let degraded = !schema.ok;
     await Promise.all(
       results.map(async (result, index) => {
         const name = names[index];
@@ -147,6 +158,17 @@ export async function GET(request: Request) {
         retention[name] = { error: message };
         await logDebug({ level: 'warn', source: `cron:retention:${name}`, message });
       }
+    }
+    try {
+      retention.email_assets = await pruneUnreferencedEmailAssets(admin);
+    } catch (error) {
+      const message = errorMessage(error);
+      retention.email_assets = { error: message };
+      await logDebug({
+        level: 'warn',
+        source: 'cron:retention:email-assets',
+        message,
+      }).catch(() => {});
     }
 
     return NextResponse.json(

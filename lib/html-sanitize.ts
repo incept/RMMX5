@@ -44,6 +44,11 @@ export function sanitizeEmailHtml(input: string): string {
   html = html.replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '');
   html = html.replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '');
 
+  // srcdoc creates a second HTML parsing context inside an iframe-like element.
+  // It has no legitimate use in email and is safer to drop regardless of quote
+  // style.
+  html = html.replace(/\ssrcdoc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+
   // 5. Dangerous URL schemes in any attribute value. `data:` is allowed only
   //    for images (inert), never for scripts or other types.
   html = neutralizeUrls(html);
@@ -56,12 +61,26 @@ export function sanitizeEmailHtml(input: string): string {
 // the value if a forbidden scheme remains.
 function neutralizeUrls(html: string): string {
   return html.replace(
-    /\b(href|src|xlink:href|action|background|poster|formaction)\s*=\s*("([^"]*)"|'([^']*)')/gi,
-    (match, attr, _q, dq, sq) => {
-      const raw = dq ?? sq ?? '';
-      const collapsed = raw
-        .replace(/&#x?[0-9a-f]+;?/gi, '') // strip numeric entities
-        .replace(/[\s-]+/g, '') // strip whitespace/control chars used to split a scheme
+    /\b(href|src|xlink:href|action|background|poster|formaction)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi,
+    (match, attr, dq, sq, bare) => {
+      const raw = dq ?? sq ?? bare ?? '';
+      // Decode entities before checking the scheme. Dropping them would turn
+      // `java&#x73;cript:` into `javacript:` for this check while the browser
+      // later decodes it back to executable `javascript:`.
+      const decoded = raw
+        .replace(/&#(x[0-9a-f]+|\d+);?/gi, (_entity: string, encoded: string) => {
+          const point = encoded[0].toLowerCase() === 'x'
+            ? Number.parseInt(encoded.slice(1), 16)
+            : Number.parseInt(encoded, 10);
+          return Number.isFinite(point) && point >= 0 && point <= 0x10ffff
+            ? String.fromCodePoint(point)
+            : '';
+        })
+        .replace(/&(colon|tab|newline);?/gi, (_entity: string, name: string) =>
+          name.toLowerCase() === 'colon' ? ':' : ' '
+        );
+      const collapsed = decoded
+        .replace(/[\s\u0000-\u001f\u007f-\u009f-]+/g, '')
         .toLowerCase();
       const isBadScheme = /^(javascript|vbscript|file|about):/.test(collapsed);
       const isBadData =

@@ -32,9 +32,10 @@ test('the list-add endpoint is admin-only and de-dups membership', async () => {
   assert.match(route, /requireAdmin/);
   assert.match(route, /contactIds must be a non-empty array/);
   assert.match(route, /MAX_BULK_RECIPIENTS/);
-  // Only the not-yet-members are inserted, so a re-add is a clean no-op.
+  // Only the not-yet-members are inserted, with conflict safety for concurrent requests.
   assert.match(route, /\.in\('contact_id', ids\)/);
-  assert.match(route, /toAdd\.map\(\(contact_id\) => \(\{ list_id: id, contact_id \}\)\)/);
+  assert.match(route, /candidates\.map\(\(contact_id\) => \(\{ list_id: id, contact_id \}\)\)/);
+  assert.match(route, /onConflict: 'list_id,contact_id', ignoreDuplicates: true/);
 });
 
 test('the bulk bar can email the selection through a template-aware composer', async () => {
@@ -57,6 +58,6 @@ test('the send route fans a bulk send out per selected contact', async () => {
   // Admin-gated, capped, and one delivery job per recipient with placeholders resolved.
   assert.match(route, /Admin access required for bulk sends/);
   assert.match(route, /Bulk sends are limited to \$\{MAX_BULK_RECIPIENTS\}/);
-  assert.match(route, /withLinkPlaceholders\(admin, contact, body\.subject, body\.html\)/);
-  assert.match(route, /enqueueJob\(\s*'email_delivery'/);
+  assert.match(route, /loadLinkPlaceholdersForContacts/);
+  assert.match(route, /enqueueJobsBatch\(jobs\)/);
 });

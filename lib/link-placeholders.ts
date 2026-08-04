@@ -19,11 +19,12 @@ export async function loadLinkPlaceholders(
   admin: Admin,
   contactId: string
 ): Promise<Record<string, string>> {
-  const { data } = await admin
+  const { data, error } = await admin
     .from('contact_links')
     .select('position, url, status')
     .eq('contact_id', contactId)
     .order('position');
+  if (error) throw new Error(`Could not load contact links: ${error.message}`);
 
   const vars: Record<string, string> = {};
   const live: string[] = [];
@@ -35,6 +36,42 @@ export async function loadLinkPlaceholders(
   }
   vars.links = live.join('\n');
   return vars;
+}
+
+/** Resolve link placeholders for many recipients with one database read. */
+export async function loadLinkPlaceholdersForContacts(
+  admin: Admin,
+  contactIds: string[]
+): Promise<Map<string, Record<string, string>>> {
+  const uniqueIds = [...new Set(contactIds)];
+  const out = new Map<string, Record<string, string>>();
+  for (const id of uniqueIds) out.set(id, { links: '' });
+  if (!uniqueIds.length) return out;
+
+  const { data, error } = await admin
+    .from('contact_links')
+    .select('contact_id, position, url, status')
+    .in('contact_id', uniqueIds)
+    .order('contact_id')
+    .order('position');
+  if (error) throw new Error(`Could not load contact links: ${error.message}`);
+
+  const live = new Map<string, string[]>();
+  for (const link of data ?? []) {
+    const id = String(link.contact_id);
+    const url = String(link.url ?? '').trim();
+    if (!/^https?:\/\//i.test(url)) continue;
+    const vars = out.get(id) ?? { links: '' };
+    vars[`link${link.position}`] = url;
+    out.set(id, vars);
+    if (link.status === 'live') {
+      const values = live.get(id) ?? [];
+      values.push(url);
+      live.set(id, values);
+    }
+  }
+  for (const [id, vars] of out) vars.links = (live.get(id) ?? []).join('\n');
+  return out;
 }
 
 /**

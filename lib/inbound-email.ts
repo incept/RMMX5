@@ -1,6 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server';
-import { stopEnrollmentsFor } from '@/lib/sequence-runner';
-import { logActivity } from '@/lib/activity';
+import { sanitizeEmailHtml } from '@/lib/html-sanitize';
 
 /**
  * Records one inbound email into the unified inbox and runs the reply side
@@ -19,6 +18,7 @@ export async function recordInboundEmail(input: {
   html?: string | null;
   text?: string | null;
   messageId?: string | null;
+  providerMessageId?: string | null;
   inReplyTo?: string | null;
   accountId?: string | null;
   // Present when the message came from an IMAP mailbox pull. Carries the columns
@@ -37,14 +37,17 @@ export async function recordInboundEmail(input: {
   const fromEmail = extracted.trim().toLowerCase().slice(0, 320);
   const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fromEmail);
 
-  const { data: contact } = validEmail
-    ? await admin
-        .from('contacts')
-        .select('id, name')
-        .eq('email_normalized', fromEmail)
-        .limit(1)
-        .maybeSingle()
-    : { data: null };
+  let contact: { id: string; name: string | null } | null = null;
+  if (validEmail) {
+    const contactResult = await admin
+      .from('contacts')
+      .select('id, name')
+      .eq('email_normalized', fromEmail)
+      .limit(1)
+      .maybeSingle();
+    if (contactResult.error) throw contactResult.error;
+    contact = contactResult.data;
+  }
 
   const imap = input.imap;
   const insertRow: Record<string, unknown> = {
@@ -54,8 +57,11 @@ export async function recordInboundEmail(input: {
     from_email: fromEmail,
     to_email: String(input.to ?? '').slice(0, 320),
     subject: String(input.subject ?? '(no subject)').slice(0, 500),
-    html: String(input.html ?? input.text ?? '').slice(0, 750_000),
+    html: sanitizeEmailHtml(String(input.html ?? input.text ?? '').slice(0, 750_000)),
     message_id: input.messageId ? String(input.messageId).slice(0, 1000) : null,
+    provider_message_id: input.providerMessageId
+      ? String(input.providerMessageId).slice(0, 256)
+      : null,
     in_reply_to: input.inReplyTo ? String(input.inReplyTo).slice(0, 1000) : null,
     status: 'received',
     sent_at: new Date().toISOString(),
@@ -68,49 +74,52 @@ export async function recordInboundEmail(input: {
     if (imap.internalDate) insertRow.created_at = new Date(imap.internalDate).toISOString();
   }
 
-  const { data: message, error: messageError } = await admin
+  const { data: inserted, error: messageError } = await admin
     .from('email_messages')
     .insert(insertRow)
     .select('id')
     .single();
+  let messageId = inserted?.id ?? null;
+  let duplicate = false;
   if (messageError) {
-    // A synced message we already have (re-run overlap): the unique (account,
-    // folder, uidvalidity, uid) index rejects it. Return without re-running the
-    // reply side effects, so a resync can't re-stop sequences or re-log activity.
-    if (messageError.code === '23505' && imap) {
-      return { contactId: contact?.id ?? null, messageRowId: null, duplicate: true };
+    // A retry after the row insert may still need to finish its transactional
+    // reply effects. Resolve the exact existing row and call the idempotent
+    // finalizer below rather than returning early and losing those effects.
+    if (messageError.code === '23505' && (imap || input.providerMessageId)) {
+      let existingQuery = admin.from('email_messages').select('id, contact_id');
+      if (imap) {
+        existingQuery = existingQuery
+          .eq('account_id', input.accountId)
+          .eq('imap_folder', imap.folder)
+          .eq('imap_uidvalidity', imap.uidValidity)
+          .eq('imap_uid', imap.uid);
+      } else {
+        existingQuery = existingQuery.eq('provider_message_id', input.providerMessageId!);
+      }
+      const existing = await existingQuery.maybeSingle();
+      if (existing.error) throw existing.error;
+      if (!existing.data) throw messageError;
+      messageId = existing.data.id;
+      contact = existing.data.contact_id
+        ? { id: existing.data.contact_id, name: contact?.name ?? null }
+        : null;
+      duplicate = true;
+    } else {
+      // Any other failure propagates so the caller aborts this run and retries
+      // from the previous cursor instead of skipping the message.
+      throw messageError;
     }
-    // Any other failure propagates so the caller (IMAP sync) aborts this run and
-    // retries from the previous cursor instead of skipping the message.
-    throw messageError;
   }
 
-  if (contact) {
-    // Mark the latest outbound message to this contact as replied.
-    const { data: lastOut } = await admin
-      .from('email_messages')
-      .select('id')
-      .eq('contact_id', contact.id)
-      .eq('direction', 'outbound')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (lastOut) {
-      await admin.from('email_messages').update({ replied: true }).eq('id', lastOut.id);
-      await admin.from('email_events').insert({
-        message_id: lastOut.id,
-        contact_id: contact.id,
-        type: 'reply',
-      });
-    }
-    await stopEnrollmentsFor(contact.id, 'reply');
-    await logActivity({
-      contactId: contact.id,
-      type: 'email',
-      description: `Reply received from ${fromEmail}: "${input.subject ?? ''}"`,
-      meta: { message_row_id: message?.id },
-    });
-  }
+  if (!messageId) throw new Error('Inbound email insert returned no id');
+  const finalized = await admin.rpc('finalize_inbound_email_effects', {
+    p_message_id: messageId,
+  });
+  if (finalized.error) throw finalized.error;
 
-  return { contactId: contact?.id ?? null, messageRowId: message?.id ?? null };
+  return {
+    contactId: contact?.id ?? null,
+    messageRowId: messageId,
+    ...(duplicate ? { duplicate: true } : {}),
+  };
 }

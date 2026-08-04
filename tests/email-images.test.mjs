@@ -35,8 +35,10 @@ test('upload route is admin-gated, validates, returns a public email-assets URL'
   const route = await read('../app/api/email/images/route.ts');
   assert.match(route, /requireAdmin/);
   assert.match(route, /validateEmailImage/);
-  assert.match(route, /'email-assets'/);
+  assert.match(route, /EMAIL_ASSET_BUCKET/);
   assert.match(route, /getPublicUrl/);
+  assert.match(route, /unreferencedEmailAssetBytes/);
+  assert.match(route, /\.from\('email_assets'\)/);
   assert.match(route, /runtime = 'nodejs'/);
 });
 

@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
-import { stopEnrollmentsFor } from '@/lib/sequence-runner';
 import { verifyTrackingUrl, trackingSecretConfigured } from '@/lib/signing';
 import { isTrackableId, passesCooldown } from '@/lib/track-guard';
 import { logDebug, errorMessage } from '@/lib/debug-log';
@@ -30,18 +29,15 @@ export async function GET(request: Request) {
         const admin = createAdminClient();
         // Atomic increment (no read-modify-write race); returns contact_id so
         // the event insert needs no second lookup. Empty result = unknown id.
-        const { data } = await admin
-          .rpc('track_email_event_bounded', {
+        const { data, error } = await admin
+          .rpc('track_email_event_and_stop', {
             p_message_id: messageId,
             p_event: 'click',
             p_url: url,
             p_bucket_seconds: 60,
           })
           .maybeSingle<{ message_id: string; contact_id: string | null; counted: boolean }>();
-
-        if (data?.counted) {
-          if (data.contact_id) await stopEnrollmentsFor(data.contact_id, 'click');
-        }
+        if (error) throw error;
       } catch (error) {
         // Tracking must never break the redirect — the recipient still reaches
         // the page. But a failure nobody records means click counts drift with no

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { isPrivateMailAddress, validateImapTarget, validateSmtpTarget } from '../lib/imap-target.ts';
 
 const read = (p) => readFile(new URL(p, import.meta.url), 'utf8');
 
@@ -30,9 +31,33 @@ test('IMAP enqueue helpers log account-query errors instead of reporting zero', 
 test('IMAP targets are SSRF-guarded and restricted to standard ports', async () => {
   const guard = await read('../lib/imap-target.ts');
   assert.match(guard, /export function validateImapTarget/);
-  assert.match(guard, /port !== 143 && port !== 993/);
+  assert.match(guard, /IMAP_PORTS = new Set\(\[143, 993\]\)/);
   assert.match(guard, /localhost/);
-  assert.match(guard, /fe80:/); // IPv6 link-local blocked
+  assert.match(guard, /Only 2000::\/3 is globally routed unicast/);
+  assert.match(guard, /lookup\(originalHost, \{ all: true, verbatim: true \}\)/);
+  assert.match(guard, /answers\.some\(\(answer\) => isPrivateMailAddress/);
+});
+
+test('mail target validation rejects local, reserved, and transition addresses', () => {
+  for (const address of [
+    '127.0.0.1',
+    '10.2.3.4',
+    '169.254.169.254',
+    '192.0.0.55',
+    '198.51.100.8',
+    '::1',
+    'fc00::1',
+    'fe80::1',
+    '2001:db8::1',
+    '2002:7f00:1::',
+  ]) {
+    assert.equal(isPrivateMailAddress(address), true, address);
+  }
+  assert.equal(isPrivateMailAddress('8.8.8.8'), false);
+  assert.equal(isPrivateMailAddress('2606:4700:4700::1111'), false);
+  assert.match(String(validateImapTarget('localhost', 993)), /not allowed/);
+  assert.match(String(validateImapTarget('mail.example.com', 25)), /143 or 993/);
+  assert.match(String(validateSmtpTarget('mail.example.com', 143)), /25, 465, 587, or 2525/);
 });
 
 test('test-imap reuses the whole stored tuple, not the stored password with a new host', async () => {
@@ -47,6 +72,7 @@ test('test-imap reuses the whole stored tuple, not the stored password with a ne
 test('changing the IMAP host/port/username requires re-entering the password', async () => {
   const route = await read('../app/api/admin/email-accounts/[id]/route.ts');
   assert.match(route, /validateImapTarget/);
+  assert.match(route, /resolvePublicMailTarget/);
   assert.match(route, /Re-enter the IMAP password/);
   assert.match(route, /identityChanged/);
   // The create route SSRF-guards its target too.

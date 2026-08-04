@@ -31,8 +31,13 @@ test('sequence step form uses the rich editor with a per-step subject + template
 
 test('saved steps are self-contained, sanitized, and require a subject', async () => {
   const mk = await read('../app/(app)/marketing/page.tsx');
-  assert.match(mk, /html: sanitizeEmailHtml\(s\.html/); // stored HTML scrubbed
-  assert.match(mk, /template_id: null/); // no live template link
+  const route = await read('../app/api/email/sequences/route.ts');
+  const migration = await read('../supabase/migrations/0054_pr100_117_audit_hardening.sql');
+  assert.match(route, /sanitizeEmailHtml/); // server-side scrub at the trust boundary
+  assert.match(route, /save_email_sequence/);
+  assert.match(migration, /delete from public\.sequence_steps/);
+  assert.match(migration, /insert into public\.sequence_steps/); // same transaction
+  assert.match(migration, /\n\s*null,\n\s*left\(btrim\(v_step->>'subject'/); // no live template link
   assert.match(mk, /Each step needs a subject/); // validation
   assert.match(mk, /stepHasBody/); // blank steps dropped
 });

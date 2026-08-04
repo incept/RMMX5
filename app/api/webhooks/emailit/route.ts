@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server';
+import { createHash } from 'node:crypto';
 import { createAdminClient } from '@/lib/supabase/server';
 import { getSetting } from '@/lib/settings';
 import { stopEnrollmentsFor } from '@/lib/sequence-runner';
 import { logActivity } from '@/lib/activity';
+import { logDebug } from '@/lib/debug-log';
 import { verifyEmailitWebhook } from '@/lib/webhook-auth';
 import { claimWebhookReceipt, releaseWebhookReceipt } from '@/lib/webhook-receipts';
 import { readTextBody } from '@/lib/request-limits';
@@ -48,6 +50,7 @@ export async function POST(request: Request) {
   }
 
   const eventType = String(body?.type ?? body?.event ?? '').toLowerCase();
+  const payloadDigest = createHash('sha256').update(rawBody).digest('hex');
 
   // Inbound mail (Webhooks v2). The event carries only headers, so fetch the
   // full body by id and drop it into the unified inbox via the shared recorder.
@@ -73,6 +76,7 @@ export async function POST(request: Request) {
         html: fetched.body.html,
         text: fetched.body.text,
         messageId: String(object.message_id ?? emailId),
+        providerMessageId: String(emailId),
       });
       return NextResponse.json({ ok: true, contact_id: contactId });
     } catch (error: any) {
@@ -85,7 +89,7 @@ export async function POST(request: Request) {
   // per-send in sendViaEmailit (tracking={loads,clicks}). email.loaded = open,
   // email.clicked = click. The email_messages row id rides back as
   // email.meta.message_row_id, so each event maps straight to its message;
-  // recipient is the fallback for mail sent before meta was attached. This is
+  // the provider message id is the exact fallback when meta was omitted. This is
   // how EMAILIT-sent mail is tracked — SMTP-sent mail is tracked by the
   // /api/track pixel + redirect instead, so the two never double-count.
   const isOpen = eventType === 'email.loaded' || eventType.endsWith('.loaded');
@@ -94,48 +98,37 @@ export async function POST(request: Request) {
     const object = body?.data?.object ?? {};
     const emailObj = object?.email ?? {};
     const engagementEventId =
-      body?.event_id ?? object?.id ?? `emailit-${isClick ? 'click' : 'load'}:${emailObj?.id ?? ''}`;
+      body?.event_id ?? object?.id ?? `emailit-${isClick ? 'click' : 'load'}:${payloadDigest}`;
     const claimedEngagement = await claimWebhookReceipt('emailit', engagementEventId);
     if (!claimedEngagement) return NextResponse.json({ ok: true, duplicate: true });
     try {
       const admin = createAdminClient();
 
-      // Prefer the exact row id we stamped as meta; fall back to recipient ->
-      // latest outbound (older mail, or a recipient with no meta).
+      // Prefer the exact row id stamped in meta. The provider id returned by the
+      // send API is a second exact key for events whose meta was omitted. Never
+      // guess "latest outbound" from a recipient: a delayed event would then be
+      // credited to the wrong message.
       let messageId: string | null =
         typeof emailObj?.meta?.message_row_id === 'string' ? emailObj.meta.message_row_id : null;
-      let contactId: string | null = null;
       if (messageId) {
-        const { data: row } = await admin
+        const { data: row, error } = await admin
           .from('email_messages')
           .select('id, contact_id')
           .eq('id', messageId)
           .maybeSingle();
+        if (error) throw error;
         messageId = row?.id ?? null;
-        contactId = row?.contact_id ?? null;
       }
-      if (!messageId) {
-        const rcpt = emailObj?.rcpt_to ?? object?.rcpt_to ?? null;
-        if (rcpt) {
-          const { data: contact } = await admin
-            .from('contacts')
-            .select('id')
-            .ilike('email', String(rcpt))
-            .limit(1)
-            .maybeSingle();
-          if (contact) {
-            const { data: lastOut } = await admin
-              .from('email_messages')
-              .select('id, contact_id')
-              .eq('contact_id', contact.id)
-              .eq('direction', 'outbound')
-              .order('created_at', { ascending: false })
-              .limit(1)
-              .maybeSingle();
-            messageId = lastOut?.id ?? null;
-            contactId = lastOut?.contact_id ?? null;
-          }
-        }
+      const providerMessageId =
+        typeof emailObj?.id === 'string' && emailObj.id ? emailObj.id : null;
+      if (!messageId && providerMessageId) {
+        const { data: row, error } = await admin
+          .from('email_messages')
+          .select('id, contact_id')
+          .eq('provider_message_id', providerMessageId)
+          .maybeSingle();
+        if (error) throw error;
+        messageId = row?.id ?? null;
       }
       // No CRM message to attribute (e.g. a system-notification email). Keep the
       // claimed receipt so it isn't reprocessed, and move on.
@@ -146,19 +139,15 @@ export async function POST(request: Request) {
       // Same atomic, bucket-bounded counter the /api/track pixel uses, so an
       // Emailit-tracked open/click increments open_count/click_count and lands
       // in email_events identically to a self-tracked one.
-      const { data: counted } = await admin
-        .rpc('track_email_event_bounded', {
+      const { data: counted, error: trackingError } = await admin
+        .rpc('track_email_event_and_stop', {
           p_message_id: messageId,
           p_event: isClick ? 'click' : 'open',
           p_url: clickedUrl,
           p_bucket_seconds: 60,
         })
         .maybeSingle<{ message_id: string; contact_id: string | null; counted: boolean }>();
-
-      const stopContact = counted?.contact_id ?? contactId;
-      if (counted?.counted && stopContact) {
-        await stopEnrollmentsFor(stopContact, isClick ? 'click' : 'open');
-      }
+      if (trackingError) throw trackingError;
       return NextResponse.json({ ok: true, counted: !!counted?.counted });
     } catch (error: any) {
       await releaseWebhookReceipt('emailit', engagementEventId);
@@ -178,6 +167,8 @@ export async function POST(request: Request) {
     body?.recipient ??
     body?.data?.email ??
     body?.data?.to ??
+    body?.data?.object?.email?.rcpt_to ??
+    body?.data?.object?.email?.to ??
     body?.data?.object?.to ??
     null;
   const recipientValue = Array.isArray(recipientCandidate)
@@ -187,52 +178,81 @@ export async function POST(request: Request) {
     typeof recipientValue === 'object' ? recipientValue?.email ?? null : recipientValue;
   if (!recipient) return NextResponse.json({ ok: true, ignored: 'no recipient' });
 
-  const eventId = body?.event_id ?? body?.id ?? null;
+  const eventId = body?.event_id ?? body?.id ?? `emailit-${eventType}:${payloadDigest}`;
   const claimed = await claimWebhookReceipt('emailit', eventId);
   if (!claimed) return NextResponse.json({ ok: true, duplicate: true });
 
   try {
     const admin = createAdminClient();
-    const { data: contact } = await admin
+    const object = body?.data?.object ?? {};
+    const emailObject = object?.email ?? object;
+    const metaMessageId =
+      typeof emailObject?.meta?.message_row_id === 'string'
+        ? emailObject.meta.message_row_id
+        : null;
+    const providerMessageId =
+      typeof emailObject?.id === 'string' && emailObject.id.startsWith('em_')
+        ? emailObject.id
+        : null;
+    let messageQuery = admin
+      .from('email_messages')
+      .select('id, contact_id');
+    if (metaMessageId) messageQuery = messageQuery.eq('id', metaMessageId);
+    else if (providerMessageId) {
+      messageQuery = messageQuery.eq('provider_message_id', providerMessageId);
+    } else {
+      await logDebug({
+        level: 'warn',
+        source: 'webhook:emailit',
+        message: `Ignored ${eventType}: event had no exact CRM message identifier`,
+        context: { event_id: eventId, recipient: String(recipient).slice(0, 320) },
+      }).catch(() => {});
+      return NextResponse.json({ ok: true, ignored: 'no exact message identifier' });
+    }
+    const messageResult = await messageQuery.maybeSingle();
+    if (messageResult.error) throw messageResult.error;
+    const lastOut = messageResult.data;
+    if (!lastOut?.contact_id) {
+      return NextResponse.json({ ok: true, ignored: 'no matching CRM message' });
+    }
+
+    const contactResult = await admin
       .from('contacts')
       .select('id, name, status_id')
-      .ilike('email', String(recipient))
-      .limit(1)
+      .eq('id', lastOut.contact_id)
       .maybeSingle();
+    if (contactResult.error) throw contactResult.error;
+    const contact = contactResult.data;
     if (!contact) return NextResponse.json({ ok: true, ignored: 'no matching contact' });
 
-    const { data: lastOut } = await admin
-      .from('email_messages')
-      .select('id')
-      .eq('contact_id', contact.id)
-      .eq('direction', 'outbound')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (lastOut) {
-      await admin.from('email_messages').update({ bounced: true }).eq('id', lastOut.id);
-      await admin.from('email_events').insert({
-        message_id: lastOut.id,
-        contact_id: contact.id,
-        type: 'bounce',
-        meta: { event: eventType, event_id: eventId },
-      });
-    }
+    const bounced = await admin.from('email_messages').update({ bounced: true }).eq('id', lastOut.id);
+    if (bounced.error) throw bounced.error;
+    const eventInsert = await admin.from('email_events').insert({
+      message_id: lastOut.id,
+      contact_id: contact.id,
+      type: 'bounce',
+      meta: { event: eventType, event_id: eventId },
+    });
+    if (eventInsert.error) throw eventInsert.error;
 
     await stopEnrollmentsFor(contact.id, 'bounce');
 
     // Auto-status: prefer "Bounced", fall back to "Bad Email".
-    const { data: bounceStatus } = await admin
+    const { data: bounceStatus, error: statusReadError } = await admin
       .from('statuses')
       .select('id, name')
       .in('name', ['Bounced', 'Bad Email'])
       .order('name') // "Bad Email" sorts first; prefer Bounced below
       .limit(2);
+    if (statusReadError) throw statusReadError;
     const target =
       bounceStatus?.find((s) => s.name === 'Bounced') ?? bounceStatus?.[0] ?? null;
     if (target && contact.status_id !== target.id) {
-      await admin.from('contacts').update({ status_id: target.id }).eq('id', contact.id);
+      const statusUpdate = await admin
+        .from('contacts')
+        .update({ status_id: target.id })
+        .eq('id', contact.id);
+      if (statusUpdate.error) throw statusUpdate.error;
     }
 
     await logActivity({

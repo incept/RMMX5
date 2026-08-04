@@ -2011,7 +2011,7 @@ test('Admin Debug shows read failures instead of claiming the log is empty', asy
 test('runtime setup documents the current migration and Node requirements', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
   assert.match(readme, /highest-numbered migration shipped/);
-  assert.match(readme, /0029_deep_search_partial_state\.sql/);
+  assert.match(readme, /0054_pr100_117_audit_hardening\.sql/);
   assert.match(readme, /22\.19\.0 or newer/);
 });
 
