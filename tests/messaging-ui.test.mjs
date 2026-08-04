@@ -18,13 +18,16 @@ test('framedEmail is a shared, theme-matched, sandbox-ready helper', async () =>
   assert.match(frame, /#ffffff/); // --color-surface, light
   // Blocks remote images (and tracking pixels) when asked.
   assert.match(frame, /img-src data:/);
+  // Links open in a new tab.
+  assert.match(frame, /<base target="_blank">/);
 });
 
 test('the inbox renders messages through the shared frame in a script-free sandbox', async () => {
   const inbox = await read('../app/(app)/inbox/page.tsx');
   assert.match(inbox, /import \{ framedEmail \} from '@\/lib\/email-frame'/);
   assert.match(inbox, /srcDoc=\{framedEmail\(/);
-  assert.match(inbox, /sandbox="allow-popups"/);
+  // Script-free, but a clicked link escapes to a real new tab (not a sandboxed one).
+  assert.match(inbox, /sandbox="allow-popups allow-popups-to-escape-sandbox"/);
   // The local copy is gone — one definition, in the lib.
   assert.doesNotMatch(inbox, /function framedEmail/);
   // Repaints when the <html class="dark"> toggle changes.
@@ -38,7 +41,7 @@ test('the contact panel lets you open a past email and resend it with edits', as
   assert.match(panel, /onClick=\{\(\) => setViewingMessage\(m\)\}/);
   // The viewer renders the body in the same sandboxed, themed frame as the inbox.
   assert.match(panel, /srcDoc=\{framedEmail\(/);
-  assert.match(panel, /sandbox="allow-popups"/);
+  assert.match(panel, /sandbox="allow-popups allow-popups-to-escape-sandbox"/);
   // Resend drops the message back into the composer with a fresh idempotency key
   // (blank requestKey) so it is a new delivery, not a dedup of the original.
   assert.match(panel, /function resendMessage/);
