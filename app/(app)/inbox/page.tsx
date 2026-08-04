@@ -438,7 +438,7 @@ export default function InboxPage() {
             {/* Sandboxed iframe: inbound email HTML is attacker-controlled, so it
                 must never run scripts or touch this origin's session. */}
             <iframe
-              sandbox="allow-popups"
+              sandbox="allow-popups allow-popups-to-escape-sandbox"
               srcDoc={framedEmail(
                 selected.html ?? '',
                 dark,

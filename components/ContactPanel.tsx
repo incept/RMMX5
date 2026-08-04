@@ -2342,7 +2342,7 @@ export default function ContactPanel({
             {/* Sandboxed iframe: message HTML must never run scripts or touch this
                 origin's session. */}
             <iframe
-              sandbox="allow-popups"
+              sandbox="allow-popups allow-popups-to-escape-sandbox"
               srcDoc={framedEmail(
                 viewingMessage.html ?? '',
                 dark,
