@@ -49,7 +49,14 @@ export async function POST(request: Request) {
   const { data: statuses, error: statusesError } = await admin.from('statuses').select('id, name');
   if (statusesError) return apiFailure('api:import', statusesError);
   const statusByName = new Map((statuses ?? []).map((s) => [s.name.toLowerCase(), s.id]));
-  const defaultStatus = statusByName.get('new') ?? null;
+  const statusIds = new Set((statuses ?? []).map((s) => s.id));
+  // The wizard can choose one status for the whole batch; it becomes the fallback
+  // for any row without a mapped status. An unknown/blank id falls back to "new".
+  const requestedDefault =
+    typeof body.defaultStatusId === 'string' && statusIds.has(body.defaultStatusId)
+      ? body.defaultStatusId
+      : null;
+  const defaultStatus = requestedDefault ?? statusByName.get('new') ?? null;
 
   // Custom-field targets from the wizard arrive keyed "custom:<field_key>". Only
   // keys that still exist as custom fields are honoured, so a stale mapping (or a
