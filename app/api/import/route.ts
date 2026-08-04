@@ -5,6 +5,7 @@ import { validIdempotencyKey } from '@/lib/bulk-delivery';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 import { logDebug } from '@/lib/debug-log';
+import { parseImportDate } from '@/lib/import-date';
 
 const MAX_IMPORT_ROWS = 1000;
 const IMPORT_BODY_BYTES = 5 * 1024 * 1024;
@@ -82,6 +83,9 @@ export async function POST(request: Request) {
       browser: text(row.browser, 500) || null,
       ppc_kw: text(row.ppc_kw, 500) || null,
       source: text(row.source || 'import', 120),
+      // Preserve the lead's original date when the sheet maps one; a blank or
+      // unparseable value stays null so the DB falls back to now().
+      created_at: parseImportDate(row.created_at),
       ip: text(row.ip, 64) || null,
       utm: text(row.utm, 1000) || null,
       links,
