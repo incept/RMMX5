@@ -55,7 +55,8 @@ test('0044 adds the cert-trust flag and the connection honors it (opt-in)', asyn
   // The test connection relaxes TLS verification only when the flag is set.
   const route = await read('../app/api/admin/email-accounts/test-imap/route.ts');
   assert.match(route, /imap_allow_invalid_cert/);
-  assert.match(route, /allowInvalidCert \? \{ tls: \{ rejectUnauthorized: false \} \}/);
+  assert.match(route, /rejectUnauthorized: !allowInvalidCert/);
+  assert.match(route, /servername: target\.servername/);
 
   const create = await read('../app/api/admin/email-accounts/route.ts');
   const update = await read('../app/api/admin/email-accounts/[id]/route.ts');

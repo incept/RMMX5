@@ -5,7 +5,7 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 import { logDebug } from '@/lib/debug-log';
-import { validateImapTarget } from '@/lib/imap-target';
+import { resolvePublicMailTarget, validateImapTarget } from '@/lib/imap-target';
 
 // nodemailer/imapflow use Node sockets — never the edge runtime.
 export const runtime = 'nodejs';
@@ -49,11 +49,12 @@ export async function POST(request: Request) {
     // username / port / TLS. Otherwise the stored password could be authenticated
     // against an attacker-chosen host (finding #5).
     if (body.accountId && !password) {
-      const { data } = await createAdminClient()
+      const { data, error } = await createAdminClient()
         .from('email_accounts')
         .select('imap_host, imap_port, imap_username, imap_password, imap_secure, imap_allow_invalid_cert')
         .eq('id', String(body.accountId))
         .maybeSingle();
+      if (error) throw error;
       if (!data?.imap_password) {
         return NextResponse.json(
           { ok: false, error: 'No stored IMAP password for this account — enter the password to test.' },
@@ -79,12 +80,13 @@ export async function POST(request: Request) {
     if (targetError) {
       return NextResponse.json({ ok: false, error: targetError }, { status: 400 });
     }
+    const target = await resolvePublicMailTarget(host, port, 'imap');
 
     // TLS follows the port (mirrors the SMTP fix): 993 = implicit TLS on connect,
     // 143 = STARTTLS (imapflow upgrades a plaintext 143 connection automatically).
     const useSecure = secure === undefined ? port !== 143 : !!secure;
     const client = new ImapFlow({
-      host,
+      host: target.address,
       port,
       secure: useSecure,
       auth: { user: username, pass: password },
@@ -93,13 +95,16 @@ export async function POST(request: Request) {
       socketTimeout: 20_000,
       // Opt-in: accept a mismatched/self-signed cert for this one mailbox (the
       // exception a desktop client makes you approve on shared hosts like WPX).
-      ...(allowInvalidCert ? { tls: { rejectUnauthorized: false } } : {}),
+      tls: {
+        ...(target.servername ? { servername: target.servername } : {}),
+        rejectUnauthorized: !allowInvalidCert,
+      },
     });
 
     try {
       await withTimeout(client.connect(), 20_000, 'IMAP connect');
       const boxes = await client.list();
-      const folders = boxes.map((b) => b.path).slice(0, 200);
+      const folders = boxes.map((b: { path: string }) => b.path).slice(0, 200);
       await client.logout();
       return NextResponse.json({ ok: true, folders });
     } catch (imapError: any) {

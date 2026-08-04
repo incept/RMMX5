@@ -5,7 +5,6 @@ import { createClient } from '@/lib/supabase/client';
 import RichTextEditor from '@/components/RichTextEditor';
 import TemplateManager from '@/components/TemplateManager';
 import { uploadEmailImage } from '@/lib/email-image-upload';
-import { sanitizeEmailHtml } from '@/lib/html-sanitize';
 import { LINK_PLACEHOLDERS } from '@/lib/template-placeholders';
 
 const TABS = ['Sequences', 'Templates', 'Lists', 'Analytics'] as const;
@@ -165,7 +164,13 @@ export default function MarketingPage() {
     if (!f.name) return alert('Name required');
     setBusy(true);
 
+    const withBody = (f.steps ?? []).filter((s: any) => stepHasBody(s.html));
+    if (withBody.some((s: any) => !String(s.subject ?? '').trim())) {
+      setBusy(false);
+      return alert('Each step needs a subject line.');
+    }
     const row = {
+      id: f.id ?? null,
       name: f.name,
       list_id: f.list_id || null,
       send_account_id: f.send_account_id || null,
@@ -174,39 +179,23 @@ export default function MarketingPage() {
       start_status_ids: f.start_status_ids ?? [],
       stop_on: f.stop_on ?? [],
       stop_status_ids: f.stop_status_ids ?? [],
+      steps: withBody.map((s: any) => ({
+        subject: String(s.subject ?? '').slice(0, 500),
+        html: String(s.html ?? '').slice(0, 250_000),
+        delay_days: Number(s.delay_days ?? 0),
+      })),
     };
 
-    let sequenceId = f.id;
-    if (sequenceId) {
-      const { error } = await supabase.from('email_sequences').update(row).eq('id', sequenceId);
-      if (error) {
-        setBusy(false);
-        return alert(error.message);
-      }
-      await supabase.from('sequence_steps').delete().eq('sequence_id', sequenceId);
-    } else {
-      const { data, error } = await supabase.from('email_sequences').insert(row).select('id').single();
-      if (error || !data) {
-        setBusy(false);
-        return alert(error?.message ?? 'save failed');
-      }
-      sequenceId = data.id;
-    }
-
-    const withBody = (f.steps ?? []).filter((s: any) => stepHasBody(s.html));
-    if (withBody.some((s: any) => !String(s.subject ?? '').trim())) {
+    const response = await fetch('/api/email/sequences', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(row),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
       setBusy(false);
-      return alert('Each step needs a subject line.');
+      return alert(result.error ?? 'Could not save sequence');
     }
-    const steps = withBody.map((s: any, i: number) => ({
-      sequence_id: sequenceId,
-      step_order: i + 1,
-      template_id: null, // inline steps are self-contained (no live template link)
-      subject: String(s.subject ?? '').slice(0, 500),
-      html: sanitizeEmailHtml(s.html ?? ''),
-      delay_days: Number(s.delay_days ?? 0),
-    }));
-    if (steps.length) await supabase.from('sequence_steps').insert(steps);
 
     setBusy(false);
     setSequenceForm(null);
@@ -556,7 +545,11 @@ export default function MarketingPage() {
                   className="btn text-red-600"
                   onClick={async () => {
                     if (!confirm('Delete this sequence and its enrollments?')) return;
-                    await supabase.from('email_sequences').delete().eq('id', sequenceForm.id);
+                    const deleted = await supabase
+                      .from('email_sequences')
+                      .delete()
+                      .eq('id', sequenceForm.id);
+                    if (deleted.error) return alert(deleted.error.message);
                     setSequenceForm(null);
                     load();
                   }}
@@ -640,7 +633,11 @@ export default function MarketingPage() {
                         className="btn text-red-600"
                         onClick={async () => {
                           if (!confirm('Delete this list?')) return;
-                          await supabase.from('email_lists').delete().eq('id', listForm.id);
+                          const deleted = await supabase
+                            .from('email_lists')
+                            .delete()
+                            .eq('id', listForm.id);
+                          if (deleted.error) return alert(deleted.error.message);
                           setListForm(null);
                           load();
                         }}

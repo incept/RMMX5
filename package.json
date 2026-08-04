@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "typecheck": "tsc --noEmit",
     "start": "next start",
     "test": "node --experimental-strip-types --test tests/*.test.mjs"
   },

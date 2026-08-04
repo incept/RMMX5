@@ -5,6 +5,7 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { enqueueJob } from '@/lib/job-queue';
 import { logDebug } from '@/lib/debug-log';
 import { recordInboundEmail } from '@/lib/inbound-email';
+import { resolvePublicMailTarget } from '@/lib/imap-target';
 
 const FOLDER = 'INBOX';
 const INITIAL_BACKFILL = 200; // most-recent N messages imported on the first sync
@@ -37,17 +38,21 @@ type ImapConnFields = {
 };
 
 // Build a configured ImapFlow client from an account's stored connection fields.
-function newImapClient(account: ImapConnFields): ImapFlow {
+async function newImapClient(account: ImapConnFields): Promise<ImapFlow> {
   const port = Number(account.imap_port ?? 993);
+  const target = await resolvePublicMailTarget(String(account.imap_host), port, 'imap');
   return new ImapFlow({
-    host: String(account.imap_host),
+    host: target.address,
     port,
     secure: imapSecure(port, account.imap_secure),
     auth: { user: String(account.imap_username), pass: String(account.imap_password) },
     logger: false,
     greetingTimeout: 15_000,
     socketTimeout: 30_000,
-    ...(account.imap_allow_invalid_cert ? { tls: { rejectUnauthorized: false } } : {}),
+    tls: {
+      ...(target.servername ? { servername: target.servername } : {}),
+      rejectUnauthorized: !account.imap_allow_invalid_cert,
+    },
   });
 }
 
@@ -63,16 +68,17 @@ type AdminClient = ReturnType<typeof createAdminClient>;
 /** Pull new INBOX mail for one account into email_messages (inbound). */
 export async function runImapSync(accountId: string, signal?: AbortSignal): Promise<void> {
   const admin = createAdminClient();
-  const { data: account } = await admin
+  const { data: account, error: accountError } = await admin
     .from('email_accounts')
     .select(
       'id, from_email, imap_host, imap_port, imap_username, imap_password, imap_secure, imap_enabled, imap_allow_invalid_cert'
     )
     .eq('id', accountId)
     .maybeSingle();
+  if (accountError) throw new Error(`Could not load IMAP account ${accountId}: ${accountError.message}`);
   if (!account?.imap_enabled || !account.imap_host || !account.imap_password) return;
 
-  const client = newImapClient(account);
+  const client = await newImapClient(account);
   await client.connect();
   try {
     const lock = await client.getMailboxLock(FOLDER);
@@ -82,12 +88,13 @@ export async function runImapSync(accountId: string, signal?: AbortSignal): Prom
       const uidValidity = Number(box.uidValidity);
       const uidNext = Number(box.uidNext ?? 1);
 
-      const { data: state } = await admin
+      const { data: state, error: stateError } = await admin
         .from('imap_folder_state')
         .select('uidvalidity, last_uid')
         .eq('account_id', accountId)
         .eq('folder', FOLDER)
         .maybeSingle();
+      if (stateError) throw new Error(`Could not load IMAP cursor: ${stateError.message}`);
 
       // First sync, or the mailbox was recreated (uidvalidity changed): import
       // only the most recent window rather than the entire history.
@@ -281,7 +288,7 @@ async function reconcileRecent(
   for await (const msg of client.fetch(`${sinceUid}:*`, { uid: true, flags: true }, { uid: true })) {
     live.set(Number(msg.uid), msg.flags instanceof Set ? msg.flags.has('\\Seen') : false);
   }
-  const { data: rows } = await admin
+  const { data: rows, error: rowsError } = await admin
     .from('email_messages')
     .select('id, imap_uid, seen')
     .eq('account_id', accountId)
@@ -289,15 +296,21 @@ async function reconcileRecent(
     .eq('imap_uidvalidity', uidValidity)
     .gte('imap_uid', sinceUid)
     .is('hidden_at', null);
+  if (rowsError) throw new Error(`Could not reconcile IMAP rows: ${rowsError.message}`);
   for (const row of rows ?? []) {
     const uid = Number(row.imap_uid);
     if (!live.has(uid)) {
-      await admin
+      const hidden = await admin
         .from('email_messages')
         .update({ hidden_at: new Date().toISOString() })
         .eq('id', row.id);
+      if (hidden.error) throw new Error(`Could not hide removed IMAP message: ${hidden.error.message}`);
     } else if (live.get(uid) !== row.seen) {
-      await admin.from('email_messages').update({ seen: live.get(uid) }).eq('id', row.id);
+      const seen = await admin
+        .from('email_messages')
+        .update({ seen: live.get(uid) })
+        .eq('id', row.id);
+      if (seen.error) throw new Error(`Could not update IMAP read state: ${seen.error.message}`);
     }
   }
 }
@@ -306,9 +319,9 @@ async function reconcileRecent(
 // then by a name heuristic, so it works across Dovecot / Gmail / etc. layouts.
 async function findFolder(client: ImapFlow, special: string, nameRe: RegExp): Promise<string | null> {
   const boxes = await client.list();
-  const bySpecial = boxes.find((b) => b.specialUse === special);
+  const bySpecial = boxes.find((b: { specialUse?: string; path: string }) => b.specialUse === special);
   if (bySpecial) return bySpecial.path;
-  const byName = boxes.find((b) => nameRe.test(b.path));
+  const byName = boxes.find((b: { path: string }) => nameRe.test(b.path));
   return byName?.path ?? null;
 }
 
@@ -325,21 +338,23 @@ export async function runImapWriteback(
   if (op === 'reconcile') return runImapReconcile(id, signal);
 
   const admin = createAdminClient();
-  const { data: msg } = await admin
+  const { data: msg, error: messageError } = await admin
     .from('email_messages')
     .select('id, account_id, from_email, to_email, subject, html, message_id, created_at')
     .eq('id', id)
     .maybeSingle();
+  if (messageError) throw new Error(`Could not load outbound message: ${messageError.message}`);
   if (!msg?.account_id) return;
 
-  const { data: account } = await admin
+  const { data: account, error: accountError } = await admin
     .from('email_accounts')
     .select('imap_host, imap_port, imap_username, imap_password, imap_secure, imap_enabled, imap_allow_invalid_cert')
     .eq('id', msg.account_id)
     .maybeSingle();
+  if (accountError) throw new Error(`Could not load IMAP account: ${accountError.message}`);
   if (!account?.imap_enabled || !account.imap_host || !account.imap_password) return;
 
-  const client = newImapClient(account);
+  const client = await newImapClient(account);
   await client.connect();
   try {
     if (signal?.aborted) return;
@@ -395,14 +410,15 @@ async function sentAlreadyHas(client: ImapFlow, sent: string, messageId: string)
  */
 export async function runImapReconcile(accountId: string, signal?: AbortSignal): Promise<void> {
   const admin = createAdminClient();
-  const { data: account } = await admin
+  const { data: account, error: accountError } = await admin
     .from('email_accounts')
     .select('imap_host, imap_port, imap_username, imap_password, imap_secure, imap_enabled, imap_allow_invalid_cert')
     .eq('id', accountId)
     .maybeSingle();
+  if (accountError) throw new Error(`Could not load IMAP account: ${accountError.message}`);
   if (!account?.imap_enabled || !account.imap_host || !account.imap_password) return;
 
-  const client = newImapClient(account);
+  const client = await newImapClient(account);
   await client.connect();
   try {
     await reconcileWriteback(client, admin, accountId, signal);
@@ -425,12 +441,13 @@ async function reconcileWriteback(
   accountId: string,
   signal?: AbortSignal
 ): Promise<void> {
-  const { data: rows } = await admin
+  const { data: rows, error: rowsError } = await admin
     .from('email_messages')
     .select('id, imap_uid, imap_folder, imap_uidvalidity, seen, hidden_at')
     .eq('account_id', accountId)
     .eq('imap_wb_dirty', true)
     .limit(MAX_WB_PER_RUN);
+  if (rowsError) throw new Error(`Could not load IMAP write-back rows: ${rowsError.message}`);
   if (!rows?.length) return;
 
   const byFolder = new Map<string, typeof rows>();
@@ -447,6 +464,7 @@ async function reconcileWriteback(
   }
 
   let trash: string | null | undefined; // resolved lazily, once
+  let failures = 0;
   for (const [folder, folderRows] of byFolder) {
     if (signal?.aborted) return;
     const lock = await client.getMailboxLock(folder);
@@ -475,6 +493,7 @@ async function reconcileWriteback(
           }
           await clearDirty(admin, r.id);
         } catch (opError: any) {
+          failures += 1;
           // The UID may already be gone (handled elsewhere): leave dirty so the
           // next reconcile retries, but surface it so it isn't silent.
           await logDebug({
@@ -488,10 +507,17 @@ async function reconcileWriteback(
       lock.release();
     }
   }
+  if (failures > 0) {
+    throw new Error(`${failures} IMAP write-back operation(s) remain pending`);
+  }
 }
 
 async function clearDirty(admin: AdminClient, id: string): Promise<void> {
-  await admin.from('email_messages').update({ imap_wb_dirty: false }).eq('id', id);
+  const { error } = await admin
+    .from('email_messages')
+    .update({ imap_wb_dirty: false })
+    .eq('id', id);
+  if (error) throw new Error(`Could not clear IMAP write-back state: ${error.message}`);
 }
 
 /** Queue appending one outbound message to Sent (deduped per message). */

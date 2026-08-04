@@ -130,6 +130,38 @@ export async function enqueueJob(
   return { queued: true, duplicate: false, id: data.id as string };
 }
 
+export type JobBatchInput = {
+  kind: JobKind;
+  payload: Record<string, unknown>;
+  dedupe_key: string;
+  max_attempts?: number;
+};
+
+/** Reserve a complete bulk fan-out in one database transaction. */
+export async function enqueueJobsBatch(jobs: JobBatchInput[]): Promise<{
+  queued: number;
+  duplicates: number;
+  retried: number;
+}> {
+  if (!jobs.length || jobs.length > 500) throw new Error('Batch must contain 1 to 500 jobs');
+  const { data, error } = await createAdminClient().rpc('enqueue_job_batch', { p_jobs: jobs });
+  if (error) {
+    await logDebug({
+      level: 'error',
+      source: 'job-queue:batch',
+      message: `Could not enqueue job batch: ${error.message}`,
+      context: { jobs: jobs.length },
+    }).catch(() => {});
+    throw new Error(`Could not enqueue job batch: ${error.message}`);
+  }
+  const result = (data ?? {}) as Record<string, unknown>;
+  return {
+    queued: Number(result.queued ?? 0),
+    duplicates: Number(result.duplicates ?? 0),
+    retried: Number(result.retried ?? 0),
+  };
+}
+
 export async function enqueueDeepSearchJob(input: {
   contactId: string;
   actorId: string;

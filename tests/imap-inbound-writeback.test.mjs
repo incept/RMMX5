@@ -13,7 +13,7 @@ test('IMAP inbound routes through recordInboundEmail with reply side effects', a
   assert.doesNotMatch(sync, /\.ilike\('email'/); // buggy _/% wildcard match is gone
 
   const rec = await read('../lib/inbound-email.ts');
-  assert.match(rec, /stopEnrollmentsFor\(contact\.id, 'reply'\)/); // stop-on-reply
+  assert.match(rec, /finalize_inbound_email_effects/); // atomic stop-on-reply
   assert.match(rec, /email_normalized/); // normalized-equality match
 });
 
@@ -24,7 +24,8 @@ test('recordInboundEmail dedups synced messages and throws on other errors', asy
   const rec = await read('../lib/inbound-email.ts');
   assert.match(rec, /imap\?: \{/); // optional IMAP metadata
   assert.match(rec, /imap_uidvalidity/);
-  assert.match(rec, /messageError\.code === '23505' && imap/); // dup UID -> no-op
+  assert.match(rec, /messageError\.code === '23505' && \(imap \|\| input\.providerMessageId\)/);
+  assert.match(rec, /existingQuery\.maybeSingle/); // duplicate still finishes pending effects
   assert.match(rec, /duplicate: true/);
   assert.match(rec, /throw messageError/); // any other error propagates
 });

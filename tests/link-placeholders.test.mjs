@@ -34,8 +34,10 @@ test('loadLinkPlaceholders maps positions, keeps live-only {{links}}, http(s)-on
 
 test('every send path resolves link placeholders per contact', async () => {
   const route = await read('../app/api/email/send/route.ts');
-  assert.match(route, /import \{ withLinkPlaceholders \}/);
-  // both the list-send loop and the single-send branch render against the merged contact
+  assert.match(route, /loadLinkPlaceholdersForContacts/);
+  // Bulk paths load link rows once; the single-send branch retains the helper.
+  assert.match(route, /withLinkPlaceholders\(admin, contact, body\.subject, body\.html\)/);
+  assert.match(route, /enqueueJobsBatch\(jobs\)/);
   assert.match(route, /withLinkPlaceholders\(admin, contact, body\.subject, body\.html\)/);
   assert.match(route, /renderTemplate\(body\.subject, rendered\)/);
 

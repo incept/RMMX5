@@ -45,6 +45,7 @@ export default function InboxPage() {
   const [dark, setDark] = useState(false);
   const [imagesLoaded, setImagesLoaded] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
+  const canAdmin = viewer?.role === 'admin' || viewer?.role === 'super_admin';
 
   const load = useCallback(async () => {
     let query = supabase
@@ -324,19 +325,23 @@ export default function InboxPage() {
           >
             ✎
           </button>
-          <button
-            className="btn py-1"
-            title="Email templates"
-            onClick={() => setShowTemplates(true)}
-          >
-            🗎
-          </button>
+          {canAdmin && (
+            <button
+              className="btn py-1"
+              title="Email templates"
+              onClick={() => setShowTemplates(true)}
+            >
+              🗎
+            </button>
+          )}
           <button className="btn py-1" title="Refresh" disabled={refreshing} onClick={refreshInbox}>
             {refreshing ? '…' : '⟳'}
           </button>
-          <button className="btn py-1" title="SMTP accounts" onClick={() => setShowAccounts(true)}>
-            ⚙
-          </button>
+          {canAdmin && (
+            <button className="btn py-1" title="SMTP accounts" onClick={() => setShowAccounts(true)}>
+              ⚙
+            </button>
+          )}
         </div>
         <div className="border-b border-gray-200 px-3 py-2">
           <input
@@ -548,7 +553,7 @@ export default function InboxPage() {
       )}
 
       {/* Accounts modal */}
-      {showAccounts && (
+      {showAccounts && canAdmin && (
         <div
           className="fixed inset-0 z-40 flex items-center justify-center bg-black/20"
           onClick={() => {
@@ -783,7 +788,7 @@ export default function InboxPage() {
       {/* Email templates: create / edit / delete right from the inbox. The same
           manager the Email Marketing hub uses; changes refresh the composer's
           "Insert template…" picker. */}
-      {showTemplates && (
+      {showTemplates && canAdmin && (
         <div
           className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/20 p-6"
           onClick={() => setShowTemplates(false)}

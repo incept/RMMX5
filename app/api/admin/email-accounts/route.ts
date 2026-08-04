@@ -4,18 +4,23 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { readJsonBody } from '@/lib/request-limits';
 import { apiFailure } from '@/lib/api-errors';
 import { logDebug } from '@/lib/debug-log';
-import { validateImapTarget } from '@/lib/imap-target';
+import { sanitizeEmailHtml } from '@/lib/html-sanitize';
+import {
+  resolvePublicMailTarget,
+  validateImapTarget,
+  validateSmtpTarget,
+} from '@/lib/imap-target';
 
-function accountValues(body: any, requirePassword: boolean) {
+async function accountValues(body: any, requirePassword: boolean) {
   const password = typeof body.smtp_password === 'string' ? body.smtp_password : '';
   const port = Number(body.smtp_port ?? 587);
   if (!body.name || !body.from_email || !body.smtp_host || !body.smtp_username) {
     throw new Error('Name, from email, SMTP host and username are required');
   }
   if (requirePassword && !password) throw new Error('SMTP password is required');
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error('SMTP port must be between 1 and 65535');
-  }
+  const smtpTargetError = validateSmtpTarget(String(body.smtp_host ?? ''), port);
+  if (smtpTargetError) throw new Error(smtpTargetError);
+  await resolvePublicMailTarget(String(body.smtp_host), port, 'smtp');
   const values: Record<string, unknown> = {
     name: String(body.name).trim().slice(0, 200),
     from_name: String(body.from_name ?? '').trim().slice(0, 200),
@@ -24,7 +29,7 @@ function accountValues(body: any, requirePassword: boolean) {
     smtp_port: port,
     smtp_username: String(body.smtp_username).trim().slice(0, 320),
     smtp_secure: body.smtp_secure === true,
-    signature_html: String(body.signature_html ?? '').slice(0, 100_000),
+    signature_html: sanitizeEmailHtml(String(body.signature_html ?? '').slice(0, 100_000)),
     is_default: body.is_default === true,
   };
   if (password) values.smtp_password = password.slice(0, 4096);
@@ -43,6 +48,7 @@ function accountValues(body: any, requirePassword: boolean) {
   if (imapEnabled) {
     const targetError = validateImapTarget(imapHost!, imapPort); // SSRF guard (#5)
     if (targetError) throw new Error(targetError);
+    await resolvePublicMailTarget(imapHost!, imapPort, 'imap');
   }
   if (requirePassword && imapEnabled && !imapPassword) {
     throw new Error('IMAP password is required to enable receiving');
@@ -64,7 +70,7 @@ export async function POST(request: Request) {
     const body = await readJsonBody(request, 128 * 1024);
     const { data, error } = await createAdminClient()
       .from('email_accounts')
-      .insert(accountValues(body, true))
+      .insert(await accountValues(body, true))
       .select('id')
       .single();
     if (error) throw error;

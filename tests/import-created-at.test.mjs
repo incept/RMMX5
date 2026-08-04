@@ -15,6 +15,10 @@ test('parseImportDate handles common sheet formats and rejects junk', () => {
   assert.equal(parseImportDate('  2024-11-28  '), '2024-11-28T00:00:00.000Z');
   // US locale (a Monday export) parses to a real 2024 date.
   assert.ok(parseImportDate('11/28/2024')?.startsWith('2024-'));
+  assert.equal(parseImportDate('03/04/2024'), null); // locale-ambiguous
+  assert.equal(parseImportDate('31/12/2024'), null); // never guess DD/MM
+  assert.equal(parseImportDate('02/31/2024'), null); // reject Date overflow
+  assert.equal(parseImportDate('2024-02-31'), null);
   // Out-of-window mis-parses are dropped so the row keeps a sane created_at.
   assert.equal(parseImportDate('3000-01-01'), null);
   assert.equal(parseImportDate('1850-01-01'), null);

@@ -6,6 +6,9 @@ import { logActivity } from '@/lib/activity';
 import { signTrackingOpen, signTrackingUrl } from '@/lib/signing';
 import { appBaseUrl } from '@/lib/app-url';
 import { errorMessage, logDebug } from '@/lib/debug-log';
+import { sanitizeEmailHtml } from '@/lib/html-sanitize';
+import { markEmailAssetsReferenced } from '@/lib/email-assets';
+import { resolvePublicMailTarget } from '@/lib/imap-target';
 
 /**
  * Central outbound email path. Every CRM email (compose, sequence step,
@@ -29,6 +32,11 @@ export async function sendCrmEmail(opts: {
   appendToSent?: boolean; // interactive 1:1 sends: append a copy to the IMAP Sent folder
 }): Promise<{ ok: boolean; messageRowId: string; error?: string; duplicate?: boolean }> {
   const supabase = createAdminClient();
+  // Stored templates and sequence steps can be changed outside the rich-editor
+  // UI. Sanitize at the final delivery boundary so every transport gets the
+  // same safe body regardless of how it was authored.
+  const cleanHtml = sanitizeEmailHtml(String(opts.html ?? '').slice(0, 750_000));
+  await markEmailAssetsReferenced(supabase, cleanHtml);
 
   let account: any = null;
   if (opts.accountId) {
@@ -74,7 +82,7 @@ export async function sendCrmEmail(opts: {
       from_email: fromEmail,
       to_email: opts.to,
       subject: opts.subject,
-      html: opts.html,
+      html: cleanHtml,
       sequence_id: opts.sequenceId ?? null,
       sequence_step_id: opts.sequenceStepId ?? null,
       status: 'queued',
@@ -113,7 +121,7 @@ export async function sendCrmEmail(opts: {
   const appUrl = appBaseUrl();
   const signature =
     opts.appendSignature !== false && account?.signature_html
-      ? `<br/><br/>${account.signature_html}`
+      ? `<br/><br/>${sanitizeEmailHtml(String(account.signature_html).slice(0, 100_000))}`
       : '';
 
   // The two transports are instrumented differently, so they get two bodies:
@@ -130,24 +138,30 @@ export async function sendCrmEmail(opts: {
   //    carry NEITHER our pixel NOR our rewritten links, or every open and click
   //    would be counted twice (once by us, once by Emailit).
   const smtpHtml =
-    opts.html.replace(
+    cleanHtml.replace(
       /href="(https?:\/\/[^"]+)"/gi,
       (_m, url) =>
         `href="${appUrl}/api/track/click?m=${row.id}&u=${encodeURIComponent(url)}&s=${signTrackingUrl(row.id, url)}"`
     ) +
     signature +
     `<img src="${appUrl}/api/track/open?m=${row.id}&s=${signTrackingOpen(row.id)}" width="1" height="1" alt="" style="display:none"/>`;
-  const emailitHtml = opts.html + signature;
+  const emailitHtml = cleanHtml + signature;
 
   let ok = false;
   let error: string | undefined;
   let messageId: string | undefined;
+  let providerMessageId: string | undefined;
   let provider: 'smtp' | 'emailit' | null = null;
 
   // Try the account's SMTP first, when one is configured.
   if (account?.smtp_host) {
     provider = 'smtp';
     try {
+      const target = await resolvePublicMailTarget(
+        String(account.smtp_host),
+        Number(account.smtp_port),
+        'smtp'
+      );
       // TLS mode follows the port, so an implicit-TLS ("secure on connect")
       // handshake is never attempted against a STARTTLS port — the classic
       // `tls_validate_record_header: wrong version number` failure. 465 is
@@ -160,11 +174,12 @@ export async function sendCrmEmail(opts: {
             ? false
             : !!account.smtp_secure;
       const transport = nodemailer.createTransport({
-        host: account.smtp_host,
+        host: target.address,
         port: account.smtp_port,
         secure: smtpSecure,
         requireTLS: !smtpSecure, // STARTTLS ports must still upgrade, never send cleartext
         auth: { user: account.smtp_username, pass: account.smtp_password },
+        tls: target.servername ? { servername: target.servername } : undefined,
         connectionTimeout: 15_000,
         greetingTimeout: 15_000,
         socketTimeout: 30_000,
@@ -212,6 +227,7 @@ export async function sendCrmEmail(opts: {
     });
     provider = 'emailit';
     ok = r.ok;
+    providerMessageId = r.providerMessageId;
     // If SMTP also failed, surface both reasons.
     error = r.ok ? undefined : [smtpError, r.error].filter(Boolean).join(' → ');
   }
@@ -222,6 +238,7 @@ export async function sendCrmEmail(opts: {
       status: ok ? 'sent' : 'failed',
       error: error ?? null,
       message_id: messageId ?? null,
+      provider_message_id: providerMessageId ?? null,
       sent_at: ok ? new Date().toISOString() : null,
     })
     .eq('id', row.id);

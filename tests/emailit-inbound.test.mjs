@@ -36,12 +36,12 @@ test('inbound body fetch uses the body-only v2 endpoint, not the attachment-bear
   assert.match(lib, /data\?\.text/);
 });
 
-test('both inbound paths share one recorder that matches the sender and stops reply sequences', async () => {
+test('both inbound paths share one recorder with transactional reply finalization', async () => {
   const lib = await readFile(new URL('../lib/inbound-email.ts', import.meta.url), 'utf8');
   assert.match(lib, /export async function recordInboundEmail/);
   assert.match(lib, /direction: 'inbound'/);
   assert.match(lib, /email_normalized/);
-  assert.match(lib, /stopEnrollmentsFor\(contact\.id, 'reply'\)/);
+  assert.match(lib, /finalize_inbound_email_effects/);
 
   // The generic forwarder webhook now delegates to the same recorder.
   const generic = await readFile(

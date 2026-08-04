@@ -1,6 +1,7 @@
 import { createAdminClient } from '@/lib/supabase/server';
 import { getSetting } from '@/lib/settings';
 import { readResponseText } from '@/lib/request-limits';
+import { errorMessage, logDebug } from '@/lib/debug-log';
 
 /**
  * Emailit caps requests at 2 per second (429 rate_limit_exceeded above that). A
@@ -18,6 +19,7 @@ import { readResponseText } from '@/lib/request-limits';
 const EMAILIT_MIN_INTERVAL_MS = 2000;
 let emailitGate: Promise<unknown> = Promise.resolve();
 let lastEmailitSendAt = 0;
+let lastSharedGateWarningAt = 0;
 
 async function reserveEmailitSlotMs(): Promise<number> {
   try {
@@ -27,7 +29,18 @@ async function reserveEmailitSlotMs(): Promise<number> {
     });
     if (error || !data) throw new Error(error?.message ?? 'no send slot returned');
     return new Date(data as string).getTime() - Date.now();
-  } catch {
+  } catch (error) {
+    // The local fallback preserves delivery, but losing the shared gate means
+    // multiple processes can exceed the provider limit. Surface that degraded
+    // mode once per five minutes instead of silently masking a missing RPC.
+    if (Date.now() - lastSharedGateWarningAt > 5 * 60_000) {
+      lastSharedGateWarningAt = Date.now();
+      await logDebug({
+        level: 'warn',
+        source: 'emailit:rate-gate',
+        message: `Shared Emailit rate gate unavailable; using process-local spacing: ${errorMessage(error)}`,
+      }).catch(() => {});
+    }
     // Local fallback: space sends within this process if the shared gate is down.
     return lastEmailitSendAt + EMAILIT_MIN_INTERVAL_MS - Date.now();
   }
@@ -71,7 +84,7 @@ export async function sendViaEmailit(opts: {
   // (see app/api/webhooks/emailit). Omitted for system notifications, which have
   // no email_messages row and are not engagement-tracked.
   messageRowId?: string;
-}): Promise<{ ok: boolean; error?: string }> {
+}): Promise<{ ok: boolean; error?: string; providerMessageId?: string }> {
   const cfg = await getSetting<{
     api_key?: string;
     from_address?: string;
@@ -132,11 +145,23 @@ export async function sendViaEmailit(opts: {
     res = await send();
   }
 
+  const detail = await readResponseText(res, 64 * 1024);
   if (!res.ok) {
-    const detail = await readResponseText(res, 64 * 1024);
     return { ok: false, error: `Emailit request failed: ${res.status} ${detail.slice(0, 500)}` };
   }
-  return { ok: true };
+  let providerMessageId: string | undefined;
+  try {
+    const parsed = JSON.parse(detail);
+    const id = parsed?.id ?? parsed?.data?.id;
+    if (typeof id === 'string' && /^em_[A-Za-z0-9_-]+$/.test(id)) {
+      providerMessageId = id.slice(0, 256);
+    }
+  } catch {
+    // Delivery was accepted. The exact provider id is an attribution aid; meta
+    // still carries message_row_id, so a malformed success body is not a reason
+    // to retry and risk a duplicate.
+  }
+  return { ok: true, providerMessageId };
 }
 
 export type EmailitBody = { html: string; text: string };

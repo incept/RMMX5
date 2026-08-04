@@ -1,7 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { createClient } from '@/lib/supabase/client';
+import { useState } from 'react';
 import RichTextEditor, { type LinkPlaceholder } from '@/components/RichTextEditor';
 import { uploadEmailImage } from '@/lib/email-image-upload';
 import { sanitizeEmailHtml } from '@/lib/html-sanitize';
@@ -31,7 +30,6 @@ export default function TemplateEditorModal({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const supabase = useMemo(() => createClient(), []);
   const [form, setForm] = useState<TemplateDraft>(template);
   // Existing table / scaffolded HTML would be normalized by the rich editor's
   // contentEditable — open those in source mode instead.
@@ -46,11 +44,14 @@ export default function TemplateEditorModal({
       subject: form.subject ?? '',
       html: sanitizeEmailHtml(form.html ?? ''),
     };
-    const { error } = form.id
-      ? await supabase.from('email_templates').update(row).eq('id', form.id)
-      : await supabase.from('email_templates').insert(row);
+    const res = await fetch(form.id ? `/api/email/templates/${form.id}` : '/api/email/templates', {
+      method: form.id ? 'PATCH' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(row),
+    });
+    const response = await res.json().catch(() => ({}));
     setBusy(false);
-    if (error) return alert(error.message);
+    if (!res.ok) return alert(response.error || 'Could not save template');
     onSaved();
     onClose();
   }
@@ -59,9 +60,10 @@ export default function TemplateEditorModal({
     if (!form.id) return;
     if (!confirm('Delete this template?')) return;
     setBusy(true);
-    const { error } = await supabase.from('email_templates').delete().eq('id', form.id);
+    const res = await fetch(`/api/email/templates/${form.id}`, { method: 'DELETE' });
+    const response = await res.json().catch(() => ({}));
     setBusy(false);
-    if (error) return alert(error.message);
+    if (!res.ok) return alert(response.error || 'Could not delete template');
     onSaved();
     onClose();
   }
