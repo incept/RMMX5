@@ -21,9 +21,12 @@ export default function ImportPage() {
   const [busy, setBusy] = useState(false);
   const [requestKey, setRequestKey] = useState('');
   const [customFields, setCustomFields] = useState<{ field_key: string; label: string }[]>([]);
+  const [statuses, setStatuses] = useState<{ id: string; name: string }[]>([]);
+  const [defaultStatusId, setDefaultStatusId] = useState('');
 
   // Admin-defined custom fields become extra mapping targets, so a sheet column
   // can flow into the same per-contact custom values the contact panel shows.
+  // Statuses populate the "status for imported contacts" picker.
   useEffect(() => {
     const supabase = createClient();
     supabase
@@ -31,6 +34,11 @@ export default function ImportPage() {
       .select('field_key, label')
       .order('sort_order')
       .then(({ data }) => setCustomFields(data ?? []));
+    supabase
+      .from('statuses')
+      .select('id, name')
+      .order('sort_order')
+      .then(({ data }) => setStatuses(data ?? []));
   }, []);
 
   const customTargets = useMemo(() => customFieldTargets(customFields), [customFields]);
@@ -71,6 +79,7 @@ export default function ImportPage() {
         filename,
         source: /\.csv$/i.test(filename) ? 'csv' : 'monday',
         mapping,
+        defaultStatusId: defaultStatusId || null,
         rows,
       }),
     });
@@ -108,6 +117,26 @@ export default function ImportPage() {
           <h2 className="mt-6 mb-2 text-sm font-semibold">
             Map columns <span className="font-normal text-gray-400">({sheet.rows.length} rows found)</span>
           </h2>
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-sm text-gray-600">
+            <span>Status for imported contacts:</span>
+            <div className="w-56">
+              <select
+                className="input"
+                value={defaultStatusId}
+                onChange={(e) => setDefaultStatusId(e.target.value)}
+              >
+                <option value="">Default (New)</option>
+                {statuses.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <span className="text-xs text-gray-400">
+              Applied to every row without a mapped status column.
+            </span>
+          </div>
           <div className="card p-0">
             <table className="w-full">
               <thead>

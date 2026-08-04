@@ -259,7 +259,8 @@ export default function InboxPage() {
   }
 
   async function deleteMessage(m: any) {
-    if (!confirm('Delete this message? A synced message also moves to Trash on the mailbox.')) return;
+    // No confirm prompt: deleting a message is recoverable — it soft-hides here
+    // and a synced message moves to Trash on the mailbox, not a hard delete.
     setMessages((list) => list.filter((x) => x.id !== m.id));
     if (selected?.id === m.id) setSelected(null);
     await fetch(`/api/inbox/messages/${encodeURIComponent(m.id)}`, { method: 'DELETE' }).catch(() => {});
