@@ -3,23 +3,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import RichTextEditor from '@/components/RichTextEditor';
+import TemplateManager from '@/components/TemplateManager';
 import { uploadEmailImage } from '@/lib/email-image-upload';
 import { sanitizeEmailHtml } from '@/lib/html-sanitize';
+import { LINK_PLACEHOLDERS } from '@/lib/template-placeholders';
 
 const TABS = ['Sequences', 'Templates', 'Lists', 'Analytics'] as const;
 type Tab = (typeof TABS)[number];
 
 const STOP_TRIGGERS = ['open', 'click', 'reply', 'bounce', 'status_change'] as const;
-
-// Per-contact removal-link placeholders offered in template/sequence editors;
-// they resolve to each recipient's link URLs at send time.
-const LINK_PLACEHOLDERS = [
-  ...Array.from({ length: 14 }, (_, i) => ({
-    label: `Removal link ${i + 1}`,
-    token: `{{link${i + 1}}}`,
-  })),
-  { label: 'All live links', token: '{{links}}', asLink: false },
-];
 
 // Does a step's rich body carry anything worth sending? Mirrors the editor's own
 // empty check so blank steps are dropped on save.
@@ -42,8 +34,6 @@ export default function MarketingPage() {
   const [analytics, setAnalytics] = useState<any[]>([]);
   const [analyticsSort, setAnalyticsSort] = useState<'open_count' | 'click_count' | 'created_at'>('open_count');
 
-  const [templateForm, setTemplateForm] = useState<any>(null);
-  const [templateSource, setTemplateSource] = useState(false);
   const [listForm, setListForm] = useState<any>(null);
   const [sequenceForm, setSequenceForm] = useState<any>(null);
   const [blast, setBlast] = useState<any>(null);
@@ -96,18 +86,8 @@ export default function MarketingPage() {
       .then(({ data }) => setAnalytics(data ?? []));
   }, [tab, analyticsSort, supabase]);
 
-  // ---- Template CRUD -------------------------------------------------------
-  async function saveTemplate() {
-    const f = templateForm;
-    if (!f.name) return alert('Name required');
-    const row = { name: f.name, subject: f.subject ?? '', html: sanitizeEmailHtml(f.html ?? '') };
-    const { error } = f.id
-      ? await supabase.from('email_templates').update(row).eq('id', f.id)
-      : await supabase.from('email_templates').insert(row);
-    if (error) return alert(error.message);
-    setTemplateForm(null);
-    load();
-  }
+  // Template create / edit / delete lives in the shared TemplateManager +
+  // TemplateEditorModal (also used by the inbox), so the hub just renders it.
 
   // ---- List CRUD -----------------------------------------------------------
   async function saveList() {
@@ -596,117 +576,7 @@ export default function MarketingPage() {
       )}
 
       {/* ---------------- Templates ---------------- */}
-      {tab === 'Templates' && (
-        <div>
-          <button
-            className="btn btn-primary mb-4"
-            onClick={() => {
-              setTemplateSource(false);
-              setTemplateForm({ name: '', subject: '', html: '' });
-            }}
-          >
-            + New template
-          </button>
-          <div className="grid gap-3 lg:grid-cols-3">
-            {templates.map((t) => (
-              <div key={t.id} className="card">
-                <div className="font-semibold">{t.name}</div>
-                <div className="mt-1 truncate text-xs text-gray-500">{t.subject}</div>
-                <div className="mt-2 line-clamp-3 text-xs text-gray-400">
-                  {t.html.replace(/<[^>]+>/g, ' ')}
-                </div>
-                <button
-                  className="btn mt-3 py-1"
-                  onClick={() => {
-                    // Existing table/scaffolded HTML would be normalized by the
-                    // rich editor's contentEditable — open those in source mode.
-                    setTemplateSource(/<(table|html|style)\b|<!doctype/i.test(t.html || ''));
-                    setTemplateForm(t);
-                  }}
-                >
-                  Edit
-                </button>
-              </div>
-            ))}
-          </div>
-
-          {templateForm && (
-            <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/20" onClick={() => setTemplateForm(null)}>
-              <div className="w-full max-w-2xl rounded-xl bg-white p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-                <h2 className="mb-3 text-sm font-semibold">
-                  {templateForm.id ? 'Edit template' : 'New template'}
-                </h2>
-                <div className="space-y-2">
-                  <input
-                    className="input"
-                    placeholder="Template name"
-                    value={templateForm.name}
-                    onChange={(e) => setTemplateForm((f: any) => ({ ...f, name: e.target.value }))}
-                  />
-                  <input
-                    className="input"
-                    placeholder="Subject — {{name}}, {{city}} placeholders work"
-                    value={templateForm.subject}
-                    onChange={(e) => setTemplateForm((f: any) => ({ ...f, subject: e.target.value }))}
-                  />
-                  <div className="flex items-center justify-between">
-                    <span className="label mb-0">Body — {`{{name}}, {{city}}, {{state}}`} and custom keys</span>
-                    <button
-                      type="button"
-                      className="text-xs font-medium text-brand-700 hover:underline"
-                      onClick={() => setTemplateSource((s) => !s)}
-                    >
-                      {templateSource ? 'Rich editor' : 'HTML source'}
-                    </button>
-                  </div>
-                  {templateSource ? (
-                    <textarea
-                      className="input min-h-48 font-mono text-xs"
-                      placeholder="HTML body… use {{name}}, {{city}}, {{state}} and custom-field keys"
-                      value={templateForm.html}
-                      onChange={(e) => setTemplateForm((f: any) => ({ ...f, html: e.target.value }))}
-                    />
-                  ) : (
-                    <RichTextEditor
-                      value={templateForm.html ?? ''}
-                      onChange={(html) => setTemplateForm((f: any) => ({ ...f, html }))}
-                      onImageUpload={uploadEmailImage}
-                      linkPlaceholders={LINK_PLACEHOLDERS}
-                      minHeight={220}
-                      placeholder="Compose your template… placeholders like {{name}} are filled per contact when sent"
-                    />
-                  )}
-                  <div className="flex justify-between">
-                    {templateForm.id ? (
-                      <button
-                        className="btn text-red-600"
-                        onClick={async () => {
-                          if (!confirm('Delete this template?')) return;
-                          await supabase.from('email_templates').delete().eq('id', templateForm.id);
-                          setTemplateForm(null);
-                          load();
-                        }}
-                      >
-                        Delete
-                      </button>
-                    ) : (
-                      <span />
-                    )}
-                    <div className="flex gap-2">
-                      <button className="btn" onClick={() => setTemplateForm(null)}>
-                        Cancel
-                      </button>
-                      <button className="btn btn-primary" onClick={saveTemplate}>
-                        Save
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      {tab === 'Templates' && <TemplateManager templates={templates} onChanged={load} />}
 
       {/* ---------------- Lists ---------------- */}
       {tab === 'Lists' && (
