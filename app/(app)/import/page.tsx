@@ -1,9 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { createClient } from '@/lib/supabase/client';
 import {
   parseImportFile,
   suggestMapping,
+  customFieldTargets,
   IMPORT_TARGETS,
   MAX_IMPORT_FILE_BYTES,
   type ParsedSheet,
@@ -18,6 +20,20 @@ export default function ImportPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [requestKey, setRequestKey] = useState('');
+  const [customFields, setCustomFields] = useState<{ field_key: string; label: string }[]>([]);
+
+  // Admin-defined custom fields become extra mapping targets, so a sheet column
+  // can flow into the same per-contact custom values the contact panel shows.
+  useEffect(() => {
+    const supabase = createClient();
+    supabase
+      .from('custom_fields')
+      .select('field_key, label')
+      .order('sort_order')
+      .then(({ data }) => setCustomFields(data ?? []));
+  }, []);
+
+  const customTargets = useMemo(() => customFieldTargets(customFields), [customFields]);
 
   async function handleFile(file: File) {
     setError(null);
@@ -28,7 +44,7 @@ export default function ImportPage() {
       setFilename(file.name);
       setRequestKey(crypto.randomUUID());
       setSheet(parsed);
-      setMapping(suggestMapping(parsed.headers));
+      setMapping(suggestMapping(parsed.headers, customFields));
     } catch (e: any) {
       setError(e.message);
     }
@@ -116,11 +132,21 @@ export default function ImportPage() {
                           setMapping((m) => ({ ...m, [header]: e.target.value }))
                         }
                       >
-                        {IMPORT_TARGETS.map((t) => (
-                          <option key={t.key || 'skip'} value={t.key}>
+                        {IMPORT_TARGETS.filter((t) => t.key).map((t) => (
+                          <option key={t.key} value={t.key}>
                             {t.label}
                           </option>
                         ))}
+                        {customTargets.length > 0 && (
+                          <optgroup label="Custom fields">
+                            {customTargets.map((t) => (
+                              <option key={t.key} value={t.key}>
+                                {t.label}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                        <option value="">— skip —</option>
                       </select>
                     </td>
                   </tr>
