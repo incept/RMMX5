@@ -2105,7 +2105,7 @@ test('the county box accepts a comma-separated list', async () => {
   assert.match(panel, /countyValue\s*\n?\s*\.split\(\/\[,\\n\]\//);
 });
 
-test('the deep-search sites admin edits coverage, never the URL templates', async () => {
+test('the deep-search sites admin is a full editor over the server boundary', async () => {
   const page = await readFile(
     new URL('../app/(app)/admin/deep-search-sites/page.tsx', import.meta.url),
     'utf8'
@@ -2122,9 +2122,11 @@ test('the deep-search sites admin edits coverage, never the URL templates', asyn
   // It writes the scope columns the engine gates on.
   assert.match(page, /scope_state:/);
   assert.match(page, /scope_county:/);
-  // The delicate templates stay in migrations — a typo must not be a click away.
-  assert.doesNotMatch(page, /search_template/);
-  assert.doesNotMatch(page, /date_url_template/);
+  // Templates are now editable (a site can't be added without search_template),
+  // but behind a warning about how delicate they are.
+  assert.match(page, /search_template/);
+  assert.match(page, /date_url_template/);
+  assert.match(page, /URL templates are delicate/);
 });
 
 test('a reverse-lookup name is marked, and the mark clears on a manual rename', async () => {
