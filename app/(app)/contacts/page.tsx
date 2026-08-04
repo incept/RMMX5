@@ -93,7 +93,10 @@ const DEFAULT_ORDER: ColKey[] = [
 // state beside the name; turn it on for a sortable, reorderable column of its own.
 const DEFAULT_HIDDEN: ColKey[] = ['owner', 'location'];
 
-const PAGE_SIZE = 50;
+// The grid RPC (contacts_grid_page) clamps p_page_size to 200, so these are the
+// selectable page sizes; 50 stays the default.
+const PAGE_SIZE_OPTIONS = [50, 100, 200] as const;
+const DEFAULT_PAGE_SIZE = 50;
 const DEEP_SEARCH_POLL_INTERVAL_MS = 30_000;
 const DEEP_SEARCH_POLL_WINDOW_MS = 20 * 60_000;
 // v2: the shape changed from a visibility map to { order, hidden } when columns
@@ -143,6 +146,10 @@ export default function ContactsPage() {
   const [colMenu, setColMenu] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  // Email lists + sequences for the bulk "add to list / start sequence" actions.
+  const [lists, setLists] = useState<{ id: string; name: string }[]>([]);
+  const [sequences, setSequences] = useState<{ id: string; name: string }[]>([]);
   const [editEmailId, setEditEmailId] = useState<string | null>(null);
   const [emailDraft, setEmailDraft] = useState('');
   const [toast, setToast] = useState('');
@@ -253,7 +260,7 @@ export default function ContactsPage() {
           p_sort: sortKey,
           p_ascending: sortAsc,
           p_page: page,
-          p_page_size: PAGE_SIZE,
+          p_page_size: pageSize,
         }),
         supabase.rpc('contact_view_counts'),
       ]);
@@ -276,7 +283,7 @@ export default function ContactsPage() {
     } finally {
       setLoading(false);
     }
-  }, [supabase, search, view, statusFilter, sortKey, sortAsc, page]);
+  }, [supabase, search, view, statusFilter, sortKey, sortAsc, page, pageSize]);
 
   useEffect(() => {
     const t = setTimeout(load, search ? 250 : 0); // debounce typing
@@ -300,6 +307,19 @@ export default function ContactsPage() {
       .select('id, full_name, email')
       .order('full_name')
       .then(({ data }) => setProfiles(data ?? []));
+    // Email lists + sequences power the bulk "add to list / start sequence"
+    // actions. Non-admins get nothing back (RLS), and those controls are
+    // admin-gated anyway, so the empty result simply hides them.
+    supabase
+      .from('email_lists')
+      .select('id, name')
+      .order('name')
+      .then(({ data }) => setLists(data ?? []));
+    supabase
+      .from('email_sequences')
+      .select('id, name')
+      .order('name')
+      .then(({ data }) => setSequences(data ?? []));
   }, [supabase]);
 
   const ownerName = useCallback(
@@ -313,10 +333,10 @@ export default function ContactsPage() {
 
   /* ── views / filters / sort / pages ── */
   const sorted = contacts;
-  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, pageCount - 1);
   const pageRows = sorted;
-  useEffect(() => setPage(0), [view, statusFilter, search, sortKey, sortAsc]);
+  useEffect(() => setPage(0), [view, statusFilter, search, sortKey, sortAsc, pageSize]);
 
   const filtersDirty = view !== 'all' || statusFilter !== '' || !!search.trim();
   function clearFilters() {
@@ -367,6 +387,52 @@ export default function ContactsPage() {
     setSelected(new Set());
     flash(ok === ids.length ? doneMsg : `${doneMsg} (${ok}/${ids.length} succeeded)`);
     await load();
+  }
+
+  /** Add every selected contact to an email list (they can then be blasted or
+   *  run through a sequence). Re-adding an existing member is a no-op. */
+  async function bulkAddToList(listId: string) {
+    if (bulkBusy) return;
+    const ids = [...selected];
+    setBulkBusy(true);
+    const res = await fetch(`/api/email/lists/${listId}/members`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contactIds: ids }),
+    });
+    const data = await res.json().catch(() => ({}));
+    setBulkBusy(false);
+    if (res.ok) {
+      const name = lists.find((l) => l.id === listId)?.name ?? 'list';
+      flash(
+        `Added ${data.added} to "${name}"` +
+          (data.skipped ? ` (${data.skipped} already there)` : '')
+      );
+      setSelected(new Set());
+    } else {
+      flash(data.error ?? 'Could not add to list');
+    }
+  }
+
+  /** Enroll every selected contact into a sequence (schedules its first step). */
+  async function bulkEnroll(sequenceId: string) {
+    if (bulkBusy) return;
+    const ids = [...selected];
+    setBulkBusy(true);
+    const res = await fetch(`/api/email/sequences/${sequenceId}/enroll`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contactIds: ids }),
+    });
+    const data = await res.json().catch(() => ({}));
+    setBulkBusy(false);
+    if (res.ok) {
+      const name = sequences.find((s) => s.id === sequenceId)?.name ?? 'sequence';
+      flash(`Enrolled ${data.enrolled} in "${name}"`);
+      setSelected(new Set());
+    } else {
+      flash(data.error ?? 'Could not enroll');
+    }
   }
 
   /**
@@ -1236,14 +1302,30 @@ export default function ContactsPage() {
 
         {/* footer */}
         <div className="flex h-9 flex-none items-center justify-between border-t border-gray-200 px-6 text-[11px] font-light text-gray-400">
-          <span className="tabular-nums">
-            {total === 0
-              ? 'No contacts'
-              : `Showing ${safePage * PAGE_SIZE + 1}–${Math.min(
-                  (safePage + 1) * PAGE_SIZE,
-                  total
-                )} of ${total}`}
-          </span>
+          <div className="flex items-center gap-3">
+            <span className="tabular-nums">
+              {total === 0
+                ? 'No contacts'
+                : `Showing ${safePage * pageSize + 1}–${Math.min(
+                    (safePage + 1) * pageSize,
+                    total
+                  )} of ${total}`}
+            </span>
+            <label className="flex items-center gap-1">
+              <span className="text-gray-400">Rows</span>
+              <select
+                className="h-6 rounded-md border border-gray-200 bg-white tabular-nums"
+                value={pageSize}
+                onChange={(e) => setPageSize(Number(e.target.value))}
+              >
+                {PAGE_SIZE_OPTIONS.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
           <div className="flex items-center gap-4">
             <button
               className="text-gray-500 hover:text-gray-900 disabled:cursor-default disabled:text-gray-300"
@@ -1317,6 +1399,48 @@ export default function ContactsPage() {
               ))}
             </select>
           </label>
+          {isAdmin && lists.length > 0 && (
+            <label className="flex items-center gap-1.5 text-xs text-gray-600">
+              Add to list
+              <select
+                className="h-6 rounded-md border border-gray-200 bg-white text-xs"
+                value=""
+                disabled={bulkBusy}
+                onChange={(e) => {
+                  if (e.target.value) bulkAddToList(e.target.value);
+                  e.currentTarget.value = '';
+                }}
+              >
+                <option value="">—</option>
+                {lists.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {isAdmin && sequences.length > 0 && (
+            <label className="flex items-center gap-1.5 text-xs text-gray-600">
+              Sequence
+              <select
+                className="h-6 rounded-md border border-gray-200 bg-white text-xs"
+                value=""
+                disabled={bulkBusy}
+                onChange={(e) => {
+                  if (e.target.value) bulkEnroll(e.target.value);
+                  e.currentTarget.value = '';
+                }}
+              >
+                <option value="">—</option>
+                {sequences.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {isAdmin && (
             <>
               <span className="h-3.5 w-px bg-gray-200" />
