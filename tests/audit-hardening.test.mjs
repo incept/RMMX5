@@ -12,7 +12,7 @@ test('credential-bearing endpoints require super-admin authority and a fresh sec
   assert.match(settings, /must be re-entered when the endpoint changes/);
   assert.match(settings, /await assertPublicHttpsUrl/);
   assert.match(settings, /apiFailure\('api:admin\/settings', error, \{ context: \{ key: body\.key \} \}\)/);
-  assert.match(browser, /await assertPublicHttpsUrl\(cfg\.remote_url\)/);
+  assert.match(browser, /await assertPublicHttpsUrl\(classified\.url\)/);
 });
 
 test('remote browser lifecycle and DOM work are bounded', async () => {

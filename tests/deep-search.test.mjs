@@ -1134,12 +1134,12 @@ test('the browser tier can run through a remote worker when local Chrome is abse
   // shape, so fetch-page and the engine are untouched — and the PR #60 skip
   // now only fires when NEITHER local Chrome nor a remote worker exists.
   const browser = await readFile(new URL('../lib/deep-search/browser.ts', import.meta.url), 'utf8');
-  assert.match(browser, /const value = remote \? await remoteHealthy\(remote\) : false/);
+  assert.match(browser, /const value = remote\.ok \? await remoteHealthy\(remote\) : false/);
   assert.match(browser, /remoteCircuitOpenUntil/);
   assert.match(browser, /return fetchWithRemoteBrowser\(url, signal\)/);
   // Probe URLs carry client names: the worker address must be public HTTPS,
   // enforced at use as well as at save, and responses are size-capped.
-  assert.match(browser, /assertPublicHttpsUrl\(cfg\.remote_url\)/);
+  assert.match(browser, /assertPublicHttpsUrl\(classified\.url\)/);
   assert.match(browser, /readResponseText\(res, MAX_RENDERED_HTML_BYTES/);
 
   const settings = await readFile(
