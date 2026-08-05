@@ -3,6 +3,7 @@ import { getSetting, setSetting } from '@/lib/settings';
 import { logActivity } from '@/lib/activity';
 import { logDebug, errorMessage } from '@/lib/debug-log';
 import { parseCallScalerPage } from '@/lib/callscaler-page';
+import { parseAllowedNumbers, isTrackingNumberAllowed } from '@/lib/callscaler-filter';
 import { readResponseText } from '@/lib/request-limits';
 
 const API_BASE = 'https://callscaler.com/api/v1';
@@ -104,6 +105,23 @@ export async function processCallScalerCall(payload: Record<string, any>): Promi
   const supabase = createAdminClient();
   const callId = String(payload.call_id ?? payload.id ?? '');
   if (!callId) throw new Error('CallScaler payload has no call_id');
+
+  // Tracking-number allowlist (Admin → Integrations → CallScaler). When the
+  // admin lists specific numbers, only INCOMING calls that arrived on one of
+  // them are imported — every other call is dropped here, before it touches the
+  // calls table or creates a contact. A blank list imports all calls (the
+  // unchanged default). Both ingestion paths — the post-call webhook and the
+  // cron backfill — reach this function, so this one gate covers them both.
+  const { allowed_tracking_numbers } = await getSetting<{ allowed_tracking_numbers?: string }>(
+    'callscaler'
+  );
+  const allowedNumbers = parseAllowedNumbers(allowed_tracking_numbers);
+  if (allowedNumbers.size > 0) {
+    const isOutbound = payload.direction === 'outbound';
+    if (isOutbound || !isTrackingNumberAllowed(payload.tracking_number, allowedNumbers)) {
+      return { callId, duplicate: false, skipped: 'number_not_allowed' };
+    }
+  }
 
   const { error: insertError } = await supabase.from('calls').upsert(
     {
