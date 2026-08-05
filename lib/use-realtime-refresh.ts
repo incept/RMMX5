@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import { createClient } from '@/lib/supabase/client';
 
 /**
@@ -29,6 +29,17 @@ export function useRealtimeRefresh(
   const cb = useRef(refresh);
   cb.current = refresh;
 
+  // A per-instance suffix keeps every call site's channel topic unique. Supabase
+  // dedupes channels by topic — RealtimeClient.channel() returns an EXISTING
+  // channel for a repeated topic — so two components watching the same table
+  // (e.g. the Sidebar unread badge and the inbox list, both on `email_messages`)
+  // would otherwise share one channel object. Whichever mounts second would then
+  // call `.on('postgres_changes', …)` on the already-subscribed channel, which
+  // supabase throws on ("cannot add … callbacks after `subscribe()`"), and the
+  // uncaught error tears down that page's React tree. Unique topics let both
+  // subscribe independently; both still receive the row events.
+  const instanceId = useId();
+
   useEffect(() => {
     const supabase = createClient();
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -44,7 +55,7 @@ export function useRealtimeRefresh(
       }, debounceMs);
     };
 
-    const channel = supabase.channel(`ui-refresh:${key}`);
+    const channel = supabase.channel(`ui-refresh:${key}:${instanceId}`);
     for (const table of list) {
       channel.on('postgres_changes', { event: '*', schema: 'public', table }, scheduleRefresh);
     }
@@ -54,5 +65,5 @@ export function useRealtimeRefresh(
       if (timer) clearTimeout(timer);
       void supabase.removeChannel(channel);
     };
-  }, [key, debounceMs]);
+  }, [key, debounceMs, instanceId]);
 }
