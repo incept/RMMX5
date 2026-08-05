@@ -2320,6 +2320,31 @@ test('main views subscribe to Realtime changes with a debounced refetch', async 
   }
 });
 
+test('realtime channels are per-instance, so two subscribers to one table cannot collide', async () => {
+  // Regression: supabase dedupes channels by topic (RealtimeClient.channel
+  // returns an existing channel for a repeated topic), and RealtimeChannel.on()
+  // throws if a `postgres_changes` binding is added after subscribe(). The
+  // Sidebar (mounted by the app layout on every page) and the inbox page BOTH
+  // subscribe to `email_messages`; a shared topic made the inbox's mount reuse
+  // the Sidebar's already-subscribed channel and throw inside the effect,
+  // tearing down the inbox tree ("flashes then blank"). A per-instance topic
+  // suffix keeps them separate; both still receive the row events.
+  const hook = await readFile(new URL('../lib/use-realtime-refresh.ts', import.meta.url), 'utf8');
+  assert.match(hook, /useId/, 'derives a per-instance id');
+  assert.match(
+    hook,
+    /channel\(`ui-refresh:\$\{key\}:\$\{instanceId\}`\)/,
+    'channel topic is unique per hook instance'
+  );
+  assert.match(hook, /\[key, debounceMs, instanceId\]/, 'instanceId is in the effect deps');
+
+  // The two call sites that share a table — the exact collision this guards.
+  const sidebar = await readFile(new URL('../components/Sidebar.tsx', import.meta.url), 'utf8');
+  const inbox = await readFile(new URL('../app/(app)/inbox/page.tsx', import.meta.url), 'utf8');
+  assert.match(sidebar, /useRealtimeRefresh\('email_messages'/, 'sidebar watches email_messages');
+  assert.match(inbox, /useRealtimeRefresh\('email_messages'/, 'inbox watches email_messages');
+});
+
 test('confirming a deep-search link places it in a numbered removal slot', async () => {
   const migration = await readFile(
     new URL('../supabase/migrations/0033_confirm_fills_link_slot.sql', import.meta.url),
