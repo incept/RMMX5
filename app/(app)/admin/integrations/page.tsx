@@ -114,6 +114,11 @@ const SECTIONS: { key: string; title: string; hint: string; fields: SectionField
     fields: [
       { key: 'api_key', label: 'API key', secret: true, placeholder: 'cs_key_…' },
       { key: 'webhook_secret', label: 'Webhook secret', secret: true },
+      {
+        key: 'allowed_tracking_numbers',
+        label: 'Only import calls to these numbers (comma-separated; blank = all)',
+        placeholder: '18134218334, 18446847468',
+      },
     ],
   },
   {
