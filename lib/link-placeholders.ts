@@ -15,6 +15,30 @@ export function templateUsesLinks(...texts: (string | null | undefined)[]): bool
   return texts.some((t) => !!t && /\{\{\s*links?\d*\s*\}\}/i.test(t));
 }
 
+/**
+ * Build the {{link N}} / {{links}} substitution vars from a contact's link rows.
+ * Pure (no DB), so the same mapping serves the send-time resolver AND the
+ * client-side compose preview. Only http(s) URLs are kept; {{links}} is every
+ * LIVE link joined by newlines, in position order.
+ */
+export function linkVarsFromRows(
+  rows:
+    | { position: number; url: string | null | undefined; status?: string | null }[]
+    | null
+    | undefined
+): Record<string, string> {
+  const vars: Record<string, string> = {};
+  const live: string[] = [];
+  for (const l of rows ?? []) {
+    const url = String(l.url ?? '').trim();
+    if (!/^https?:\/\//i.test(url)) continue; // only real web links
+    vars[`link${l.position}`] = url;
+    if (l.status === 'live') live.push(url);
+  }
+  vars.links = live.join('\n');
+  return vars;
+}
+
 export async function loadLinkPlaceholders(
   admin: Admin,
   contactId: string
@@ -25,17 +49,7 @@ export async function loadLinkPlaceholders(
     .eq('contact_id', contactId)
     .order('position');
   if (error) throw new Error(`Could not load contact links: ${error.message}`);
-
-  const vars: Record<string, string> = {};
-  const live: string[] = [];
-  for (const l of data ?? []) {
-    const url = String(l.url ?? '').trim();
-    if (!/^https?:\/\//i.test(url)) continue; // only real web links
-    vars[`link${l.position}`] = url;
-    if (l.status === 'live') live.push(url);
-  }
-  vars.links = live.join('\n');
-  return vars;
+  return linkVarsFromRows(data);
 }
 
 /** Resolve link placeholders for many recipients with one database read. */

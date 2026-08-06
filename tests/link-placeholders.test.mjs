@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { templateUsesLinks, loadLinkPlaceholders } from '../lib/link-placeholders.ts';
+import {
+  templateUsesLinks,
+  loadLinkPlaceholders,
+  linkVarsFromRows,
+} from '../lib/link-placeholders.ts';
 
 const read = (p) => readFile(new URL(p, import.meta.url), 'utf8');
 
@@ -64,4 +68,38 @@ test('the editor offers a link-placeholder dropdown; email surfaces pass tokens'
   assert.match(shared, /export const LINK_PLACEHOLDERS/);
   const mk = await read('../app/(app)/marketing/page.tsx');
   assert.match(mk, /linkPlaceholders=\{LINK_PLACEHOLDERS\}/);
+});
+
+test('linkVarsFromRows maps positions, keeps live-only {{links}}, http(s)-only', () => {
+  const vars = linkVarsFromRows([
+    { position: 1, url: 'https://a.example', status: 'live' },
+    { position: 2, url: 'http://b.example', status: 'removed' },
+    { position: 3, url: 'javascript:alert(1)', status: 'live' }, // dropped
+    { position: 4, url: '', status: 'live' }, // dropped
+    { position: 5, url: '  https://c.example  ', status: 'live' }, // trimmed + kept
+  ]);
+  assert.equal(vars.link1, 'https://a.example');
+  assert.equal(vars.link2, 'http://b.example');
+  assert.equal(vars.link3, undefined);
+  assert.equal(vars.link4, undefined);
+  assert.equal(vars.link5, 'https://c.example');
+  // {{links}} = live http(s) links only, newline-joined, in position order.
+  assert.equal(vars.links, 'https://a.example\nhttps://c.example');
+});
+
+test('linkVarsFromRows tolerates empty / nullish input', () => {
+  assert.deepEqual(linkVarsFromRows([]), { links: '' });
+  assert.deepEqual(linkVarsFromRows(null), { links: '' });
+  assert.deepEqual(linkVarsFromRows(undefined), { links: '' });
+});
+
+test('the one-off SMS path resolves deep-search links and the composer inserts them', async () => {
+  const route = await read('../app/api/contacts/[id]/sms/route.ts');
+  assert.match(route, /withLinkPlaceholders\(admin, contact, rawBody\)/); // resolved at send
+  assert.match(route, /renderTemplate\(rawBody, enriched\)/);
+
+  const panel = await read('../components/ContactPanel.tsx');
+  assert.match(panel, /linkVarsFromRows\(links\)/); // preview/counter enriched
+  assert.match(panel, /\.\.\.linkVars/);
+  assert.match(panel, /Insert deep-search link…/); // composer insert control
 });

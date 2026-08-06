@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/api-auth';
 import { createAdminClient } from '@/lib/supabase/server';
 import { renderTemplate } from '@/lib/render-template';
+import { withLinkPlaceholders } from '@/lib/link-placeholders';
 import { sendSms } from '@/lib/integrations/textlink';
 import { logActivity } from '@/lib/activity';
 import { readJsonBody } from '@/lib/request-limits';
@@ -54,7 +55,11 @@ export async function POST(request: Request, { params }: Params) {
     );
   }
 
-  const text = renderTemplate(rawBody, contact);
+  // Resolve {{link1}}..{{links}} from the contact's deep-search links first, then
+  // the {{name}}/{{city}}/... fields. withLinkPlaceholders only reads the DB when
+  // the body actually references a link, so a plain text costs nothing extra.
+  const enriched = await withLinkPlaceholders(admin, contact, rawBody);
+  const text = renderTemplate(rawBody, enriched);
 
   // A stable delivery key dedupes a double-submit (double-click, retried request):
   // the unique index on sms_messages.delivery_key rejects the second insert, so a

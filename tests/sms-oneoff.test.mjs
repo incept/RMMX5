@@ -31,7 +31,7 @@ test('smsSegmentInfo treats GSM extension characters as two septets', () => {
 test('the one-off SMS route sends synchronously, admin-only, with placeholders', async () => {
   const route = await read('../app/api/contacts/[id]/sms/route.ts');
   assert.match(route, /requireAdmin/); // billed action, admin-gated like one-off email
-  assert.match(route, /renderTemplate\(rawBody, contact\)/); // {{placeholders}} rendered
+  assert.match(route, /renderTemplate\(rawBody, enriched\)/); // {{placeholders}} rendered (link-enriched)
   assert.match(route, /from\('sms_messages'\)/); // recorded for history
   assert.match(route, /sendSms\(/); // actually delivers (synchronous)
   assert.match(route, /logActivity/); // mirrored to the contact timeline
@@ -43,6 +43,6 @@ test('the contact panel exposes an SMS tab wired to the route', async () => {
   assert.match(panel, /'Email', 'SMS', 'Calls'/); // new tab in the tab bar
   assert.match(panel, /\/api\/contacts\/\$\{contactId\}\/sms/); // posts to the send route
   assert.match(panel, /insertSmsPlaceholder/); // one-click placeholder insert
-  assert.match(panel, /renderTemplate\(smsBody, contact/); // live per-contact preview
+  assert.match(panel, /renderTemplate\(smsBody,/); // live per-contact preview
   assert.match(panel, /smsSegmentInfo/); // character/segment counter
 });

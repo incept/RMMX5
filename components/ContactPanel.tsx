@@ -8,6 +8,7 @@ import { useMyRole } from '@/lib/use-my-role';
 import RichTextEditor, { type LinkPlaceholder } from '@/components/RichTextEditor';
 import { renderTemplate } from '@/lib/render-template';
 import { smsSegmentInfo } from '@/lib/sms-format';
+import { linkVarsFromRows } from '@/lib/link-placeholders';
 import { uploadEmailImage } from '@/lib/email-image-upload';
 import { framedEmail } from '@/lib/email-frame';
 
@@ -769,6 +770,11 @@ export default function ContactPanel({
     }
     return items;
   }, [links]);
+
+  // Client-side copy of the send-time link vars ({{link N}}, {{links}}), so the
+  // SMS preview and segment counter show real URLs instead of blanks. Mirrors
+  // the server resolver via the shared linkVarsFromRows.
+  const linkVars = useMemo(() => linkVarsFromRows(links), [links]);
 
   async function sendEmail() {
     if (!compose.subject || !compose.html) return alert('Subject and body required');
@@ -2241,13 +2247,30 @@ export default function ContactPanel({
                         </button>
                       ))}
                     </div>
+                    {linkPlaceholders.length > 0 && (
+                      <select
+                        className="input"
+                        value=""
+                        onChange={(e) => {
+                          if (e.target.value) insertSmsPlaceholder(e.target.value);
+                          e.currentTarget.value = '';
+                        }}
+                      >
+                        <option value="">Insert deep-search link…</option>
+                        {linkPlaceholders.map((p) => (
+                          <option key={p.token + p.label} value={p.token}>
+                            {p.label}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                     {smsBody.trim() && (
                       <div className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-2 dark:bg-gray-50">
                         <div className="mb-0.5 text-xs font-medium text-gray-400">
                           Preview for {contact.name || 'this contact'}
                         </div>
                         <div className="whitespace-pre-wrap break-words text-sm text-gray-800">
-                          {renderTemplate(smsBody, contact ?? {})}
+                          {renderTemplate(smsBody, { ...(contact ?? {}), ...linkVars })}
                         </div>
                       </div>
                     )}
@@ -2265,7 +2288,7 @@ export default function ContactPanel({
                         </span>
                       )}
                       {(() => {
-                        const info = smsSegmentInfo(renderTemplate(smsBody, contact ?? {}));
+                        const info = smsSegmentInfo(renderTemplate(smsBody, { ...(contact ?? {}), ...linkVars }));
                         return (
                           <span className="ml-auto text-xs text-gray-400">
                             {info.chars} char{info.chars === 1 ? '' : 's'} · {info.segments}{' '}
