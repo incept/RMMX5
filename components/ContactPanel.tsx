@@ -7,10 +7,12 @@ import { NameSourceIcon } from '@/components/NameSourceIcon';
 import { useMyRole } from '@/lib/use-my-role';
 import RichTextEditor, { type LinkPlaceholder } from '@/components/RichTextEditor';
 import { renderTemplate } from '@/lib/render-template';
+import { smsSegmentInfo } from '@/lib/sms-format';
+import { linkVarsFromRows } from '@/lib/link-placeholders';
 import { uploadEmailImage } from '@/lib/email-image-upload';
 import { framedEmail } from '@/lib/email-frame';
 
-const TABS = ['Link Data', 'Contact Info', 'Email', 'Calls', 'Activity', 'Files', 'Notes'] as const;
+const TABS = ['Link Data', 'Contact Info', 'Email', 'SMS', 'Calls', 'Activity', 'Files', 'Notes'] as const;
 type Tab = (typeof TABS)[number];
 
 interface LinkSlot {
@@ -33,6 +35,16 @@ const AI_CATEGORY_STYLES: Record<string, string> = {
   spam: 'bg-red-100 text-red-700',
   wrong_number: 'bg-red-100 text-red-700',
 };
+
+// Contact fields offered as one-click {{placeholders}} in the SMS composer.
+// Each maps to a real contacts column so renderTemplate fills it (custom fields
+// still work if typed by hand). No {{first_name}} — contacts store a single name.
+const SMS_PLACEHOLDERS = [
+  { token: '{{name}}', label: 'Name' },
+  { token: '{{city}}', label: 'City' },
+  { token: '{{state}}', label: 'State' },
+  { token: '{{phone}}', label: 'Phone' },
+] as const;
 
 // A normal worker tick may be 5-15 minutes away. Poll slowly, only after an
 // operator starts a search, and stop after 20 minutes so an abandoned panel
@@ -86,6 +98,12 @@ export default function ContactPanel({
   const [note, setNote] = useState('');
   const [compose, setCompose] = useState({ subject: '', html: '', accountId: '', requestKey: '' });
   const [emailSent, setEmailSent] = useState(false);
+  // One-off SMS composer (SMS tab).
+  const [smsBody, setSmsBody] = useState('');
+  const [smsMessages, setSmsMessages] = useState<any[]>([]);
+  const [smsSent, setSmsSent] = useState(false);
+  const [smsRequestKey, setSmsRequestKey] = useState('');
+  const smsRef = useRef<HTMLTextAreaElement>(null);
   // Click a row in the email history to read the full message in a viewer.
   const [viewingMessage, setViewingMessage] = useState<any | null>(null);
   const [viewerImagesLoaded, setViewerImagesLoaded] = useState(false);
@@ -303,15 +321,26 @@ export default function ContactPanel({
     setCalls(data ?? []);
   }, [supabase, contactId]);
 
+  const loadSmsTab = useCallback(async () => {
+    const { data } = await supabase
+      .from('sms_messages')
+      .select('*')
+      .eq('contact_id', contactId)
+      .order('created_at', { ascending: false })
+      .limit(100);
+    setSmsMessages(data ?? []);
+  }, [supabase, contactId]);
+
   useEffect(() => {
     load();
   }, [load]);
   useEffect(() => {
     if (tab === 'Email') loadEmailTab();
+    if (tab === 'SMS') loadSmsTab();
     if (tab === 'Files') loadFiles();
     if (tab === 'Calls') loadCalls();
     if (tab === 'Link Data') loadCandidates();
-  }, [tab, loadEmailTab, loadFiles, loadCalls, loadCandidates]);
+  }, [tab, loadEmailTab, loadSmsTab, loadFiles, loadCalls, loadCandidates]);
 
   async function patchContact(patch: Record<string, any>) {
     setBusy('save');
@@ -742,6 +771,11 @@ export default function ContactPanel({
     return items;
   }, [links]);
 
+  // Client-side copy of the send-time link vars ({{link N}}, {{links}}), so the
+  // SMS preview and segment counter show real URLs instead of blanks. Mirrors
+  // the server resolver via the shared linkVarsFromRows.
+  const linkVars = useMemo(() => linkVarsFromRows(links), [links]);
+
   async function sendEmail() {
     if (!compose.subject || !compose.html) return alert('Subject and body required');
     // The single-send route requires a valid Idempotency-Key. Reuse one stable key
@@ -789,6 +823,49 @@ export default function ContactPanel({
     window.requestAnimationFrame(() =>
       composeRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     );
+  }
+
+  async function sendSmsMessage() {
+    if (!smsBody.trim()) return;
+    // Reuse one idempotency key across retries of this compose so a text that
+    // already went through is deduped; cleared on success for a fresh next send.
+    const requestKey = smsRequestKey || crypto.randomUUID();
+    if (!smsRequestKey) setSmsRequestKey(requestKey);
+    setBusy('sms');
+    setSmsSent(false);
+    const res = await fetch(`/api/contacts/${contactId}/sms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': requestKey },
+      body: JSON.stringify({ body: smsBody }),
+    });
+    setBusy(null);
+    if (res.ok) {
+      setSmsBody('');
+      setSmsRequestKey('');
+      setSmsSent(true);
+      loadSmsTab();
+      load(); // refresh the activity timeline
+      window.setTimeout(() => setSmsSent(false), 6000);
+    } else {
+      alert((await res.json()).error ?? 'Send failed');
+    }
+  }
+
+  // Insert a {{placeholder}} at the textarea cursor (or append if unfocused).
+  function insertSmsPlaceholder(token: string) {
+    const el = smsRef.current;
+    if (!el) {
+      setSmsBody((b) => b + token);
+      return;
+    }
+    const start = el.selectionStart ?? smsBody.length;
+    const end = el.selectionEnd ?? smsBody.length;
+    setSmsBody(smsBody.slice(0, start) + token + smsBody.slice(end));
+    window.requestAnimationFrame(() => {
+      el.focus();
+      const pos = start + token.length;
+      el.setSelectionRange(pos, pos);
+    });
   }
 
   async function addNote() {
@@ -2125,6 +2202,134 @@ export default function ContactPanel({
                   <div className="mt-2">{saveButton([])}</div>
                 </div>
               )}
+            </div>
+          )}
+
+          {tab === 'SMS' && (
+            <div className="space-y-5">
+              <div>
+                <div className="label">Text message</div>
+                {!contact?.phone ? (
+                  <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">
+                    No phone number on file. Add one in Contact Info to text this contact.
+                  </div>
+                ) : !isAdmin ? (
+                  <div className="text-sm text-gray-400">
+                    Sending texts is admin-only. The history below is read-only.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="text-xs text-gray-400">
+                      To{' '}
+                      <span className="font-medium text-gray-600 dark:text-gray-300">
+                        {contact.phone}
+                      </span>
+                    </div>
+                    <textarea
+                      ref={smsRef}
+                      className="input min-h-[110px] resize-y"
+                      maxLength={1600}
+                      placeholder="Type your message…  Insert a contact field with the buttons below."
+                      value={smsBody}
+                      onChange={(e) => setSmsBody(e.target.value)}
+                    />
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-xs text-gray-400">Insert:</span>
+                      {SMS_PLACEHOLDERS.map((p) => (
+                        <button
+                          key={p.token}
+                          type="button"
+                          className="btn py-0.5 text-xs"
+                          title={`Insert ${p.token}`}
+                          onClick={() => insertSmsPlaceholder(p.token)}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                    {linkPlaceholders.length > 0 && (
+                      <select
+                        className="input"
+                        value=""
+                        onChange={(e) => {
+                          if (e.target.value) insertSmsPlaceholder(e.target.value);
+                          e.currentTarget.value = '';
+                        }}
+                      >
+                        <option value="">Insert deep-search link…</option>
+                        {linkPlaceholders.map((p) => (
+                          <option key={p.token + p.label} value={p.token}>
+                            {p.label}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    {smsBody.trim() && (
+                      <div className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-2 dark:bg-gray-50">
+                        <div className="mb-0.5 text-xs font-medium text-gray-400">
+                          Preview for {contact.name || 'this contact'}
+                        </div>
+                        <div className="whitespace-pre-wrap break-words text-sm text-gray-800">
+                          {renderTemplate(smsBody, { ...(contact ?? {}), ...linkVars })}
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-3">
+                      <button
+                        className="btn btn-primary"
+                        disabled={busy === 'sms' || !smsBody.trim()}
+                        onClick={sendSmsMessage}
+                      >
+                        {busy === 'sms' ? 'Sending…' : 'Send text'}
+                      </button>
+                      {smsSent && (
+                        <span className="text-sm font-medium text-green-600 dark:text-green-400">
+                          ✓ Text sent
+                        </span>
+                      )}
+                      {(() => {
+                        const info = smsSegmentInfo(renderTemplate(smsBody, { ...(contact ?? {}), ...linkVars }));
+                        return (
+                          <span className="ml-auto text-xs text-gray-400">
+                            {info.chars} char{info.chars === 1 ? '' : 's'} · {info.segments}{' '}
+                            segment{info.segments === 1 ? '' : 's'}
+                            {info.encoding === 'UCS2' ? ' · unicode' : ''}
+                          </span>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <div className="label">History</div>
+                {smsMessages.length === 0 && (
+                  <div className="text-sm text-gray-400">No texts yet.</div>
+                )}
+                <div className="space-y-1.5">
+                  {smsMessages.map((m) => (
+                    <div key={m.id} className="rounded-lg border border-gray-100 px-3 py-2 text-sm">
+                      <div className="flex items-start gap-2">
+                        <span className="text-gray-400">
+                          {m.direction === 'inbound' ? '←' : '→'}
+                        </span>
+                        <span className="flex-1 whitespace-pre-wrap break-words">{m.body}</span>
+                        <span className="whitespace-nowrap text-xs text-gray-400">
+                          {new Date(m.created_at).toLocaleDateString()}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 flex gap-3 pl-5 text-xs text-gray-400">
+                        <span className={m.status === 'failed' ? 'text-red-600' : ''}>
+                          {m.status}
+                        </span>
+                        {m.campaign_id && <span>campaign</span>}
+                        {m.error && <span className="text-red-600">{m.error}</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 
